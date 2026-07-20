@@ -1,0 +1,21 @@
+services:
+  opencode:
+    build: .
+    container_name: jouyvote-opencode
+    # Isolation demandée par Angelo (modèle externe via OpenRouter, confiance limitée) :
+    # - Aucun accès au socket Docker de l'hôte (pas de docker-in-docker).
+    # - Aucun mode privileged, aucun --network host.
+    # - Seul le répertoire du projet est monté : lecture/écriture limitées à /workspace,
+    #   rien d'autre du système de fichiers hôte n'est visible depuis le conteneur.
+    # - Réseau bridge Docker par défaut : sortie internet nécessaire pour l'API OpenRouter,
+    #   mais aucune entrée (pas de port publié) et pas d'accès aux autres services de l'hôte.
+    volumes:
+      - ./:/workspace
+    working_dir: /workspace
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # le code doit pouvoir écrire dans /workspace
+    stdin_open: true
+    tty: true
