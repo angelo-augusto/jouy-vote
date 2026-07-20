@@ -7,15 +7,18 @@ services:
     # - Aucun mode privileged, aucun --network host.
     # - Seul le répertoire du projet est monté : lecture/écriture limitées à /workspace,
     #   rien d'autre du système de fichiers hôte n'est visible depuis le conteneur.
-    # - Réseau bridge Docker par défaut : sortie internet nécessaire pour l'API OpenRouter,
-    #   mais aucune entrée (pas de port publié) et pas d'accès aux autres services de l'hôte.
+    # - Réseau bridge Docker par défaut : sortie internet nécessaire pour l'API OpenRouter.
+    # - SEULE entrée exposée : SSH (port 2222→22), demandé par Angelo le 2026-07-20 pour un accès
+    #   portable si le Docker déménage sur un autre serveur — authentification par clé publique
+    #   uniquement (voir Dockerfile), pas de mot de passe, root désactivé dans sshd_config.
     volumes:
       - ./:/workspace
     working_dir: /workspace
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    ports:
+      - "2222:22"
     security_opt:
       - no-new-privileges:true
     read_only: false  # le code doit pouvoir écrire dans /workspace
-    stdin_open: true
-    tty: true
+    restart: unless-stopped
