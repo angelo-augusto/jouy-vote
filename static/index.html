@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vote Citoyen - Jouy</title>
+<style>
+  body { font-family: sans-serif; max-width: 600px; margin: 2em auto; padding: 0 1em; }
+  h2 { margin-top: 2em; }
+  form { display: flex; flex-direction: column; gap: 0.5em; }
+  label { font-weight: bold; }
+  input, button { padding: 0.5em; font-size: 1em; }
+  pre { background: #f4f4f4; padding: 0.5em; overflow-x: auto; }
+  .error { color: red; }
+  .success { color: green; }
+</style>
+</head>
+<body>
+<h1>Vote Citoyen — Jouy</h1>
+
+<h2>Inscription</h2>
+<form id="registerForm">
+  <label>Nom <input name="nom" required></label>
+  <label>Adresse <input name="adresse" required></label>
+  <label>Email <input name="email" type="email"></label>
+  <button type="submit">S'inscrire</button>
+</form>
+<pre id="registerResult"></pre>
+
+<h2>Voter</h2>
+<form id="voteForm">
+  <label>Jeton <input name="token" required></label>
+  <label>Question ID <input name="question_id" type="number" required></label>
+  <label>Choix <input name="choix" required></label>
+  <button type="submit">Voter</button>
+</form>
+<pre id="voteResult"></pre>
+
+<script>
+async function submitForm(formId, url, resultId) {
+  const form = document.getElementById(formId);
+  const result = document.getElementById(resultId);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(form));
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const body = await res.json();
+      result.className = res.ok ? "success" : "error";
+      result.textContent = JSON.stringify(body, null, 2);
+    } catch (err) {
+      result.className = "error";
+      result.textContent = "Erreur réseau : " + err.message;
+    }
+  });
+}
+submitForm("registerForm", "/register", "registerResult");
+submitForm("voteForm", "/vote", "voteResult");
+</script>
+</body>
+</html>

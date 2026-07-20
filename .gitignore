@@ -6,3 +6,5 @@ vote.db-wal
 vote.db-shm
 .env
 .opencode/
+.pytest_cache/
+uvicorn.log

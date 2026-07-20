@@ -22,3 +22,29 @@ services:
       - no-new-privileges:true
     read_only: false  # le code doit pouvoir écrire dans /workspace
     restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: jouyvote-web
+    # Conteneur de PRODUCTION, volontairement séparé du conteneur de dev/OpenCode ci-dessus —
+    # image minimale (pas de Node, pas d'OpenCode, pas de SSH), c'est LUI que le tunnel
+    # Cloudflare doit exposer publiquement sur jouyvote.fr, jamais le conteneur de dev.
+    environment:
+      - JOUY_ADMIN_KEY=${JOUY_ADMIN_KEY}
+      - JOUY_VOTE_PEPPER=${JOUY_VOTE_PEPPER}
+    volumes:
+      - jouyvote_data:/data
+    # Lié uniquement à l'interface loopback de l'hôte : le tunnel Cloudflare (cloudflared, hors
+    # conteneur) s'y connecte en local, aucune exposition directe au réseau extérieur en dehors
+    # du tunnel — c'est lui, pas ce port, qui doit être la seule porte d'entrée publique.
+    ports:
+      - "127.0.0.1:8000:8000"
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # écriture de la base SQLite dans /data (volume dédié)
+    restart: unless-stopped
+
+volumes:
+  jouyvote_data:

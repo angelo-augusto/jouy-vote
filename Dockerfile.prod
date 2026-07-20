@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+# Image de PRODUCTION, volontairement séparée du conteneur de dev/OpenCode (Dockerfile) :
+# rien de plus que ce qu'il faut pour faire tourner l'appli elle-même — pas de Node, pas
+# d'OpenCode, pas de SSH, pas d'outils de développement. Le conteneur exposé publiquement
+# via le tunnel Cloudflare doit avoir la plus petite surface possible.
+RUN groupadd -g 1002 app && useradd -u 1002 -g 1002 -ms /bin/bash app
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn
+
+COPY main.py .
+COPY static ./static
+# Répertoire dédié pour la base SQLite, monté en volume pour survivre aux redéploiements —
+# vote.db ne doit JAMAIS vivre dans l'image elle-même (perdu à chaque rebuild sinon).
+RUN mkdir -p /data && chown app:app /data
+
+USER app
+ENV DB_PATH=/data/vote.db
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

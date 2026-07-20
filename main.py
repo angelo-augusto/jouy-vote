@@ -11,9 +11,13 @@ from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "vote.db")
+# DB_PATH surchargeable par variable d'environnement pour la containerisation (le conteneur de
+# production monte un volume dédié à /data, séparé du code de l'appli — la base ne doit jamais
+# vivre dans l'image elle-même, perdue sinon à chaque redéploiement).
+DB_PATH = os.environ.get("DB_PATH") or os.path.join(os.path.dirname(__file__), "vote.db")
 ADMIN_KEY = os.environ.get("JOUY_ADMIN_KEY")
 if not ADMIN_KEY:
     raise RuntimeError(
@@ -33,8 +37,6 @@ app = FastAPI(title="Jouy Vote Citoyen")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
-
-
 @contextmanager
 def db():
     global _keepalive_conn
@@ -210,6 +212,9 @@ def results(question_id: int):
         "voted_tokens": [t["vote_token"] for t in tokens],
         "total": sum(r["n"] for r in rows),
     }
+
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 
 if __name__ == "__main__":
