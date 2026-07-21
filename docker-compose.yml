@@ -46,5 +46,20 @@ services:
     read_only: false  # écriture de la base SQLite dans /data (volume dédié)
     restart: unless-stopped
 
+  wiki:
+    image: dokuwiki/dokuwiki:latest
+    container_name: jouyvote-wiki
+    # DokuWiki (PHP/Apache) volontairement dans son propre conteneur, séparé de jouyvote-web
+    # (FastAPI) : deux runtimes différents, pas de raison de les mélanger. Exposé publiquement
+    # sur wiki.jouyvote.fr via le même tunnel Cloudflare que le site principal.
+    volumes:
+      - jouyvote_wiki_storage:/storage
+    ports:
+      - "127.0.0.1:8081:8080"
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
 volumes:
   jouyvote_data:
+  jouyvote_wiki_storage:
