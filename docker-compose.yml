@@ -13,6 +13,9 @@ services:
     #   uniquement (voir Dockerfile), pas de mot de passe, root désactivé dans sshd_config.
     volumes:
       - ./:/workspace
+      # Espace de stockage additionnel sur le grand disque (/mnt/stockage, 437G libres) plutôt
+      # que la racine (98% pleine) — demandé par Angelo le 2026-07-21.
+      - /mnt/stockage/jouyvote:/mnt/jouyvote
     working_dir: /workspace
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
