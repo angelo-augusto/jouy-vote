@@ -31,11 +31,17 @@ RUN curl -fsSL https://opencode.ai/install | bash \
 # OpenCode ne peut alors RIEN écrire dans /workspace ("Permission denied" trouvé en test réel).
 RUN groupadd -g 1002 coder && useradd -u 1002 -g 1002 -ms /bin/bash coder
 
-# Clé publique d'Angelo déjà utilisée pour SSH sur ce Khadas (~/.ssh/authorized_keys de l'hôte,
-# identité "angelo@Dell-Papa") — réutilisée telle quelle plutôt que d'en générer une nouvelle.
-# Authentification par clé UNIQUEMENT : mot de passe désactivé, root désactivé.
+# Clés publiques d'Angelo autorisées à se connecter en SSH : "angelo@Dell-Papa" (déjà utilisée
+# ailleurs sur ce Khadas) et "angelo-termius" (client mobile/Termius). Authentification par clé
+# UNIQUEMENT : mot de passe désactivé, root désactivé. Ce fichier n'est que le contenu INITIAL —
+# le répertoire /home/coder/.ssh est monté sur un volume Docker nommé (docker-compose.yml) qui
+# persiste indépendamment des recréations/rebuilds du conteneur ; toute clé ajoutée à chaud après
+# le premier démarrage survit désormais aux `docker compose up` suivants.
 RUN mkdir -p /home/coder/.ssh \
-    && echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbFlLzqqj3USqYAjrD9YrW/oVOTcZtM3Hvc0fP7aqm3 angelo@Dell-Papa" > /home/coder/.ssh/authorized_keys \
+    && printf '%s\n%s\n' \
+         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbFlLzqqj3USqYAjrD9YrW/oVOTcZtM3Hvc0fP7aqm3 angelo@Dell-Papa" \
+         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPrIO+2O7W+qvvHT2n2yaDZRsqy+/B1jXB1j0VJcUXvt angelo-termius" \
+         > /home/coder/.ssh/authorized_keys \
     && chown -R coder:coder /home/coder/.ssh \
     && chmod 700 /home/coder/.ssh \
     && chmod 600 /home/coder/.ssh/authorized_keys \

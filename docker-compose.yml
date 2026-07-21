@@ -16,6 +16,13 @@ services:
       # Espace de stockage additionnel sur le grand disque (/mnt/stockage, 437G libres) plutôt
       # que la racine (98% pleine) — demandé par Angelo le 2026-07-21.
       - /mnt/stockage/jouyvote:/mnt/jouyvote
+      # Volume dédié pour les clés SSH autorisées : sans ça, toute clé ajoutée à chaud (docker
+      # exec) vit dans la couche writable du conteneur et disparaît à la prochaine recréation
+      # (vécu le 2026-07-21 — la clé Termius ajoutée à chaud a été perdue en même temps que le
+      # mount /mnt/jouyvote ci-dessus). Un volume nommé, monté sur un répertoire non vide de
+      # l'image, est seedé automatiquement avec son contenu (la clé Dell-Papa du Dockerfile) au
+      # premier démarrage puis persiste indépendamment de toute recréation/rebuild suivant.
+      - jouyvote_ssh:/home/coder/.ssh
     working_dir: /workspace
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
@@ -66,3 +73,4 @@ services:
 volumes:
   jouyvote_data:
   jouyvote_wiki_storage:
+  jouyvote_ssh:
