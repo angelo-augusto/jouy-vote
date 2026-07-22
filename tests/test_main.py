@@ -13,6 +13,7 @@ main.init_db()
 from main import app, compute_identity_hash, compute_vote_token
 
 ADMIN_KEY = "test-admin-key-42"
+PASSWORD = "test-password-42"
 
 
 @pytest.fixture(autouse=True)
@@ -38,21 +39,152 @@ async def admin_question(client):
     return data["id"]
 
 
+@pytest.fixture
+async def registered_user(client):
+    body = {"nom": "Alice", "adresse": "1 Rue de la Mairie", "email": "alice@test.fr", "password": PASSWORD}
+    resp = await client.post("/register", json=body)
+    assert resp.status_code == 200
+    return resp.json()
+
+
+@pytest.fixture
+async def logged_in_user(client, registered_user):
+    resp = await client.post("/login", json={"email": "alice@test.fr", "password": PASSWORD})
+    assert resp.status_code == 200
+    return resp.json()
+
+
 @pytest.mark.anyio
-async def test_double_registration_rejected(client):
-    body = {"nom": "Alice", "adresse": "1 Rue de la Mairie"}
+async def test_register_success(client):
+    body = {"nom": "Alice", "adresse": "1 Rue de la Mairie", "email": "alice@test.fr", "password": PASSWORD}
+    resp = await client.post("/register", json=body)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "token" in data
+    assert "session_token" in data
+    assert "message" in data
+
+
+@pytest.mark.anyio
+async def test_register_double_rejected(client):
+    body = {"nom": "Alice", "adresse": "1 Rue de la Mairie", "email": "alice@test.fr", "password": PASSWORD}
     resp1 = await client.post("/register", json=body)
     assert resp1.status_code == 200
     resp2 = await client.post("/register", json=body)
     assert resp2.status_code == 409
-    detail = resp2.json().get("detail", "")
-    assert "déjà inscrite" in detail
+    assert "déjà inscrite" in resp2.json().get("detail", "")
+
+
+@pytest.mark.anyio
+async def test_login_success(client, registered_user):
+    resp = await client.post("/login", json={"email": "alice@test.fr", "password": PASSWORD})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "session_token" in data
+    assert data["nom"] == "Alice"
+    assert data["email"] == "alice@test.fr"
+
+
+@pytest.mark.anyio
+async def test_login_wrong_password(client, registered_user):
+    resp = await client.post("/login", json={"email": "alice@test.fr", "password": "wrong"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_login_unknown_email(client):
+    resp = await client.post("/login", json={"email": "unknown@test.fr", "password": PASSWORD})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_logout(client, logged_in_user):
+    session = logged_in_user["session_token"]
+    resp = await client.post("/logout", json={"session_token": session})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+_FORGOT_PASSWORD_DISABLED = (
+    "forgot-password/reset-password désactivés : la route renvoyait le reset_token "
+    "directement dans la réponse JSON faute d'envoi d'email, permettant une prise de "
+    "contrôle de compte par quiconque connaît l'email d'un inscrit. À réactiver avec ces "
+    "tests une fois un vrai envoi d'email branché."
+)
+
+
+@pytest.mark.skip(reason=_FORGOT_PASSWORD_DISABLED)
+@pytest.mark.anyio
+async def test_forgot_password(client, registered_user):
+    resp = await client.post("/forgot-password", json={"email": "alice@test.fr"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "reset_token" in data
+    assert data["message"] is not None
+
+
+@pytest.mark.skip(reason=_FORGOT_PASSWORD_DISABLED)
+@pytest.mark.anyio
+async def test_forgot_password_unknown_email(client):
+    resp = await client.post("/forgot-password", json={"email": "unknown@test.fr"})
+    assert resp.status_code == 200
+    assert "Si cet email existe" in resp.json()["message"]
+
+
+@pytest.mark.skip(reason=_FORGOT_PASSWORD_DISABLED)
+@pytest.mark.anyio
+async def test_reset_password(client, registered_user):
+    forgot = await client.post("/forgot-password", json={"email": "alice@test.fr"})
+    token = forgot.json()["reset_token"]
+    resp = await client.post("/reset-password", json={"token": token, "password": "new-password"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    login = await client.post("/login", json={"email": "alice@test.fr", "password": "new-password"})
+    assert login.status_code == 200
+
+
+@pytest.mark.skip(reason=_FORGOT_PASSWORD_DISABLED)
+@pytest.mark.anyio
+async def test_reset_password_expired_token(client, registered_user):
+    resp = await client.post("/reset-password", json={"token": "fake-token", "password": "new-password"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_unsubscribe(client, registered_user, logged_in_user):
+    session = logged_in_user["session_token"]
+    resp = await client.request("DELETE", "/unsubscribe", json={"session_token": session, "password": PASSWORD})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+@pytest.mark.anyio
+async def test_unsubscribe_wrong_password(client, logged_in_user):
+    session = logged_in_user["session_token"]
+    resp = await client.request("DELETE", "/unsubscribe", json={"session_token": session, "password": "wrong"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_unsubscribe_invalid_session(client, registered_user):
+    resp = await client.request("DELETE", "/unsubscribe", json={"session_token": "fake", "password": PASSWORD})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_double_registration_rejected(client):
+    body = {"nom": "Alice", "adresse": "1 Rue de la Mairie", "email": "alice@test.fr", "password": PASSWORD}
+    body2 = {"nom": "Alice", "adresse": "1 Rue de la Mairie", "email": "alice2@test.fr", "password": PASSWORD}
+    resp1 = await client.post("/register", json=body)
+    assert resp1.status_code == 200
+    resp2 = await client.post("/register", json=body2)
+    assert resp2.status_code == 409
 
 
 @pytest.mark.anyio
 async def test_double_registration_case_insensitive(client):
-    body1 = {"nom": "Alice", "adresse": "1 Rue de la Mairie"}
-    body2 = {"nom": "  alice  ", "adresse": "  1 rue de la mairie  "}
+    body1 = {"nom": "Alice", "adresse": "1 Rue de la Mairie", "email": "alice@test.fr", "password": PASSWORD}
+    body2 = {"nom": "  alice  ", "adresse": "  1 rue de la mairie  ", "email": "alice2@test.fr", "password": PASSWORD}
     resp1 = await client.post("/register", json=body1)
     assert resp1.status_code == 200
     resp2 = await client.post("/register", json=body2)
@@ -75,7 +207,7 @@ async def test_unknown_token_rejected_at_vote(client, admin_question):
 async def test_double_vote_rejected(client, admin_question):
     qid = admin_question
     reg = await client.post(
-        "/register", json={"nom": "Bob", "adresse": "2 Rue des Lys"}
+        "/register", json={"nom": "Bob", "adresse": "2 Rue des Lys", "email": "bob@test.fr", "password": PASSWORD}
     )
     token = reg.json()["token"]
     resp1 = await client.post(
@@ -95,7 +227,7 @@ async def test_full_workflow(client, admin_question):
     qid = admin_question
 
     reg = await client.post(
-        "/register", json={"nom": "Charlie", "adresse": "3 Place de l'Église"}
+        "/register", json={"nom": "Charlie", "adresse": "3 Place de l'Église", "email": "charlie@test.fr", "password": PASSWORD}
     )
     assert reg.status_code == 200
     token = reg.json()["token"]
@@ -118,7 +250,7 @@ async def test_full_workflow(client, admin_question):
 async def test_join_does_not_link_identity_to_vote(client, admin_question):
     qid = admin_question
     reg = await client.post(
-        "/register", json={"nom": "Denis", "adresse": "4 Rue du Secret"}
+        "/register", json={"nom": "Denis", "adresse": "4 Rue du Secret", "email": "denis@test.fr", "password": PASSWORD}
     )
     assert reg.status_code == 200
     token = reg.json()["token"]

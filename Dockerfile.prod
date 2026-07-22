@@ -11,7 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn
 
 COPY main.py .
-COPY static ./static
+COPY static_files ./static_files
 # Répertoire dédié pour la base SQLite, monté en volume pour survivre aux redéploiements —
 # vote.db ne doit JAMAIS vivre dans l'image elle-même (perdu à chaque rebuild sinon).
 RUN mkdir -p /data && chown app:app /data

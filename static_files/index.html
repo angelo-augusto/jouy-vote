@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jouy Vote Citoyen</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2em auto; padding: 0 1em; background: #f5f5f5; color: #222; }
+.card { background: #fff; border-radius: 8px; padding: 1.5em; margin-bottom: 1em; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
+h1 { text-align: center; font-size: 1.4em; margin: 0 0 1em; }
+h2 { font-size: 1.1em; margin: 0 0 .8em; }
+label { display: block; margin: .6em 0 .2em; font-weight: 600; font-size: .9em; }
+input { width: 100%; padding: .6em; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; }
+button { width: 100%; padding: .7em; border: none; border-radius: 4px; font-size: 1em; cursor: pointer; margin-top: .8em; }
+.btn-primary { background: #007bff; color: #fff; }
+.btn-primary:hover { background: #0056b3; }
+.btn-danger { background: #dc3545; color: #fff; }
+.btn-danger:hover { background: #b02a37; }
+.btn-link { background: none; color: #007bff; text-decoration: underline; padding: 0; margin: .5em 0 0; font-size: .9em; }
+.btn-link:hover { color: #0056b3; }
+.msg { padding: .6em; border-radius: 4px; margin: .6em 0; font-size: .9em; display: none; }
+.msg.error { display: block; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+.msg.success { display: block; background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+.info { font-size: .85em; color: #666; margin: .5em 0; }
+.hidden { display: none; }
+.nav { text-align: right; font-size: .85em; margin-bottom: 1em; }
+.nav a { color: #007bff; cursor: pointer; }
+.nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="nav" id="navBar">
+  <span id="navGreeting"></span> <a id="navLogout" class="hidden" onclick="logout()">Déconnexion</a>
+</div>
+<div class="card" id="pageLogin">
+  <h1>Jouy Vote Citoyen</h1>
+  <p class="info">Connectez-vous pour accéder à votre espace.</p>
+  <div id="loginMsg" class="msg"></div>
+  <label>Email</label>
+  <input type="email" id="loginEmail" placeholder="votre@email.fr">
+  <label>Mot de passe</label>
+  <input type="password" id="loginPassword" placeholder="••••••••">
+  <button class="btn-primary" onclick="login()">Connexion</button>
+  <button class="btn-link" onclick="showPage('register')">Pas encore inscrit ? Créer un compte</button>
+  <button class="btn-link" onclick="showPage('forgot')">Mot de passe oublié</button>
+</div>
+<div class="card hidden" id="pageRegister">
+  <h2>Inscription</h2>
+  <div id="registerMsg" class="msg"></div>
+  <label>Nom</label>
+  <input type="text" id="regNom" placeholder="Votre nom">
+  <label>Adresse</label>
+  <input type="text" id="regAdresse" placeholder="Votre adresse à Jouy">
+  <label>Email</label>
+  <input type="email" id="regEmail" placeholder="votre@email.fr">
+  <label>Mot de passe</label>
+  <input type="password" id="regPassword" placeholder="Au moins 6 caractères">
+  <button class="btn-primary" onclick="register()">Créer mon compte</button>
+  <button class="btn-link" onclick="showPage('login')">Déjà un compte ? Se connecter</button>
+</div>
+<div class="card hidden" id="pageForgot">
+  <h2>Mot de passe oublié</h2>
+  <div id="forgotMsg" class="msg"></div>
+  <label>Email</label>
+  <input type="email" id="forgotEmail" placeholder="votre@email.fr">
+  <button class="btn-primary" onclick="forgotPassword()">Envoyer le lien</button>
+  <button class="btn-link" onclick="showPage('login')">Retour à la connexion</button>
+</div>
+<div class="card hidden" id="pageReset">
+  <h2>Réinitialiser le mot de passe</h2>
+  <div id="resetMsg" class="msg"></div>
+  <label>Nouveau mot de passe</label>
+  <input type="password" id="resetPassword" placeholder="Au moins 6 caractères">
+  <button class="btn-primary" onclick="resetPassword()">Réinitialiser</button>
+  <button class="btn-link" onclick="showPage('login')">Retour à la connexion</button>
+</div>
+<div class="card hidden" id="pageDashboard">
+  <h2>Mon espace</h2>
+  <div id="dashMsg" class="msg"></div>
+  <p><strong>Nom :</strong> <span id="dashNom"></span></p>
+  <p><strong>Email :</strong> <span id="dashEmail"></span></p>
+  <hr>
+  <h2>Se désinscrire</h2>
+  <p class="info">Cette action supprime votre compte et vos votes. Elle est irréversible.</p>
+  <label>Confirmez votre mot de passe</label>
+  <input type="password" id="unsubPassword" placeholder="••••••••">
+  <button class="btn-danger" onclick="unsubscribe()">Supprimer mon compte</button>
+</div>
+<script>
+const API = '';
+function showPage(name) {
+  document.querySelectorAll('.card').forEach(e => e.classList.add('hidden'));
+  document.getElementById('page' + name.charAt(0).toUpperCase() + name.slice(1)).classList.remove('hidden');
+  document.querySelectorAll('.msg').forEach(e => { e.className = 'msg'; e.textContent = ''; });
+  document.querySelectorAll('input').forEach(e => e.value = '');
+}
+function showMsg(id, text, type) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = 'msg ' + type;
+}
+async function api(path, body) {
+  const res = await fetch(API + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Erreur serveur');
+  return data;
+}
+function updateNav() {
+  const session = localStorage.getItem('session_token');
+  const nom = localStorage.getItem('user_nom');
+  const email = localStorage.getItem('user_email');
+  document.getElementById('navGreeting').textContent = session ? nom + ' (' + email + ')' : '';
+  document.getElementById('navLogout').classList.toggle('hidden', !session);
+}
+async function login() {
+  const email = document.getElementById('loginEmail').value;
+  const password = document.getElementById('loginPassword').value;
+  try {
+    const data = await api('/login', { email, password });
+    localStorage.setItem('session_token', data.session_token);
+    localStorage.setItem('user_nom', data.nom);
+    localStorage.setItem('user_email', data.email);
+    updateNav();
+    showDashboard();
+  } catch (e) {
+    showMsg('loginMsg', e.message, 'error');
+  }
+}
+async function register() {
+  const nom = document.getElementById('regNom').value;
+  const adresse = document.getElementById('regAdresse').value;
+  const email = document.getElementById('regEmail').value;
+  const password = document.getElementById('regPassword').value;
+  if (password.length < 6) { showMsg('registerMsg', 'Le mot de passe doit faire au moins 6 caractères.', 'error'); return; }
+  try {
+    await api('/register', { nom, adresse, email, password });
+    showMsg('registerMsg', 'Inscription réussie ! Vous pouvez maintenant vous connecter.', 'success');
+    setTimeout(() => showPage('login'), 1500);
+  } catch (e) {
+    showMsg('registerMsg', e.message, 'error');
+  }
+}
+async function logout() {
+  const session_token = localStorage.getItem('session_token');
+  if (session_token) await api('/logout', { session_token }).catch(() => {});
+  localStorage.removeItem('session_token');
+  localStorage.removeItem('user_nom');
+  localStorage.removeItem('user_email');
+  updateNav();
+  showPage('login');
+  showMsg('loginMsg', 'Vous êtes déconnecté.', 'success');
+}
+async function forgotPassword() {
+  const email = document.getElementById('forgotEmail').value;
+  try {
+    const data = await api('/forgot-password', { email });
+    document.getElementById('forgotMsg').textContent = data.message;
+    if (data.reset_token) {
+      document.getElementById('forgotMsg').textContent += ' (token: ' + data.reset_token + ')';
+      localStorage.setItem('reset_token', data.reset_token);
+      document.getElementById('forgotMsg').className = 'msg success';
+      setTimeout(() => { showPage('reset'); }, 1000);
+    } else {
+      document.getElementById('forgotMsg').className = 'msg success';
+    }
+  } catch (e) {
+    showMsg('forgotMsg', e.message, 'error');
+  }
+}
+async function resetPassword() {
+  const token = localStorage.getItem('reset_token');
+  const password = document.getElementById('resetPassword').value;
+  if (!token) { showMsg('resetMsg', 'Token de réinitialisation manquant.', 'error'); return; }
+  if (password.length < 6) { showMsg('resetMsg', 'Le mot de passe doit faire au moins 6 caractères.', 'error'); return; }
+  try {
+    await api('/reset-password', { token, password });
+    localStorage.removeItem('reset_token');
+    showMsg('resetMsg', 'Mot de passe réinitialisé ! Vous pouvez vous connecter.', 'success');
+    setTimeout(() => showPage('login'), 1500);
+  } catch (e) {
+    showMsg('resetMsg', e.message, 'error');
+  }
+}
+function showDashboard() {
+  document.getElementById('dashNom').textContent = localStorage.getItem('user_nom');
+  document.getElementById('dashEmail').textContent = localStorage.getItem('user_email');
+  showPage('dashboard');
+}
+async function unsubscribe() {
+  const password = document.getElementById('unsubPassword').value;
+  const session_token = localStorage.getItem('session_token');
+  if (!session_token) { showMsg('dashMsg', 'Session invalide.', 'error'); return; }
+  if (!confirm('Êtes-vous sûr de vouloir supprimer définitivement votre compte ?')) return;
+  try {
+    const res = await fetch(API + '/unsubscribe', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_token, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Erreur');
+    localStorage.removeItem('session_token');
+    localStorage.removeItem('user_nom');
+    localStorage.removeItem('user_email');
+    updateNav();
+    showPage('login');
+    showMsg('loginMsg', data.message, 'success');
+  } catch (e) {
+    showMsg('dashMsg', e.message, 'error');
+  }
+}
+updateNav();
+if (localStorage.getItem('session_token')) showDashboard();
+</script>
+</body>
+</html>

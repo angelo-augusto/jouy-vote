@@ -45,7 +45,7 @@ services:
       - JOUY_ADMIN_KEY=${JOUY_ADMIN_KEY}
       - JOUY_VOTE_PEPPER=${JOUY_VOTE_PEPPER}
     volumes:
-      - jouyvote_data:/data
+      - /mnt/stockage/jouyvote/data:/data
     # Lié uniquement à l'interface loopback de l'hôte : le tunnel Cloudflare (cloudflared, hors
     # conteneur) s'y connecte en local, aucune exposition directe au réseau extérieur en dehors
     # du tunnel — c'est lui, pas ce port, qui doit être la seule porte d'entrée publique.
@@ -71,6 +71,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  jouyvote_data:
   jouyvote_wiki_storage:
   jouyvote_ssh:
