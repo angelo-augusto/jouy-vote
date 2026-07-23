@@ -51,6 +51,21 @@ REFERRAL_MAX = 5
 # qu'en dur pour pouvoir rouvrir sans redéployer de code le moment venu.
 REGISTRATIONS_OPEN = os.environ.get("REGISTRATIONS_OPEN", "false").lower() == "true"
 
+# Chatbot v1 (voir wiki.jouyvote.fr/themes:chatbot) — même fournisseur que le conteneur dev
+# (OpenRouter/DeepSeek), pas de nouvelle dépendance HTTP (urllib, comme send_reset_email).
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "deepseek/deepseek-v4-flash")
+CHAT_SYSTEM_PROMPT = (
+    "Tu es l'assistant citoyen de Jouy Vote Citoyen, un outil de démocratie participative locale "
+    "pour les habitants de Jouy (28). Tu aides les joviens à formuler clairement une opinion ou "
+    "une doléance, sans jamais trahir le sens de ce qu'ils veulent dire — tu proposes une "
+    "reformulation, tu ne publies jamais rien toi-même, c'est toujours la personne qui décide. "
+    "Pour toute question factuelle sur les décisions ou comptes-rendus du conseil municipal : tu "
+    "n'as PAS ENCORE accès à ces documents dans cette première version du site — dis-le "
+    "clairement plutôt que d'inventer une réponse. Reste bref, concret, et dans le sujet de la "
+    "vie municipale de Jouy."
+)
+
 _keepalive_conn: sqlite3.Connection | None = None
 
 app = FastAPI(title="Jouy Vote Citoyen")
@@ -128,6 +143,21 @@ def init_db():
                 referrer_token TEXT NOT NULL,
                 invitee_email TEXT NOT NULL,
                 used INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        # Minimisation par défaut (voir wiki.jouyvote.fr/themes:chatbot-fonctionnalites) : le
+        # chatbot ne garde RIEN d'une conversation tant que l'utilisateur ne le demande pas
+        # explicitement — cette table ne contient QUE des résumés validés par leur auteur, jamais
+        # le verbatim d'un échange. owner_token = identities.token en clair (pas dérivé/peppé
+        # comme vote_token) : contrairement au vote, un résumé n'est JAMAIS publié ni listé
+        # publiquement, uniquement accessible à son auteur via son propre session_token — le
+        # modèle de menace (désanonymisation par recoupement public) ne s'applique pas ici.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS chat_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_token TEXT NOT NULL,
+                summary TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )"""
         )
@@ -232,6 +262,35 @@ class ReferralInviteRequest(BaseModel):
 
 
 class ReferralStatusRequest(BaseModel):
+    session_token: str
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    session_token: str
+    message: str
+    history: list[ChatMessage] = []
+
+
+class ChatSummarizeRequest(BaseModel):
+    session_token: str
+    history: list[ChatMessage]
+
+
+class ChatSaveSummaryRequest(BaseModel):
+    session_token: str
+    summary: str
+
+
+class ChatSummariesRequest(BaseModel):
+    session_token: str
+
+
+class ChatDeleteSummaryRequest(BaseModel):
     session_token: str
 
 
@@ -343,6 +402,30 @@ def send_referral_invite_email(to_email: str, referrer_nom: str, invite_token: s
             return 200 <= resp.status < 300
     except urllib.error.URLError:
         return False
+
+
+def call_chat_llm(messages: list[dict]) -> str | None:
+    """Appelle le modèle de chat via l'API OpenRouter (même fournisseur que le conteneur dev).
+    Ne lève jamais : retourne None en cas d'échec (clé absente, erreur réseau, réponse
+    inattendue), à charge de l'appelant de répondre proprement à l'utilisateur."""
+    if not OPENROUTER_API_KEY:
+        return None
+    body = json.dumps({"model": CHAT_MODEL, "messages": messages}).encode()
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        return data["choices"][0]["message"]["content"]
+    except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError):
+        return None
 
 
 def fetch_wiki_home_content() -> str:
@@ -527,6 +610,89 @@ def referral_status(req: ReferralStatusRequest):
         "max": REFERRAL_MAX,
         "invites": [{"email": i["invitee_email"], "used": bool(i["used"])} for i in invites],
     }
+
+
+def _require_identity(session_token: str) -> str:
+    """Résout un session_token en token d'identité, ou lève 401. Factorisé car réutilisé par
+    toutes les routes /chat/*, contrairement au reste de l'API qui a chacune sa propre requête
+    (gardé identique ici pour ne pas dupliquer 5 fois la même vérification)."""
+    with db() as conn:
+        row = conn.execute("SELECT token FROM identities WHERE session_token=?", (session_token,)).fetchone()
+    if not row:
+        raise HTTPException(401, "Session invalide.")
+    return row["token"]
+
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    _require_identity(req.session_token)
+    messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+    for m in req.history[-20:]:  # borne défensive, pas de limite fonctionnelle attendue en usage réel
+        messages.append({"role": m.role, "content": m.content})
+    messages.append({"role": "user", "content": req.message})
+    reply = call_chat_llm(messages)
+    if reply is None:
+        raise HTTPException(503, "Le chatbot est momentanément indisponible.")
+    return {"reply": reply}
+
+
+@app.post("/chat/summarize")
+def chat_summarize(req: ChatSummarizeRequest):
+    _require_identity(req.session_token)
+    if not req.history:
+        raise HTTPException(400, "Rien à résumer.")
+    convo_text = "\n".join(f"{m.role}: {m.content}" for m in req.history)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Résume cette conversation en 2-3 phrases factuelles, à la première personne, "
+                "sans détail superflu. Réponds uniquement avec le résumé, rien d'autre."
+            ),
+        },
+        {"role": "user", "content": convo_text},
+    ]
+    summary = call_chat_llm(messages)
+    if summary is None:
+        raise HTTPException(503, "Résumé momentanément indisponible.")
+    # Le résumé n'est PAS sauvegardé ici : c'est une proposition, l'utilisateur doit encore la
+    # valider (ou la modifier) avant tout appel à /chat/save-summary — voir principe de
+    # minimisation par défaut sur le wiki.
+    return {"summary": summary}
+
+
+@app.post("/chat/save-summary")
+def chat_save_summary(req: ChatSaveSummaryRequest):
+    owner_token = _require_identity(req.session_token)
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO chat_summaries (owner_token, summary) VALUES (?, ?)",
+            (owner_token, req.summary),
+        )
+    return {"ok": True, "id": cur.lastrowid}
+
+
+@app.post("/chat/summaries")
+def chat_list_summaries(req: ChatSummariesRequest):
+    owner_token = _require_identity(req.session_token)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, summary, created_at FROM chat_summaries WHERE owner_token=? ORDER BY created_at DESC",
+            (owner_token,),
+        ).fetchall()
+    return {"summaries": [dict(r) for r in rows]}
+
+
+@app.delete("/chat/summaries/{summary_id}")
+def chat_delete_summary(summary_id: int, req: ChatDeleteSummaryRequest):
+    owner_token = _require_identity(req.session_token)
+    with db() as conn:
+        cur = conn.execute(
+            "DELETE FROM chat_summaries WHERE id=? AND owner_token=?", (summary_id, owner_token)
+        )
+    if cur.rowcount == 0:
+        raise HTTPException(404, "Résumé introuvable.")
+    return {"ok": True}
 
 
 @app.post("/forgot-password")

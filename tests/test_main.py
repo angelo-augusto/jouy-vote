@@ -719,6 +719,139 @@ async def test_referral_status_invalid_session(client):
     assert resp.status_code == 401
 
 
+@pytest.fixture
+def mocked_chat_llm(monkeypatch):
+    """Intercepte call_chat_llm au lieu d'appeler OpenRouter : capture les messages envoyés,
+    retourne une réponse fixe."""
+    calls = []
+
+    def fake_call(messages):
+        calls.append(messages)
+        return "réponse simulée du chatbot"
+
+    monkeypatch.setattr(main, "call_chat_llm", fake_call)
+    return calls
+
+
+@pytest.mark.anyio
+async def test_chat_requires_valid_session(client):
+    resp = await client.post("/chat", json={"session_token": "fake", "message": "bonjour"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_chat_success(client, logged_in_user, mocked_chat_llm):
+    resp = await client.post(
+        "/chat",
+        json={"session_token": logged_in_user["session_token"], "message": "bonjour"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reply"] == "réponse simulée du chatbot"
+    sent_messages = mocked_chat_llm[0]
+    assert sent_messages[0]["role"] == "system"
+    assert sent_messages[-1] == {"role": "user", "content": "bonjour"}
+
+
+@pytest.mark.anyio
+async def test_chat_includes_history(client, logged_in_user, mocked_chat_llm):
+    history = [{"role": "user", "content": "premier message"}, {"role": "assistant", "content": "première réponse"}]
+    await client.post(
+        "/chat",
+        json={"session_token": logged_in_user["session_token"], "message": "deuxième message", "history": history},
+    )
+    sent_messages = mocked_chat_llm[0]
+    assert {"role": "user", "content": "premier message"} in sent_messages
+    assert {"role": "assistant", "content": "première réponse"} in sent_messages
+
+
+@pytest.mark.anyio
+async def test_chat_llm_unavailable_returns_503(client, logged_in_user, monkeypatch):
+    monkeypatch.setattr(main, "call_chat_llm", lambda messages: None)
+    resp = await client.post(
+        "/chat", json={"session_token": logged_in_user["session_token"], "message": "bonjour"}
+    )
+    assert resp.status_code == 503
+
+
+@pytest.mark.anyio
+async def test_chat_summarize_requires_history(client, logged_in_user):
+    resp = await client.post(
+        "/chat/summarize", json={"session_token": logged_in_user["session_token"], "history": []}
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_chat_summarize_does_not_save(client, logged_in_user, mocked_chat_llm):
+    resp = await client.post(
+        "/chat/summarize",
+        json={
+            "session_token": logged_in_user["session_token"],
+            "history": [{"role": "user", "content": "je m'inquiète du bruit avenue de la Gare"}],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["summary"] == "réponse simulée du chatbot"
+    # proposé, pas sauvegardé : minimisation par défaut tant que l'utilisateur n'a pas validé
+    summaries = await client.post("/chat/summaries", json={"session_token": logged_in_user["session_token"]})
+    assert summaries.json()["summaries"] == []
+
+
+@pytest.mark.anyio
+async def test_chat_save_summary_then_list_then_delete(client, logged_in_user):
+    session = logged_in_user["session_token"]
+    save = await client.post(
+        "/chat/save-summary", json={"session_token": session, "summary": "Résumé validé par l'utilisateur."}
+    )
+    assert save.status_code == 200
+    summary_id = save.json()["id"]
+
+    listed = await client.post("/chat/summaries", json={"session_token": session})
+    assert listed.status_code == 200
+    assert len(listed.json()["summaries"]) == 1
+    assert listed.json()["summaries"][0]["summary"] == "Résumé validé par l'utilisateur."
+
+    deleted = await client.request("DELETE", f"/chat/summaries/{summary_id}", json={"session_token": session})
+    assert deleted.status_code == 200
+
+    listed_after = await client.post("/chat/summaries", json={"session_token": session})
+    assert listed_after.json()["summaries"] == []
+
+
+@pytest.mark.anyio
+async def test_chat_summaries_are_private_per_user(client, admin_question):
+    # Alice sauvegarde un résumé
+    alice = await client.post(
+        "/register", json={"nom": "Alice", "adresse": "1 Rue de la Mairie", "email": "alice@test.fr", "password": PASSWORD}
+    )
+    alice_session = alice.json()["session_token"]
+    await client.post("/chat/save-summary", json={"session_token": alice_session, "summary": "secret d'Alice"})
+
+    # Denis ne doit rien voir dans sa propre liste, ni pouvoir supprimer le résumé d'Alice
+    denis = await client.post(
+        "/register", json={"nom": "Denis", "adresse": "4 Rue du Secret", "email": "denis@test.fr", "password": PASSWORD}
+    )
+    denis_session = denis.json()["session_token"]
+    denis_list = await client.post("/chat/summaries", json={"session_token": denis_session})
+    assert denis_list.json()["summaries"] == []
+
+    alice_list = await client.post("/chat/summaries", json={"session_token": alice_session})
+    alice_summary_id = alice_list.json()["summaries"][0]["id"]
+    delete_attempt = await client.request(
+        "DELETE", f"/chat/summaries/{alice_summary_id}", json={"session_token": denis_session}
+    )
+    assert delete_attempt.status_code == 404
+    # toujours là après la tentative de suppression par quelqu'un d'autre
+    alice_list_after = await client.post("/chat/summaries", json={"session_token": alice_session})
+    assert len(alice_list_after.json()["summaries"]) == 1
+
+
+@pytest.mark.anyio
+async def test_chat_delete_summary_invalid_session(client):
+    resp = await client.request("DELETE", "/chat/summaries/1", json={"session_token": "fake"})
+    assert resp.status_code == 401
+
+
 @pytest.mark.anyio
 async def test_admin_key_not_set_prevents_start():
     saved = os.environ.pop("JOUY_ADMIN_KEY", None)

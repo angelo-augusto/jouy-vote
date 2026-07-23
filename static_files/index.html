@@ -115,6 +115,25 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
     <button class="btn-primary" id="referralSubmitBtn" onclick="sendReferralInvite()">Envoyer l'invitation</button>
     <div id="referralInvitesList"></div>
   </details>
+  <details class="settings" id="chatSection" ontoggle="if (this.open) { loadChatSummaries(); renderChatMessages(); }">
+    <summary>💬 Assistant</summary>
+    <p class="info">Rien de cet échange n'est conservé, sauf si vous demandez explicitement de sauvegarder un résumé.</p>
+    <div id="chatMessages" style="max-height:280px; overflow-y:auto; border:1px solid #eee; border-radius:4px; padding:.6em; margin-bottom:.6em; font-size:.9em;"></div>
+    <div id="chatMsg" class="msg"></div>
+    <label>Votre message</label>
+    <input type="text" id="chatInput" placeholder="Écrivez votre message…">
+    <button class="btn-primary" onclick="sendChatMessage()">Envoyer</button>
+    <button class="btn-link" onclick="proposeSaveChatSummary()">Sauvegarder cet échange</button>
+    <div id="chatSummaryProposal" class="hidden" style="margin-top:.8em; padding:.8em; background:#f8f9fa; border-radius:4px;">
+      <p class="info" style="margin:0 0 .5em;">Résumé proposé (modifiable avant validation) :</p>
+      <textarea id="chatSummaryText" rows="3" style="width:100%; padding:.5em; border:1px solid #ccc; border-radius:4px; font-family:inherit; font-size:.9em;"></textarea>
+      <button class="btn-primary" onclick="confirmSaveChatSummary()">Valider et sauvegarder</button>
+      <button class="btn-link" onclick="document.getElementById('chatSummaryProposal').classList.add('hidden')">Annuler</button>
+    </div>
+    <hr>
+    <p class="info" style="margin-top:1em;">Mes résumés sauvegardés (privés, visibles et supprimables uniquement par vous)</p>
+    <div id="chatSummariesList"></div>
+  </details>
   <details class="settings">
     <summary>⚙️ Paramètres</summary>
     <h2>Changer mon mot de passe</h2>
@@ -286,6 +305,93 @@ async function changePassword() {
     showMsg('changePasswordMsg', data.message, 'success');
   } catch (e) {
     showMsg('changePasswordMsg', e.message, 'error');
+  }
+}
+let chatHistory = [];  // en mémoire seulement, jamais persisté — perdu à la fermeture/rechargement
+function renderChatMessages() {
+  const el = document.getElementById('chatMessages');
+  el.innerHTML = chatHistory.map(m =>
+    '<p style="margin:.4em 0;"><strong>' + (m.role === 'user' ? 'Vous' : 'Assistant') + ' :</strong> ' +
+    m.content.replace(/</g, '&lt;') + '</p>'
+  ).join('');
+  el.scrollTop = el.scrollHeight;
+}
+async function sendChatMessage() {
+  const input = document.getElementById('chatInput');
+  const message = input.value.trim();
+  if (!message) return;
+  const session_token = localStorage.getItem('session_token');
+  const historyBefore = chatHistory.slice();
+  chatHistory.push({ role: 'user', content: message });
+  renderChatMessages();
+  input.value = '';
+  try {
+    const data = await api('/chat', { session_token, message, history: historyBefore });
+    chatHistory.push({ role: 'assistant', content: data.reply });
+    renderChatMessages();
+  } catch (e) {
+    showMsg('chatMsg', e.message, 'error');
+  }
+}
+async function proposeSaveChatSummary() {
+  if (chatHistory.length === 0) {
+    showMsg('chatMsg', 'Rien à sauvegarder pour l\'instant.', 'error');
+    return;
+  }
+  const session_token = localStorage.getItem('session_token');
+  try {
+    const data = await api('/chat/summarize', { session_token, history: chatHistory });
+    document.getElementById('chatSummaryText').value = data.summary;
+    document.getElementById('chatSummaryProposal').classList.remove('hidden');
+  } catch (e) {
+    showMsg('chatMsg', e.message, 'error');
+  }
+}
+async function confirmSaveChatSummary() {
+  const summary = document.getElementById('chatSummaryText').value.trim();
+  if (!summary) return;
+  const session_token = localStorage.getItem('session_token');
+  try {
+    await api('/chat/save-summary', { session_token, summary });
+    document.getElementById('chatSummaryProposal').classList.add('hidden');
+    showMsg('chatMsg', 'Résumé sauvegardé.', 'success');
+    loadChatSummaries();
+  } catch (e) {
+    showMsg('chatMsg', e.message, 'error');
+  }
+}
+async function loadChatSummaries() {
+  const session_token = localStorage.getItem('session_token');
+  if (!session_token) return;
+  try {
+    const data = await api('/chat/summaries', { session_token });
+    const list = document.getElementById('chatSummariesList');
+    if (data.summaries.length === 0) {
+      list.innerHTML = '<p class="info">Aucun résumé sauvegardé.</p>';
+    } else {
+      list.innerHTML = data.summaries.map(s =>
+        '<div style="border:1px solid #eee; border-radius:4px; padding:.6em; margin-bottom:.4em; font-size:.85em;">' +
+        '<p style="margin:0 0 .4em;">' + s.summary.replace(/</g, '&lt;') + '</p>' +
+        '<button class="btn-link" style="color:#dc3545;" onclick="deleteChatSummary(' + s.id + ')">Supprimer</button>' +
+        '</div>'
+      ).join('');
+    }
+  } catch (e) {
+    document.getElementById('chatSummariesList').innerHTML = '<p class="info">Impossible de charger les résumés.</p>';
+  }
+}
+async function deleteChatSummary(id) {
+  const session_token = localStorage.getItem('session_token');
+  try {
+    const res = await fetch(API + '/chat/summaries/' + id, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_token }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Erreur');
+    loadChatSummaries();
+  } catch (e) {
+    showMsg('chatMsg', e.message, 'error');
   }
 }
 async function loadReferralStatus() {

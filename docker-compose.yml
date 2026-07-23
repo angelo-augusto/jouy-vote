@@ -45,6 +45,7 @@ services:
       - JOUY_ADMIN_KEY=${JOUY_ADMIN_KEY}
       - JOUY_VOTE_PEPPER=${JOUY_VOTE_PEPPER}
       - BREVO_API_KEY=${BREVO_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     volumes:
       - /mnt/stockage/jouyvote/data:/data
     # La page d'accueil va chercher le contenu du wiki via le réseau Docker interne
