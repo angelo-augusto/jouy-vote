@@ -27,6 +27,16 @@ button { width: 100%; padding: .7em; border: none; border-radius: 4px; font-size
 .nav { text-align: right; font-size: .85em; margin-bottom: 1em; }
 .nav a { color: #007bff; cursor: pointer; }
 .nav a:hover { text-decoration: underline; }
+details.settings, details.danger-zone { margin-top: .8em; }
+details.settings > summary, details.danger-zone > summary {
+  cursor: pointer; font-weight: 600; padding: .5em 0; list-style: none;
+}
+details.settings > summary::-webkit-details-marker, details.danger-zone > summary::-webkit-details-marker { display: none; }
+details.settings > summary::before { content: "▸ "; }
+details.settings[open] > summary::before { content: "▾ "; }
+details.danger-zone > summary { color: #dc3545; }
+details.danger-zone > summary::before { content: "▸ "; }
+details.danger-zone[open] > summary::before { content: "▾ "; }
 </style>
 </head>
 <body>
@@ -91,19 +101,24 @@ button { width: 100%; padding: .7em; border: none; border-radius: 4px; font-size
   <p><strong>Nom :</strong> <span id="dashNom"></span></p>
   <p><strong>Email :</strong> <span id="dashEmail"></span></p>
   <hr>
-  <h2>Changer mon mot de passe</h2>
-  <div id="changePasswordMsg" class="msg"></div>
-  <label>Mot de passe actuel</label>
-  <input type="password" id="currentPassword" placeholder="••••••••">
-  <label>Nouveau mot de passe</label>
-  <input type="password" id="newPassword" placeholder="Au moins 6 caractères">
-  <button class="btn-primary" onclick="changePassword()">Changer le mot de passe</button>
-  <hr>
-  <h2>Se désinscrire</h2>
-  <p class="info">Cette action supprime votre compte et vos votes. Elle est irréversible.</p>
-  <label>Confirmez votre mot de passe</label>
-  <input type="password" id="unsubPassword" placeholder="••••••••">
-  <button class="btn-danger" onclick="unsubscribe()">Supprimer mon compte</button>
+  <details class="settings">
+    <summary>⚙️ Paramètres</summary>
+    <h2>Changer mon mot de passe</h2>
+    <div id="changePasswordMsg" class="msg"></div>
+    <label>Mot de passe actuel</label>
+    <input type="password" id="currentPassword" placeholder="••••••••">
+    <label>Nouveau mot de passe</label>
+    <input type="password" id="newPassword" placeholder="Au moins 6 caractères">
+    <button class="btn-primary" onclick="changePassword()">Changer le mot de passe</button>
+    <hr>
+    <details class="danger-zone">
+      <summary>Se désinscrire</summary>
+      <p class="info">Cette action supprime votre compte et vos votes. Elle est irréversible.</p>
+      <label>Confirmez votre mot de passe</label>
+      <input type="password" id="unsubPassword" placeholder="••••••••">
+      <button class="btn-danger" onclick="unsubscribe()">Supprimer mon compte</button>
+    </details>
+  </details>
 </div>
 <script>
 const API = '';
