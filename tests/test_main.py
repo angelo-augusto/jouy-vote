@@ -9,6 +9,11 @@ import main
 
 main.DB_PATH = ":memory:"
 main.init_db()
+# Les inscriptions sont fermées par défaut en prod (coupe-circuit anti-Sybil, cf REGISTRATIONS_OPEN
+# dans main.py) — la plupart des tests ont besoin de /register fonctionnel, donc rouvert ici. Le
+# comportement "fermé" a son propre test dédié (test_register_closed_by_default) qui remet le
+# flag à False ponctuellement.
+main.REGISTRATIONS_OPEN = True
 
 from main import app, compute_identity_hash, compute_vote_token
 
@@ -73,6 +78,18 @@ async def test_register_double_rejected(client):
     resp2 = await client.post("/register", json=body)
     assert resp2.status_code == 409
     assert "déjà inscrite" in resp2.json().get("detail", "")
+
+
+@pytest.mark.anyio
+async def test_register_closed_by_default(client, monkeypatch):
+    monkeypatch.setattr(main, "REGISTRATIONS_OPEN", False)
+    body = {"nom": "Zoe", "adresse": "9 Rue Nouvelle", "email": "zoe@test.fr", "password": PASSWORD}
+    resp = await client.post("/register", json=body)
+    assert resp.status_code == 403
+    assert "ferm" in resp.json()["detail"].lower()
+    # aucun compte créé malgré la tentative
+    login = await client.post("/login", json={"email": "zoe@test.fr", "password": PASSWORD})
+    assert login.status_code == 401
 
 
 @pytest.mark.anyio

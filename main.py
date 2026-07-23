@@ -41,6 +41,11 @@ SITE_URL = os.environ.get("SITE_URL", "https://jouyvote.fr")
 WIKI_INTERNAL_URL = os.environ.get("WIKI_INTERNAL_URL", "http://wiki:8080")
 WIKI_PUBLIC_URL = os.environ.get("WIKI_PUBLIC_URL", "https://wiki.jouyvote.fr")
 
+# Coupe-circuit temporaire (faille Sybil : rien n'empêche aujourd'hui de créer un faux compte
+# résident) — fermé par défaut tant que le parrainage n'est pas construit. Flag d'env plutôt
+# qu'en dur pour pouvoir rouvrir sans redéployer de code le moment venu.
+REGISTRATIONS_OPEN = os.environ.get("REGISTRATIONS_OPEN", "false").lower() == "true"
+
 _keepalive_conn: sqlite3.Connection | None = None
 
 app = FastAPI(title="Jouy Vote Citoyen")
@@ -305,6 +310,8 @@ def wiki_home_content():
 
 @app.post("/register")
 def register(r: Registration):
+    if not REGISTRATIONS_OPEN:
+        raise HTTPException(403, "Inscriptions temporairement fermées — le parrainage arrive bientôt.")
     identity_hash = compute_identity_hash(r.nom, r.adresse)
     token = secrets.token_urlsafe(32)
     session_token = secrets.token_urlsafe(32)
