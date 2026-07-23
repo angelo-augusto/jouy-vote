@@ -162,14 +162,16 @@ async def test_send_reset_email_returns_false_without_brevo_key(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_reset_password_works_on_migrated_database(tmp_path, monkeypatch):
+async def test_init_db_fixes_reset_token_expiry_type_and_keeps_data(tmp_path, monkeypatch):
     """Régression : sur la vraie base de prod (créée avant password_hash/session_token/
-    reset_token/reset_token_expiry), ces colonnes ont été ajoutées via l'ALTER TABLE générique
-    de init_db(), qui les type toutes en TEXT — y compris reset_token_expiry, qui doit être un
-    nombre. Une base fraîchement créée par CREATE TABLE (reset_token_expiry REAL) ne reproduit
-    PAS ce bug : c'est pour ça que les tests sur le schéma neuf passaient alors que la prod
-    plantait avec un TypeError. Ce test simule la vraie base migrée en créant d'abord l'ancien
-    schéma (sans les 4 colonnes), puis en appelant init_db() dessus comme au démarrage réel.
+    reset_token/reset_token_expiry), ces colonnes avaient été ajoutées via l'ancienne boucle
+    générique ALTER TABLE ADD COLUMN ... TEXT, qui typait TOUT en TEXT — y compris
+    reset_token_expiry, qui doit être un nombre pour être comparé à time.time(). Une base
+    fraîchement créée par CREATE TABLE (reset_token_expiry REAL) ne reproduisait pas ce bug :
+    c'est pour ça que les tests sur schéma neuf passaient alors que la prod plantait avec un
+    TypeError. init_db() reconstruit désormais la table si ce mauvais typage est détecté ; ce
+    test reproduit l'état AVANT ce fix (colonne TEXT + une vraie ligne de données) et vérifie
+    que init_db() corrige le type ET conserve les données existantes.
     """
     import sqlite3
 
@@ -182,8 +184,16 @@ async def test_reset_password_works_on_migrated_database(tmp_path, monkeypatch):
             nom TEXT NOT NULL,
             adresse TEXT NOT NULL,
             email TEXT,
+            password_hash TEXT,
+            session_token TEXT,
+            reset_token TEXT,
+            reset_token_expiry TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )"""
+    )
+    conn.execute(
+        "INSERT INTO identities (token, identity_hash, nom, adresse, email, reset_token, reset_token_expiry) "
+        "VALUES ('tok-1', 'hash-1', 'Carole', '3 Rue de la Mairie', 'carole@test.fr', 'rt-1', '9999999999.0')"
     )
     conn.commit()
     conn.close()
@@ -195,7 +205,18 @@ async def test_reset_password_works_on_migrated_database(tmp_path, monkeypatch):
         col_type = next(
             row[2] for row in conn.execute("PRAGMA table_info(identities)") if row[1] == "reset_token_expiry"
         )
-    assert col_type == "TEXT"  # confirme qu'on reproduit bien le bug de typage, pas un fantôme
+        row = conn.execute("SELECT nom, email, reset_token, reset_token_expiry FROM identities WHERE token='tok-1'").fetchone()
+    assert col_type == "REAL"
+    assert row["nom"] == "Carole"
+    assert row["email"] == "carole@test.fr"
+    assert row["reset_token"] == "rt-1"
+    assert row["reset_token_expiry"] == 9999999999.0
+
+    # Idempotence : relancer init_db() sur une base déjà corrigée ne doit rien casser.
+    main.init_db()
+    with main.db() as conn:
+        row2 = conn.execute("SELECT reset_token_expiry FROM identities WHERE token='tok-1'").fetchone()
+    assert row2["reset_token_expiry"] == 9999999999.0
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as migrated_client:

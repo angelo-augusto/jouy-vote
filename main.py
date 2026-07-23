@@ -107,11 +107,60 @@ def init_db():
             )"""
         )
     with db() as conn:
-        for col in ['password_hash', 'session_token', 'reset_token', 'reset_token_expiry']:
+        # Type explicite par colonne (pas juste TEXT pour tout) : ADD COLUMN ne s'applique que
+        # si la colonne n'existe pas encore, donc ceci ne corrige que les tables qui n'ont
+        # jamais eu cette colonne — les tables déjà migrées avec le mauvais type sont traitées
+        # séparément ci-dessous.
+        column_types = {
+            "password_hash": "TEXT",
+            "session_token": "TEXT",
+            "reset_token": "TEXT",
+            "reset_token_expiry": "REAL",
+        }
+        for col, col_type in column_types.items():
             try:
-                conn.execute(f"ALTER TABLE identities ADD COLUMN {col} TEXT")
+                conn.execute(f"ALTER TABLE identities ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
                 pass
+    _fix_reset_token_expiry_type()
+
+
+def _fix_reset_token_expiry_type():
+    """Corrige le typage de reset_token_expiry sur une base migrée avant ce fix (2026-07-23) :
+    l'ancienne boucle d'ALTER TABLE ajoutait toutes les colonnes en TEXT, y compris celle-ci qui
+    doit être REAL pour être comparée à time.time() dans reset_password(). Idempotent (ne fait
+    rien si déjà REAL) et sûr à exécuter à chaque démarrage : reconstruit la table avec le bon
+    type en conservant toutes les données existantes (CAST gère les valeurs NULL/vides).
+    """
+    with db() as conn:
+        col_type = next(
+            (row[2] for row in conn.execute("PRAGMA table_info(identities)") if row[1] == "reset_token_expiry"),
+            None,
+        )
+        if col_type != "TEXT":
+            return
+        conn.execute("ALTER TABLE identities RENAME TO identities_old_migration")
+        conn.execute(
+            """CREATE TABLE identities (
+                token TEXT PRIMARY KEY,
+                identity_hash TEXT UNIQUE NOT NULL,
+                nom TEXT NOT NULL,
+                adresse TEXT NOT NULL,
+                email TEXT,
+                password_hash TEXT,
+                session_token TEXT,
+                reset_token TEXT,
+                reset_token_expiry REAL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO identities
+               SELECT token, identity_hash, nom, adresse, email, password_hash, session_token,
+                      reset_token, CAST(reset_token_expiry AS REAL), created_at
+               FROM identities_old_migration"""
+        )
+        conn.execute("DROP TABLE identities_old_migration")
 
 
 init_db()
