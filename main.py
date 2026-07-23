@@ -35,6 +35,12 @@ BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
 BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL", "noreply@jouyvote.fr")
 SITE_URL = os.environ.get("SITE_URL", "https://jouyvote.fr")
 
+# URL interne (réseau Docker, service "wiki" du même docker-compose.yml) pour aller chercher le
+# contenu de la page d'accueil du wiki à afficher sur la page d'accueil de jouyvote.fr — plus
+# rapide et plus fiable qu'un aller-retour par le tunnel Cloudflare public.
+WIKI_INTERNAL_URL = os.environ.get("WIKI_INTERNAL_URL", "http://wiki:8080")
+WIKI_PUBLIC_URL = os.environ.get("WIKI_PUBLIC_URL", "https://wiki.jouyvote.fr")
+
 _keepalive_conn: sqlite3.Connection | None = None
 
 app = FastAPI(title="Jouy Vote Citoyen")
@@ -267,6 +273,34 @@ def send_reset_email(to_email: str, reset_token: str) -> bool:
             return 200 <= resp.status < 300
     except urllib.error.URLError:
         return False
+
+
+def fetch_wiki_home_content() -> str:
+    """Va chercher le rendu de la page 'start' du wiki pour l'afficher sur la page d'accueil.
+
+    Retourne une chaîne vide en cas d'échec (jamais d'exception) : l'accueil doit rester
+    utilisable même si le wiki est indisponible. Le HTML renvoyé par do=export_xhtml est un
+    DOCUMENT complet (head/body) — on n'en garde que le fragment de contenu utile, et les liens
+    relatifs (ex: href="/genese") sont réécrits vers le domaine public du wiki, sinon ils
+    pointeraient vers des routes inexistantes sur jouyvote.fr.
+    """
+    url = f"{WIKI_INTERNAL_URL}/doku.php?id=start&do=export_xhtml"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError:
+        return ""
+    start = html.find('<div class="dokuwiki export">')
+    end = html.find("</body>")
+    if start == -1 or end == -1:
+        return ""
+    fragment = html[start:end]
+    return fragment.replace('href="/', f'href="{WIKI_PUBLIC_URL}/')
+
+
+@app.get("/wiki-home-content")
+def wiki_home_content():
+    return {"html": fetch_wiki_home_content()}
 
 
 @app.post("/register")

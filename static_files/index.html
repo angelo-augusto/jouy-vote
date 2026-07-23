@@ -32,9 +32,18 @@ button { width: 100%; padding: .7em; border: none; border-radius: 4px; font-size
 <body>
 <div class="nav" id="navBar">
   <a onclick="goHome()">🏠 Accueil</a> —
+  <a id="navDashboard" class="hidden" onclick="showDashboard()">Mon espace</a>
   <span id="navGreeting"></span> <a id="navLogout" class="hidden" onclick="logout()">Déconnexion</a>
 </div>
-<div class="card" id="pageLogin">
+<div class="card" id="pageHome">
+  <h1>Jouy Vote Citoyen</h1>
+  <p>Ce site recueille les idées, faits et opinions des habitants de Jouy pour construire ensemble des outils de démocratie participative locale. Le projet est né de la mobilisation citoyenne autour des tilleuls de l'avenue de la Gare.</p>
+  <button class="btn-primary" onclick="showPage('login')">Connexion</button>
+  <button class="btn-link" onclick="showPage('register')">Pas encore inscrit ? Créer un compte</button>
+  <hr>
+  <div id="wikiHomeContent"><p class="info">Chargement du wiki…</p></div>
+</div>
+<div class="card hidden" id="pageLogin">
   <h1>Jouy Vote Citoyen</h1>
   <p class="info">Connectez-vous pour accéder à votre espace.</p>
   <div id="loginMsg" class="msg"></div>
@@ -111,10 +120,17 @@ function showMsg(id, text, type) {
 }
 function goHome() {
   history.replaceState(null, '', window.location.pathname);
-  if (localStorage.getItem('session_token')) {
-    showDashboard();
-  } else {
-    showPage('login');
+  showPage('home');
+  loadWikiHomeContent();
+}
+async function loadWikiHomeContent() {
+  const el = document.getElementById('wikiHomeContent');
+  try {
+    const res = await fetch(API + '/wiki-home-content');
+    const data = await res.json();
+    el.innerHTML = data.html || '<p class="info">Contenu du wiki indisponible pour le moment.</p>';
+  } catch (e) {
+    el.innerHTML = '<p class="info">Contenu du wiki indisponible pour le moment.</p>';
   }
 }
 async function api(path, body) {
@@ -133,6 +149,7 @@ function updateNav() {
   const email = localStorage.getItem('user_email');
   document.getElementById('navGreeting').textContent = session ? nom + ' (' + email + ')' : '';
   document.getElementById('navLogout').classList.toggle('hidden', !session);
+  document.getElementById('navDashboard').classList.toggle('hidden', !session);
 }
 async function login() {
   const email = document.getElementById('loginEmail').value;
@@ -251,6 +268,8 @@ if (new URLSearchParams(window.location.search).has('reset_token')) {
   showPage('reset');
 } else if (localStorage.getItem('session_token')) {
   showDashboard();
+} else {
+  loadWikiHomeContent();
 }
 </script>
 </body>

@@ -47,6 +47,11 @@ services:
       - BREVO_API_KEY=${BREVO_API_KEY}
     volumes:
       - /mnt/stockage/jouyvote/data:/data
+    # La page d'accueil va chercher le contenu du wiki via le réseau Docker interne
+    # (http://wiki:8080) — dégrade proprement si le wiki n'est pas encore prêt, mais autant
+    # attendre qu'il soit démarré avant de démarrer web.
+    depends_on:
+      - wiki
     # Lié uniquement à l'interface loopback de l'hôte : le tunnel Cloudflare (cloudflared, hors
     # conteneur) s'y connecte en local, aucune exposition directe au réseau extérieur en dehors
     # du tunnel — c'est lui, pas ce port, qui doit être la seule porte d'entrée publique.

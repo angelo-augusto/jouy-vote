@@ -161,6 +161,48 @@ async def test_send_reset_email_returns_false_without_brevo_key(monkeypatch):
     assert main.send_reset_email("alice@test.fr", "some-token") is False
 
 
+def test_fetch_wiki_home_content_extracts_fragment_and_rewrites_links(monkeypatch):
+    fake_doc = (
+        "<!DOCTYPE html><html><head><title>start</title></head><body>"
+        '<div class="dokuwiki export">\n'
+        '<h1>Jouy Vote</h1>\n<a href="/genese">Genèse</a>\n'
+        "</div>\n</body></html>"
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return fake_doc.encode()
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", lambda url, timeout=5: FakeResponse())
+    html = main.fetch_wiki_home_content()
+    assert "<h1>Jouy Vote</h1>" in html
+    assert 'href="https://wiki.jouyvote.fr/genese"' in html
+    assert "</body>" not in html
+    assert "<head>" not in html
+
+
+def test_fetch_wiki_home_content_returns_empty_on_network_error(monkeypatch):
+    def raise_error(url, timeout=5):
+        raise main.urllib.error.URLError("boom")
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", raise_error)
+    assert main.fetch_wiki_home_content() == ""
+
+
+@pytest.mark.anyio
+async def test_wiki_home_content_endpoint(client, monkeypatch):
+    monkeypatch.setattr(main, "fetch_wiki_home_content", lambda: "<p>contenu</p>")
+    resp = await client.get("/wiki-home-content")
+    assert resp.status_code == 200
+    assert resp.json() == {"html": "<p>contenu</p>"}
+
+
 @pytest.mark.anyio
 async def test_init_db_fixes_reset_token_expiry_type_and_keeps_data(tmp_path, monkeypatch):
     """Régression : sur la vraie base de prod (créée avant password_hash/session_token/
