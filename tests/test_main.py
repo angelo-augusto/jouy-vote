@@ -162,6 +162,57 @@ async def test_send_reset_email_returns_false_without_brevo_key(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_reset_password_works_on_migrated_database(tmp_path, monkeypatch):
+    """Régression : sur la vraie base de prod (créée avant password_hash/session_token/
+    reset_token/reset_token_expiry), ces colonnes ont été ajoutées via l'ALTER TABLE générique
+    de init_db(), qui les type toutes en TEXT — y compris reset_token_expiry, qui doit être un
+    nombre. Une base fraîchement créée par CREATE TABLE (reset_token_expiry REAL) ne reproduit
+    PAS ce bug : c'est pour ça que les tests sur le schéma neuf passaient alors que la prod
+    plantait avec un TypeError. Ce test simule la vraie base migrée en créant d'abord l'ancien
+    schéma (sans les 4 colonnes), puis en appelant init_db() dessus comme au démarrage réel.
+    """
+    import sqlite3
+
+    db_file = tmp_path / "migrated.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        """CREATE TABLE identities (
+            token TEXT PRIMARY KEY,
+            identity_hash TEXT UNIQUE NOT NULL,
+            nom TEXT NOT NULL,
+            adresse TEXT NOT NULL,
+            email TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(main, "DB_PATH", str(db_file))
+    main.init_db()
+
+    with main.db() as conn:
+        col_type = next(
+            row[2] for row in conn.execute("PRAGMA table_info(identities)") if row[1] == "reset_token_expiry"
+        )
+    assert col_type == "TEXT"  # confirme qu'on reproduit bien le bug de typage, pas un fantôme
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as migrated_client:
+        await migrated_client.post(
+            "/register",
+            json={"nom": "Bob", "adresse": "2 Rue de la Mairie", "email": "bob@test.fr", "password": PASSWORD},
+        )
+        calls = []
+        monkeypatch.setattr(main, "send_reset_email", lambda email, token: calls.append((email, token)))
+        await migrated_client.post("/forgot-password", json={"email": "bob@test.fr"})
+        token = calls[0][1]
+        resp = await migrated_client.post("/reset-password", json={"token": token, "password": "new-password"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+
+@pytest.mark.anyio
 async def test_unsubscribe(client, registered_user, logged_in_user):
     session = logged_in_user["session_token"]
     resp = await client.request("DELETE", "/unsubscribe", json={"session_token": session, "password": PASSWORD})

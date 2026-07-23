@@ -282,7 +282,10 @@ def reset_password(req: ResetPasswordRequest):
         ).fetchone()
     if not row:
         raise HTTPException(400, "Token invalide.")
-    if time.time() > (row["reset_token_expiry"] or 0):
+    # reset_token_expiry est REAL sur une base fraîchement créée, mais TEXT sur une base migrée
+    # via l'ALTER TABLE générique de init_db() (toutes les nouvelles colonnes y sont ajoutées en
+    # TEXT) — cast explicite pour supporter les deux cas plutôt que de supposer un type.
+    if time.time() > float(row["reset_token_expiry"] or 0):
         raise HTTPException(400, "Token expiré.")
     password_hash = hash_password(req.password)
     with db() as conn:

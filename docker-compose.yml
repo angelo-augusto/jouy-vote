@@ -44,6 +44,7 @@ services:
     environment:
       - JOUY_ADMIN_KEY=${JOUY_ADMIN_KEY}
       - JOUY_VOTE_PEPPER=${JOUY_VOTE_PEPPER}
+      - BREVO_API_KEY=${BREVO_API_KEY}
     volumes:
       - /mnt/stockage/jouyvote/data:/data
     # Lié uniquement à l'interface loopback de l'hôte : le tunnel Cloudflare (cloudflared, hors
