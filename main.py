@@ -474,7 +474,12 @@ def vote(v: Vote):
             "INSERT INTO votes (vote_token, question_id, choix) VALUES (?, ?, ?)",
             (vote_token, v.question_id, v.choix),
         )
-    return {"ok": True}
+    # vote_token sert de "reçu" : l'électeur peut revenir plus tard sur /results/{question_id}
+    # et vérifier lui-même que la ligne portant ce jeton correspond bien à son choix. Le jeton
+    # est dérivé (sha256(token+pepper)) et ne permet pas de remonter à l'identité — c'est le seul
+    # moyen pour l'utilisateur de le connaître, il ne peut pas le recalculer côté client sans le
+    # pepper (secret serveur).
+    return {"ok": True, "vote_token": vote_token}
 
 
 @app.get("/results/{question_id}")
@@ -484,13 +489,17 @@ def results(question_id: int):
             "SELECT choix, COUNT(*) as n FROM votes WHERE question_id=? GROUP BY choix",
             (question_id,),
         ).fetchall()
-        tokens = conn.execute(
-            "SELECT vote_token FROM votes WHERE question_id=? ORDER BY vote_token",
+        # Liste complète (vote_token, choix), pas juste le total agrégé : vérifiabilité
+        # individuelle (principe Helios) — n'importe qui peut recompter et un électeur peut
+        # retrouver sa propre ligne via le vote_token reçu à l'issue de /vote. Aucun risque pour
+        # l'anonymat : le jeton ne permet pas de remonter à l'identité (voir compute_vote_token).
+        detail = conn.execute(
+            "SELECT vote_token, choix FROM votes WHERE question_id=? ORDER BY vote_token",
             (question_id,),
         ).fetchall()
     return {
         "tally": {r["choix"]: r["n"] for r in rows},
-        "voted_tokens": [t["vote_token"] for t in tokens],
+        "votes": [{"vote_token": r["vote_token"], "choix": r["choix"]} for r in detail],
         "total": sum(r["n"] for r in rows),
     }
 

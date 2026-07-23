@@ -397,14 +397,17 @@ async def test_full_workflow(client, admin_question):
         "/vote", json={"token": token, "question_id": qid, "choix": "Oui"}
     )
     assert vote.status_code == 200
+    vote_token = vote.json()["vote_token"]
+    assert vote_token == compute_vote_token(token)
 
     results = await client.get(f"/results/{qid}")
     assert results.status_code == 200
     data = results.json()
     assert data["tally"] == {"Oui": 1}
     assert data["total"] == 1
-    expected_vote_token = compute_vote_token(token)
-    assert expected_vote_token in data["voted_tokens"]
+    # Vérifiabilité individuelle (Helios) : l'électeur retrouve sa ligne exacte (jeton + choix)
+    # dans les résultats publics grâce au reçu renvoyé par /vote, pas juste un total agrégé.
+    assert {"vote_token": vote_token, "choix": "Oui"} in data["votes"]
 
 
 @pytest.mark.anyio
