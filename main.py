@@ -4,10 +4,13 @@ Sépare identité (nom/adresse/email) et vote (jeton/choix) pour garantir
 l'anonymat du vote tout en gardant une vérification de résidence déclarative.
 """
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -23,6 +26,14 @@ if not ADMIN_KEY:
 JOUY_VOTE_PEPPER = os.environ.get("JOUY_VOTE_PEPPER")
 if not JOUY_VOTE_PEPPER:
     raise RuntimeError("La variable d'environnement JOUY_VOTE_PEPPER doit être définie.")
+
+# Envoi d'email (lien de réinitialisation de mot de passe) via l'API transactionnelle Brevo.
+# BREVO_API_KEY absente = fonctionnalité désactivée proprement (pas de crash au démarrage,
+# contrairement à ADMIN_KEY/PEPPER) : /forgot-password répond alors sans jamais rien envoyer
+# ni révéler le token, cf. forgot_password() plus bas.
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
+BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL", "noreply@jouyvote.fr")
+SITE_URL = os.environ.get("SITE_URL", "https://jouyvote.fr")
 
 _keepalive_conn: sqlite3.Connection | None = None
 
@@ -163,6 +174,46 @@ def compute_vote_token(token: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def send_reset_email(to_email: str, reset_token: str) -> bool:
+    """Envoie le lien de réinitialisation par email via l'API Brevo.
+
+    Ne lève jamais : retourne False en cas d'échec (clé absente, erreur réseau/API), pour
+    que /forgot-password ne révèle jamais si l'envoi a réussi (même comportement visible
+    de l'extérieur que l'email existe ou non).
+    """
+    if not BREVO_API_KEY:
+        return False
+    reset_link = f"{SITE_URL}/?reset_token={reset_token}"
+    body = json.dumps(
+        {
+            "sender": {"email": BREVO_SENDER_EMAIL, "name": "Jouy Vote Citoyen"},
+            "to": [{"email": to_email}],
+            "subject": "Réinitialisation de votre mot de passe - Jouy Vote Citoyen",
+            "htmlContent": (
+                f"<p>Une réinitialisation de mot de passe a été demandée pour ce compte.</p>"
+                f'<p><a href="{reset_link}">Cliquez ici pour choisir un nouveau mot de passe</a></p>'
+                f"<p>Ce lien expire dans 1 heure. Si vous n'êtes pas à l'origine de cette "
+                f"demande, ignorez cet email.</p>"
+            ),
+        }
+    ).encode()
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=body,
+        headers={
+            "api-key": BREVO_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.URLError:
+        return False
+
+
 @app.post("/register")
 def register(r: Registration):
     identity_hash = compute_identity_hash(r.nom, r.adresse)
@@ -204,28 +255,25 @@ def logout(req: LogoutRequest):
     return {"ok": True}
 
 
-# Désactivé pour l'instant : renvoie le reset_token directement dans la réponse JSON au lieu
-# de l'envoyer par email (pas d'envoi d'email implémenté) — n'importe qui connaissant l'email
-# d'un inscrit pourrait ainsi réinitialiser son mot de passe et prendre le contrôle de son
-# compte. À réactiver une fois un vrai envoi d'email branché. Voir le corps de la fonction,
-# inchangé, pour reprendre le travail.
-# @app.post("/forgot-password")
+@app.post("/forgot-password")
 def forgot_password(req: ForgotPasswordRequest):
+    # Réponse strictement identique que l'email existe ou non, et le token n'apparaît JAMAIS
+    # dans la réponse HTTP (contrairement à l'ancienne version) : seul un envoi par email au
+    # titulaire du compte donne accès au lien de réinitialisation.
+    generic = {"message": "Si cet email existe, un lien de réinitialisation a été envoyé."}
     with db() as conn:
         row = conn.execute("SELECT token FROM identities WHERE email=?", (req.email,)).fetchone()
     if not row:
-        return {"message": "Si cet email existe, un lien de réinitialisation a été envoyé."}
+        return generic
     reset_token = secrets.token_urlsafe(32)
     expiry = time.time() + 3600
     with db() as conn:
         conn.execute("UPDATE identities SET reset_token=?, reset_token_expiry=? WHERE token=?", (reset_token, expiry, row["token"]))
-    return {"reset_token": reset_token, "message": "Token de réinitialisation généré."}
+    send_reset_email(req.email, reset_token)
+    return generic
 
 
-# Désactivé en même temps que /forgot-password (voir commentaire ci-dessus) : sans cette
-# dernière, reset_token n'est jamais émis, donc cette route reste inatteignable dans les faits,
-# mais autant être explicite plutôt que de compter sur cette garantie indirecte.
-# @app.post("/reset-password")
+@app.post("/reset-password")
 def reset_password(req: ResetPasswordRequest):
     with db() as conn:
         row = conn.execute(

@@ -105,37 +105,43 @@ async def test_logout(client, logged_in_user):
     assert resp.json()["ok"] is True
 
 
-_FORGOT_PASSWORD_DISABLED = (
-    "forgot-password/reset-password désactivés : la route renvoyait le reset_token "
-    "directement dans la réponse JSON faute d'envoi d'email, permettant une prise de "
-    "contrôle de compte par quiconque connaît l'email d'un inscrit. À réactiver avec ces "
-    "tests une fois un vrai envoi d'email branché."
-)
+@pytest.fixture
+def captured_reset_email(monkeypatch):
+    """Intercepte send_reset_email au lieu d'appeler Brevo : capture (email, token) envoyés."""
+    calls = []
+
+    def fake_send(to_email, reset_token):
+        calls.append((to_email, reset_token))
+        return True
+
+    monkeypatch.setattr(main, "send_reset_email", fake_send)
+    return calls
 
 
-@pytest.mark.skip(reason=_FORGOT_PASSWORD_DISABLED)
 @pytest.mark.anyio
-async def test_forgot_password(client, registered_user):
+async def test_forgot_password_never_leaks_token_in_response(client, registered_user, captured_reset_email):
     resp = await client.post("/forgot-password", json={"email": "alice@test.fr"})
     assert resp.status_code == 200
     data = resp.json()
-    assert "reset_token" in data
+    assert "reset_token" not in data
     assert data["message"] is not None
+    assert len(captured_reset_email) == 1
+    assert captured_reset_email[0][0] == "alice@test.fr"
 
 
-@pytest.mark.skip(reason=_FORGOT_PASSWORD_DISABLED)
 @pytest.mark.anyio
-async def test_forgot_password_unknown_email(client):
+async def test_forgot_password_unknown_email(client, captured_reset_email):
     resp = await client.post("/forgot-password", json={"email": "unknown@test.fr"})
     assert resp.status_code == 200
     assert "Si cet email existe" in resp.json()["message"]
+    assert captured_reset_email == []
 
 
-@pytest.mark.skip(reason=_FORGOT_PASSWORD_DISABLED)
 @pytest.mark.anyio
-async def test_reset_password(client, registered_user):
+async def test_reset_password(client, registered_user, captured_reset_email):
     forgot = await client.post("/forgot-password", json={"email": "alice@test.fr"})
-    token = forgot.json()["reset_token"]
+    assert "reset_token" not in forgot.json()
+    token = captured_reset_email[0][1]
     resp = await client.post("/reset-password", json={"token": token, "password": "new-password"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
@@ -143,11 +149,16 @@ async def test_reset_password(client, registered_user):
     assert login.status_code == 200
 
 
-@pytest.mark.skip(reason=_FORGOT_PASSWORD_DISABLED)
 @pytest.mark.anyio
 async def test_reset_password_expired_token(client, registered_user):
     resp = await client.post("/reset-password", json={"token": "fake-token", "password": "new-password"})
     assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_send_reset_email_returns_false_without_brevo_key(monkeypatch):
+    monkeypatch.setattr(main, "BREVO_API_KEY", None)
+    assert main.send_reset_email("alice@test.fr", "some-token") is False
 
 
 @pytest.mark.anyio

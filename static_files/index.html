@@ -159,27 +159,24 @@ async function forgotPassword() {
   const email = document.getElementById('forgotEmail').value;
   try {
     const data = await api('/forgot-password', { email });
-    document.getElementById('forgotMsg').textContent = data.message;
-    if (data.reset_token) {
-      document.getElementById('forgotMsg').textContent += ' (token: ' + data.reset_token + ')';
-      localStorage.setItem('reset_token', data.reset_token);
-      document.getElementById('forgotMsg').className = 'msg success';
-      setTimeout(() => { showPage('reset'); }, 1000);
-    } else {
-      document.getElementById('forgotMsg').className = 'msg success';
-    }
+    // Le token ne transite plus jamais par l'API : le message se contente de confirmer
+    // qu'un email a été envoyé si le compte existe, sans jamais le révéler ici.
+    showMsg('forgotMsg', data.message, 'success');
   } catch (e) {
     showMsg('forgotMsg', e.message, 'error');
   }
 }
 async function resetPassword() {
-  const token = localStorage.getItem('reset_token');
+  // Le token vient du lien reçu par email (paramètre d'URL ?reset_token=...), jamais du
+  // formulaire "mot de passe oublié" côté client.
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('reset_token');
   const password = document.getElementById('resetPassword').value;
-  if (!token) { showMsg('resetMsg', 'Token de réinitialisation manquant.', 'error'); return; }
+  if (!token) { showMsg('resetMsg', 'Lien de réinitialisation invalide ou expiré.', 'error'); return; }
   if (password.length < 6) { showMsg('resetMsg', 'Le mot de passe doit faire au moins 6 caractères.', 'error'); return; }
   try {
     await api('/reset-password', { token, password });
-    localStorage.removeItem('reset_token');
+    history.replaceState(null, '', window.location.pathname);
     showMsg('resetMsg', 'Mot de passe réinitialisé ! Vous pouvez vous connecter.', 'success');
     setTimeout(() => showPage('login'), 1500);
   } catch (e) {
@@ -215,7 +212,11 @@ async function unsubscribe() {
   }
 }
 updateNav();
-if (localStorage.getItem('session_token')) showDashboard();
+if (new URLSearchParams(window.location.search).has('reset_token')) {
+  showPage('reset');
+} else if (localStorage.getItem('session_token')) {
+  showDashboard();
+}
 </script>
 </body>
 </html>
