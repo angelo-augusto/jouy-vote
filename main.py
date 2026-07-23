@@ -413,9 +413,10 @@ def unsubscribe(req: UnsubscribeRequest):
         raise HTTPException(401, "Session invalide.")
     if not check_password(req.password, row["password_hash"]):
         raise HTTPException(401, "Mot de passe incorrect.")
-    vote_token = compute_vote_token(row["token"])
+    # Les votes ne sont volontairement PAS supprimés : vote_token n'a jamais été lié à
+    # l'identité (voir compute_vote_token), et permettre de voter puis d'effacer son vote après
+    # coup si le résultat déplaît casserait la fiabilité du décompte pour tout le monde.
     with db() as conn:
-        conn.execute("DELETE FROM votes WHERE vote_token=?", (vote_token,))
         conn.execute("DELETE FROM identities WHERE token=?", (row["token"],))
     return {"ok": True, "message": "Compte supprimé."}
 

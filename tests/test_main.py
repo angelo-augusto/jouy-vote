@@ -320,6 +320,26 @@ async def test_unsubscribe(client, registered_user, logged_in_user):
 
 
 @pytest.mark.anyio
+async def test_unsubscribe_keeps_votes(client, admin_question, registered_user, logged_in_user):
+    """Les votes déjà exprimés restent comptabilisés après suppression du compte — sinon on
+    pourrait voter puis effacer son vote après coup si le résultat déplaît, ce qui casserait la
+    fiabilité du décompte pour tout le monde. vote_token n'a jamais été lié à l'identité, donc
+    rien n'est perdu en anonymat en les gardant."""
+    qid = admin_question
+    token = registered_user["token"]
+    vote_resp = await client.post("/vote", json={"token": token, "question_id": qid, "choix": "Oui"})
+    assert vote_resp.status_code == 200
+    vote_token = vote_resp.json()["vote_token"]
+
+    session = logged_in_user["session_token"]
+    resp = await client.request("DELETE", "/unsubscribe", json={"session_token": session, "password": PASSWORD})
+    assert resp.status_code == 200
+
+    results = await client.get(f"/results/{qid}")
+    assert {"vote_token": vote_token, "choix": "Oui"} in results.json()["votes"]
+
+
+@pytest.mark.anyio
 async def test_unsubscribe_wrong_password(client, logged_in_user):
     session = logged_in_user["session_token"]
     resp = await client.request("DELETE", "/unsubscribe", json={"session_token": session, "password": "wrong"})
