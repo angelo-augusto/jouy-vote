@@ -234,6 +234,42 @@ async def test_init_db_fixes_reset_token_expiry_type_and_keeps_data(tmp_path, mo
 
 
 @pytest.mark.anyio
+async def test_change_password_success(client, logged_in_user):
+    session = logged_in_user["session_token"]
+    resp = await client.post(
+        "/change-password",
+        json={"session_token": session, "current_password": PASSWORD, "new_password": "new-password-99"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    login = await client.post("/login", json={"email": "alice@test.fr", "password": "new-password-99"})
+    assert login.status_code == 200
+    old_login = await client.post("/login", json={"email": "alice@test.fr", "password": PASSWORD})
+    assert old_login.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_change_password_wrong_current_password(client, logged_in_user):
+    session = logged_in_user["session_token"]
+    resp = await client.post(
+        "/change-password",
+        json={"session_token": session, "current_password": "wrong", "new_password": "new-password-99"},
+    )
+    assert resp.status_code == 401
+    login = await client.post("/login", json={"email": "alice@test.fr", "password": PASSWORD})
+    assert login.status_code == 200  # mot de passe original toujours valide, rien changé
+
+
+@pytest.mark.anyio
+async def test_change_password_invalid_session(client):
+    resp = await client.post(
+        "/change-password",
+        json={"session_token": "not-a-real-session", "current_password": "x", "new_password": "new-password-99"},
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
 async def test_unsubscribe(client, registered_user, logged_in_user):
     session = logged_in_user["session_token"]
     resp = await client.request("DELETE", "/unsubscribe", json={"session_token": session, "password": PASSWORD})

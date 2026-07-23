@@ -192,6 +192,12 @@ class UnsubscribeRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    session_token: str
+    current_password: str
+    new_password: str
+
+
 class LogoutRequest(BaseModel):
     session_token: str
 
@@ -302,6 +308,23 @@ def logout(req: LogoutRequest):
     with db() as conn:
         conn.execute("UPDATE identities SET session_token=NULL WHERE session_token=?", (req.session_token,))
     return {"ok": True}
+
+
+@app.post("/change-password")
+def change_password(req: ChangePasswordRequest):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT token, password_hash FROM identities WHERE session_token=?",
+            (req.session_token,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(401, "Session invalide.")
+    if not check_password(req.current_password, row["password_hash"]):
+        raise HTTPException(401, "Mot de passe actuel incorrect.")
+    password_hash = hash_password(req.new_password)
+    with db() as conn:
+        conn.execute("UPDATE identities SET password_hash=? WHERE token=?", (password_hash, row["token"]))
+    return {"ok": True, "message": "Mot de passe modifié."}
 
 
 @app.post("/forgot-password")

@@ -31,6 +31,7 @@ button { width: 100%; padding: .7em; border: none; border-radius: 4px; font-size
 </head>
 <body>
 <div class="nav" id="navBar">
+  <a onclick="goHome()">🏠 Accueil</a> —
   <span id="navGreeting"></span> <a id="navLogout" class="hidden" onclick="logout()">Déconnexion</a>
 </div>
 <div class="card" id="pageLogin">
@@ -81,6 +82,14 @@ button { width: 100%; padding: .7em; border: none; border-radius: 4px; font-size
   <p><strong>Nom :</strong> <span id="dashNom"></span></p>
   <p><strong>Email :</strong> <span id="dashEmail"></span></p>
   <hr>
+  <h2>Changer mon mot de passe</h2>
+  <div id="changePasswordMsg" class="msg"></div>
+  <label>Mot de passe actuel</label>
+  <input type="password" id="currentPassword" placeholder="••••••••">
+  <label>Nouveau mot de passe</label>
+  <input type="password" id="newPassword" placeholder="Au moins 6 caractères">
+  <button class="btn-primary" onclick="changePassword()">Changer le mot de passe</button>
+  <hr>
   <h2>Se désinscrire</h2>
   <p class="info">Cette action supprime votre compte et vos votes. Elle est irréversible.</p>
   <label>Confirmez votre mot de passe</label>
@@ -99,6 +108,14 @@ function showMsg(id, text, type) {
   const el = document.getElementById(id);
   el.textContent = text;
   el.className = 'msg ' + type;
+}
+function goHome() {
+  history.replaceState(null, '', window.location.pathname);
+  if (localStorage.getItem('session_token')) {
+    showDashboard();
+  } else {
+    showPage('login');
+  }
 }
 async function api(path, body) {
   const res = await fetch(API + path, {
@@ -187,6 +204,24 @@ function showDashboard() {
   document.getElementById('dashNom').textContent = localStorage.getItem('user_nom');
   document.getElementById('dashEmail').textContent = localStorage.getItem('user_email');
   showPage('dashboard');
+}
+async function changePassword() {
+  const current_password = document.getElementById('currentPassword').value;
+  const new_password = document.getElementById('newPassword').value;
+  const session_token = localStorage.getItem('session_token');
+  if (!session_token) { showMsg('changePasswordMsg', 'Session invalide.', 'error'); return; }
+  if (new_password.length < 6) {
+    showMsg('changePasswordMsg', 'Le nouveau mot de passe doit faire au moins 6 caractères.', 'error');
+    return;
+  }
+  try {
+    const data = await api('/change-password', { session_token, current_password, new_password });
+    document.getElementById('currentPassword').value = '';
+    document.getElementById('newPassword').value = '';
+    showMsg('changePasswordMsg', data.message, 'success');
+  } catch (e) {
+    showMsg('changePasswordMsg', e.message, 'error');
+  }
 }
 async function unsubscribe() {
   const password = document.getElementById('unsubPassword').value;
