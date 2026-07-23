@@ -49,7 +49,7 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <h1>Jouy Vote Citoyen</h1>
   <p>Ce site recueille les idées, faits et opinions des habitants de Jouy pour construire ensemble des outils de démocratie participative locale. Le projet est né de la mobilisation citoyenne autour des tilleuls de l'avenue de la Gare.</p>
   <button class="btn-primary" onclick="showPage('login')">Connexion</button>
-  <p class="info">Inscriptions temporairement fermées — le parrainage arrive bientôt.</p>
+  <p class="info">Inscription possible uniquement sur invitation d'un jovien déjà inscrit.</p>
   <hr>
   <div id="wikiHomeContent"><p class="info">Chargement du wiki…</p></div>
 </div>
@@ -62,11 +62,12 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <label>Mot de passe</label>
   <input type="password" id="loginPassword" placeholder="••••••••">
   <button class="btn-primary" onclick="login()">Connexion</button>
-  <p class="info">Inscriptions temporairement fermées — le parrainage arrive bientôt.</p>
+  <p class="info">Inscription possible uniquement sur invitation d'un jovien déjà inscrit.</p>
   <button class="btn-link" onclick="showPage('forgot')">Mot de passe oublié</button>
 </div>
 <div class="card hidden" id="pageRegister">
   <h2>Inscription</h2>
+  <p id="registerInviteInfo" class="info hidden"></p>
   <div id="registerMsg" class="msg"></div>
   <label>Nom</label>
   <input type="text" id="regNom" placeholder="Votre nom">
@@ -101,6 +102,19 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <p><strong>Nom :</strong> <span id="dashNom"></span></p>
   <p><strong>Email :</strong> <span id="dashEmail"></span></p>
   <hr>
+  <details class="settings" id="referralSection" ontoggle="if (this.open) loadReferralStatus()">
+    <summary>👥 Parrainer</summary>
+    <p class="info" id="referralQuota">Chargement…</p>
+    <div id="referralMsg" class="msg"></div>
+    <label>Email de la personne à parrainer</label>
+    <input type="email" id="referralEmail" placeholder="filleul@email.fr">
+    <label style="display:flex; align-items:flex-start; gap:.5em; font-weight:normal;">
+      <input type="checkbox" id="referralConfirm" style="width:auto; margin-top:.2em;">
+      <span>J'affirme que cette personne habite Jouy et est majeure.</span>
+    </label>
+    <button class="btn-primary" id="referralSubmitBtn" onclick="sendReferralInvite()">Envoyer l'invitation</button>
+    <div id="referralInvitesList"></div>
+  </details>
   <details class="settings">
     <summary>⚙️ Paramètres</summary>
     <h2>Changer mon mot de passe</h2>
@@ -180,6 +194,24 @@ async function login() {
     showMsg('loginMsg', e.message, 'error');
   }
 }
+let currentInviteToken = null;
+async function loadInviteInfo(invite_token) {
+  try {
+    const res = await fetch(API + '/referral/invite/' + encodeURIComponent(invite_token));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Invitation invalide.');
+    currentInviteToken = invite_token;
+    showPage('register');
+    document.getElementById('registerInviteInfo').textContent =
+      'Vous avez été invité(e) par ' + data.referrer_nom + '.';
+    document.getElementById('registerInviteInfo').classList.remove('hidden');
+    document.getElementById('regEmail').value = data.invitee_email;
+    document.getElementById('regEmail').readOnly = true;
+  } catch (e) {
+    showPage('login');
+    showMsg('loginMsg', e.message, 'error');
+  }
+}
 async function register() {
   const nom = document.getElementById('regNom').value;
   const adresse = document.getElementById('regAdresse').value;
@@ -187,7 +219,8 @@ async function register() {
   const password = document.getElementById('regPassword').value;
   if (password.length < 6) { showMsg('registerMsg', 'Le mot de passe doit faire au moins 6 caractères.', 'error'); return; }
   try {
-    await api('/register', { nom, adresse, email, password });
+    await api('/register', { nom, adresse, email, password, invite_token: currentInviteToken });
+    history.replaceState(null, '', window.location.pathname);
     showMsg('registerMsg', 'Inscription réussie ! Vous pouvez maintenant vous connecter.', 'success');
     setTimeout(() => showPage('login'), 1500);
   } catch (e) {
@@ -255,6 +288,48 @@ async function changePassword() {
     showMsg('changePasswordMsg', e.message, 'error');
   }
 }
+async function loadReferralStatus() {
+  const session_token = localStorage.getItem('session_token');
+  if (!session_token) return;
+  try {
+    const data = await api('/referral/status', { session_token });
+    document.getElementById('referralQuota').textContent =
+      data.used + ' / ' + data.max + ' filleuls parrainés (' + data.remaining + ' place' + (data.remaining !== 1 ? 's' : '') + ' restante' + (data.remaining !== 1 ? 's' : '') + ')';
+    const list = document.getElementById('referralInvitesList');
+    if (data.invites.length === 0) {
+      list.innerHTML = '';
+    } else {
+      list.innerHTML = '<p class="info" style="margin-top:1em;">Invitations envoyées :</p>' +
+        '<ul style="font-size:.85em; color:#666; padding-left:1.2em; margin:0;">' +
+        data.invites.map(inv => '<li>' + inv.email + ' — ' + (inv.used ? 'inscrit(e)' : 'en attente') + '</li>').join('') +
+        '</ul>';
+    }
+    const full = data.remaining <= 0;
+    document.getElementById('referralEmail').disabled = full;
+    document.getElementById('referralConfirm').disabled = full;
+    document.getElementById('referralSubmitBtn').disabled = full;
+  } catch (e) {
+    document.getElementById('referralQuota').textContent = 'Impossible de charger le statut.';
+  }
+}
+async function sendReferralInvite() {
+  const invitee_email = document.getElementById('referralEmail').value;
+  const confirms_residency_and_age = document.getElementById('referralConfirm').checked;
+  const session_token = localStorage.getItem('session_token');
+  if (!confirms_residency_and_age) {
+    showMsg('referralMsg', 'Vous devez confirmer que cette personne habite Jouy et est majeure.', 'error');
+    return;
+  }
+  try {
+    const data = await api('/referral/invite', { session_token, invitee_email, confirms_residency_and_age });
+    document.getElementById('referralEmail').value = '';
+    document.getElementById('referralConfirm').checked = false;
+    showMsg('referralMsg', data.message, 'success');
+    loadReferralStatus();
+  } catch (e) {
+    showMsg('referralMsg', e.message, 'error');
+  }
+}
 async function unsubscribe() {
   const password = document.getElementById('unsubPassword').value;
   const session_token = localStorage.getItem('session_token');
@@ -279,8 +354,11 @@ async function unsubscribe() {
   }
 }
 updateNav();
-if (new URLSearchParams(window.location.search).has('reset_token')) {
+const _initParams = new URLSearchParams(window.location.search);
+if (_initParams.has('reset_token')) {
   showPage('reset');
+} else if (_initParams.has('invite_token')) {
+  loadInviteInfo(_initParams.get('invite_token'));
 } else if (localStorage.getItem('session_token')) {
   showDashboard();
 } else {

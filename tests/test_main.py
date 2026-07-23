@@ -86,7 +86,7 @@ async def test_register_closed_by_default(client, monkeypatch):
     body = {"nom": "Zoe", "adresse": "9 Rue Nouvelle", "email": "zoe@test.fr", "password": PASSWORD}
     resp = await client.post("/register", json=body)
     assert resp.status_code == 403
-    assert "ferm" in resp.json()["detail"].lower()
+    assert "parrainage" in resp.json()["detail"].lower()
     # aucun compte créé malgré la tentative
     login = await client.post("/login", json={"email": "zoe@test.fr", "password": PASSWORD})
     assert login.status_code == 401
@@ -507,6 +507,216 @@ async def test_patch_question_deactivate(client):
     questions = await client.get("/questions")
     ids = [q["id"] for q in questions.json()]
     assert qid not in ids
+
+
+@pytest.fixture
+def captured_referral_email(monkeypatch):
+    """Intercepte send_referral_invite_email au lieu d'appeler Brevo : capture
+    (email, referrer_nom, invite_token) envoyés."""
+    calls = []
+
+    def fake_send(to_email, referrer_nom, invite_token):
+        calls.append((to_email, referrer_nom, invite_token))
+        return True
+
+    monkeypatch.setattr(main, "send_referral_invite_email", fake_send)
+    return calls
+
+
+@pytest.mark.anyio
+async def test_referral_invite_requires_confirmation(client, logged_in_user):
+    resp = await client.post(
+        "/referral/invite",
+        json={
+            "session_token": logged_in_user["session_token"],
+            "invitee_email": "filleul@test.fr",
+            "confirms_residency_and_age": False,
+        },
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_referral_invite_requires_valid_session(client):
+    resp = await client.post(
+        "/referral/invite",
+        json={
+            "session_token": "fake-session",
+            "invitee_email": "filleul@test.fr",
+            "confirms_residency_and_age": True,
+        },
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_referral_invite_success_sends_email(client, logged_in_user, captured_referral_email):
+    resp = await client.post(
+        "/referral/invite",
+        json={
+            "session_token": logged_in_user["session_token"],
+            "invitee_email": "Filleul@Test.fr",
+            "confirms_residency_and_age": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert len(captured_referral_email) == 1
+    email, referrer_nom, invite_token = captured_referral_email[0]
+    assert email == "filleul@test.fr"  # normalisé en minuscules
+    assert referrer_nom == "Alice"
+    assert invite_token
+
+
+@pytest.mark.anyio
+async def test_referral_invite_info_resolves_referrer_name(client, logged_in_user, captured_referral_email):
+    await client.post(
+        "/referral/invite",
+        json={
+            "session_token": logged_in_user["session_token"],
+            "invitee_email": "filleul@test.fr",
+            "confirms_residency_and_age": True,
+        },
+    )
+    invite_token = captured_referral_email[0][2]
+    resp = await client.get(f"/referral/invite/{invite_token}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["referrer_nom"] == "Alice"
+    assert data["invitee_email"] == "filleul@test.fr"
+
+
+@pytest.mark.anyio
+async def test_referral_invite_info_unknown_token(client):
+    resp = await client.get("/referral/invite/does-not-exist")
+    assert resp.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_register_with_valid_invite_succeeds(client, logged_in_user, captured_referral_email, monkeypatch):
+    monkeypatch.setattr(main, "REGISTRATIONS_OPEN", False)
+    await client.post(
+        "/referral/invite",
+        json={
+            "session_token": logged_in_user["session_token"],
+            "invitee_email": "filleul@test.fr",
+            "confirms_residency_and_age": True,
+        },
+    )
+    invite_token = captured_referral_email[0][2]
+
+    resp = await client.post(
+        "/register",
+        json={
+            "nom": "Filleul",
+            "adresse": "5 Rue du Filleul",
+            "email": "filleul@test.fr",
+            "password": PASSWORD,
+            "invite_token": invite_token,
+        },
+    )
+    assert resp.status_code == 200
+
+    # l'invitation est marquée utilisée, réutilisation refusée
+    resp2 = await client.post(
+        "/register",
+        json={
+            "nom": "Filleul Bis",
+            "adresse": "6 Rue du Filleul",
+            "email": "filleul@test.fr",
+            "password": PASSWORD,
+            "invite_token": invite_token,
+        },
+    )
+    assert resp2.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_register_with_invite_email_mismatch_rejected(client, logged_in_user, captured_referral_email, monkeypatch):
+    monkeypatch.setattr(main, "REGISTRATIONS_OPEN", False)
+    await client.post(
+        "/referral/invite",
+        json={
+            "session_token": logged_in_user["session_token"],
+            "invitee_email": "filleul@test.fr",
+            "confirms_residency_and_age": True,
+        },
+    )
+    invite_token = captured_referral_email[0][2]
+
+    resp = await client.post(
+        "/register",
+        json={
+            "nom": "Imposteur",
+            "adresse": "7 Rue Suspecte",
+            "email": "autre-email@test.fr",
+            "password": PASSWORD,
+            "invite_token": invite_token,
+        },
+    )
+    assert resp.status_code == 403
+    assert "correspond" in resp.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_referral_max_five_enforced(client, logged_in_user, captured_referral_email, monkeypatch):
+    monkeypatch.setattr(main, "REGISTRATIONS_OPEN", False)
+    session = logged_in_user["session_token"]
+
+    for i in range(main.REFERRAL_MAX):
+        await client.post(
+            "/referral/invite",
+            json={
+                "session_token": session,
+                "invitee_email": f"filleul{i}@test.fr",
+                "confirms_residency_and_age": True,
+            },
+        )
+        invite_token = captured_referral_email[i][2]
+        resp = await client.post(
+            "/register",
+            json={
+                "nom": f"Filleul {i}",
+                "adresse": f"{i} Rue du Filleul",
+                "email": f"filleul{i}@test.fr",
+                "password": PASSWORD,
+                "invite_token": invite_token,
+            },
+        )
+        assert resp.status_code == 200
+
+    # le quota est atteint : création d'une 6e invitation refusée
+    resp = await client.post(
+        "/referral/invite",
+        json={
+            "session_token": session,
+            "invitee_email": "filleul-refuse@test.fr",
+            "confirms_residency_and_age": True,
+        },
+    )
+    assert resp.status_code == 403
+    assert "quota" in resp.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+async def test_referral_status_reports_quota_and_invites(client, logged_in_user, captured_referral_email):
+    session = logged_in_user["session_token"]
+    await client.post(
+        "/referral/invite",
+        json={"session_token": session, "invitee_email": "filleul@test.fr", "confirms_residency_and_age": True},
+    )
+    resp = await client.post("/referral/status", json={"session_token": session})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["used"] == 0  # invitation envoyée mais pas encore inscrite
+    assert data["remaining"] == main.REFERRAL_MAX
+    assert data["max"] == main.REFERRAL_MAX
+    assert data["invites"] == [{"email": "filleul@test.fr", "used": False}]
+
+
+@pytest.mark.anyio
+async def test_referral_status_invalid_session(client):
+    resp = await client.post("/referral/status", json={"session_token": "fake"})
+    assert resp.status_code == 401
 
 
 @pytest.mark.anyio

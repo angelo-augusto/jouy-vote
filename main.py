@@ -41,6 +41,11 @@ SITE_URL = os.environ.get("SITE_URL", "https://jouyvote.fr")
 WIKI_INTERNAL_URL = os.environ.get("WIKI_INTERNAL_URL", "http://wiki:8080")
 WIKI_PUBLIC_URL = os.environ.get("WIKI_PUBLIC_URL", "https://wiki.jouyvote.fr")
 
+# Nombre maximum de filleuls par parrain (voir wiki.jouyvote.fr/themes:representation) : limite
+# l'impact d'un parrain complaisant ou compromis qui ferait entrer un grand nombre de faux
+# comptes d'un coup. Contrôlé à la fois à la création de l'invitation et à l'inscription.
+REFERRAL_MAX = 5
+
 # Coupe-circuit temporaire (faille Sybil : rien n'empêche aujourd'hui de créer un faux compte
 # résident) — fermé par défaut tant que le parrainage n'est pas construit. Flag d'env plutôt
 # qu'en dur pour pouvoir rouvrir sans redéployer de code le moment venu.
@@ -117,6 +122,15 @@ def init_db():
                 PRIMARY KEY (vote_token, question_id)
             )"""
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS referral_invites (
+                invite_token TEXT PRIMARY KEY,
+                referrer_token TEXT NOT NULL,
+                invitee_email TEXT NOT NULL,
+                used INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
     with db() as conn:
         # Type explicite par colonne (pas juste TEXT pour tout) : ADD COLUMN ne s'applique que
         # si la colonne n'existe pas encore, donc ceci ne corrige que les tables qui n'ont
@@ -127,6 +141,7 @@ def init_db():
             "session_token": "TEXT",
             "reset_token": "TEXT",
             "reset_token_expiry": "REAL",
+            "referred_by_token": "TEXT",
         }
         for col, col_type in column_types.items():
             try:
@@ -182,6 +197,7 @@ class Registration(BaseModel):
     adresse: str
     email: str
     password: str
+    invite_token: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -207,6 +223,16 @@ class ChangePasswordRequest(BaseModel):
     session_token: str
     current_password: str
     new_password: str
+
+
+class ReferralInviteRequest(BaseModel):
+    session_token: str
+    invitee_email: str
+    confirms_residency_and_age: bool
+
+
+class ReferralStatusRequest(BaseModel):
+    session_token: str
 
 
 class LogoutRequest(BaseModel):
@@ -280,6 +306,45 @@ def send_reset_email(to_email: str, reset_token: str) -> bool:
         return False
 
 
+def send_referral_invite_email(to_email: str, referrer_nom: str, invite_token: str) -> bool:
+    """Envoie le lien d'inscription pré-approuvé au filleul. Le lien EST le déclencheur
+    d'inscription (pas une validation a posteriori d'un compte déjà créé) : le filleul clique,
+    complète lui-même son inscription, ce qui prouve qu'il contrôle l'email et consent
+    réellement. Ne lève jamais, retourne False en cas d'échec (mêmes garanties que
+    send_reset_email)."""
+    if not BREVO_API_KEY:
+        return False
+    invite_link = f"{SITE_URL}/?invite_token={invite_token}"
+    body = json.dumps(
+        {
+            "sender": {"email": BREVO_SENDER_EMAIL, "name": "Jouy Vote Citoyen"},
+            "to": [{"email": to_email}],
+            "subject": f"{referrer_nom} vous invite à rejoindre Jouy Vote Citoyen",
+            "htmlContent": (
+                f"<p>{referrer_nom} vous invite à rejoindre Jouy Vote Citoyen, l'outil de "
+                f"démocratie participative locale des habitants de Jouy.</p>"
+                f'<p><a href="{invite_link}">Cliquez ici pour compléter votre inscription</a></p>'
+                f"<p>Ce lien est personnel, ne le partagez pas.</p>"
+            ),
+        }
+    ).encode()
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=body,
+        headers={
+            "api-key": BREVO_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.URLError:
+        return False
+
+
 def fetch_wiki_home_content() -> str:
     """Va chercher le rendu de la page 'start' du wiki pour l'afficher sur la page d'accueil.
 
@@ -310,8 +375,32 @@ def wiki_home_content():
 
 @app.post("/register")
 def register(r: Registration):
+    # Le lien de parrainage EST le déclencheur d'inscription (pas une validation a posteriori
+    # d'un compte déjà créé) : un invite_token valide, non consommé, dont l'email correspond
+    # exactement, est requis tant que les inscriptions ne sont pas rouvertes globalement
+    # (REGISTRATIONS_OPEN, réservé au bootstrap/à une réouverture d'urgence).
+    referred_by_token = None
     if not REGISTRATIONS_OPEN:
-        raise HTTPException(403, "Inscriptions temporairement fermées — le parrainage arrive bientôt.")
+        if not r.invite_token:
+            raise HTTPException(403, "Inscription accessible uniquement via un lien de parrainage.")
+        with db() as conn:
+            invite = conn.execute(
+                "SELECT referrer_token, invitee_email FROM referral_invites WHERE invite_token=? AND used=0",
+                (r.invite_token,),
+            ).fetchone()
+        if not invite:
+            raise HTTPException(403, "Invitation invalide ou déjà utilisée.")
+        if invite["invitee_email"].strip().lower() != r.email.strip().lower():
+            raise HTTPException(403, "Cet email ne correspond pas à l'invitation reçue.")
+        with db() as conn:
+            current_count = conn.execute(
+                "SELECT COUNT(*) as n FROM identities WHERE referred_by_token=?",
+                (invite["referrer_token"],),
+            ).fetchone()["n"]
+        if current_count >= REFERRAL_MAX:
+            raise HTTPException(403, "Ce parrain a atteint son quota de filleuls.")
+        referred_by_token = invite["referrer_token"]
+
     identity_hash = compute_identity_hash(r.nom, r.adresse)
     token = secrets.token_urlsafe(32)
     session_token = secrets.token_urlsafe(32)
@@ -319,11 +408,13 @@ def register(r: Registration):
     with db() as conn:
         try:
             conn.execute(
-                "INSERT INTO identities (token, identity_hash, nom, adresse, email, password_hash, session_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (token, identity_hash, r.nom.strip(), r.adresse.strip(), r.email, password_hash, session_token),
+                "INSERT INTO identities (token, identity_hash, nom, adresse, email, password_hash, session_token, referred_by_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (token, identity_hash, r.nom.strip(), r.adresse.strip(), r.email, password_hash, session_token, referred_by_token),
             )
         except sqlite3.IntegrityError:
             raise HTTPException(409, "Cette identité (nom + adresse) est déjà inscrite.")
+        if referred_by_token:
+            conn.execute("UPDATE referral_invites SET used=1 WHERE invite_token=?", (r.invite_token,))
     return {"token": token, "session_token": session_token, "message": "Inscription réussie."}
 
 
@@ -366,6 +457,76 @@ def change_password(req: ChangePasswordRequest):
     with db() as conn:
         conn.execute("UPDATE identities SET password_hash=? WHERE token=?", (password_hash, row["token"]))
     return {"ok": True, "message": "Mot de passe modifié."}
+
+
+@app.post("/referral/invite")
+def referral_invite(req: ReferralInviteRequest):
+    if not req.confirms_residency_and_age:
+        raise HTTPException(400, "Vous devez confirmer que cette personne habite Jouy et est majeure.")
+    with db() as conn:
+        referrer = conn.execute(
+            "SELECT token, nom FROM identities WHERE session_token=?", (req.session_token,)
+        ).fetchone()
+    if not referrer:
+        raise HTTPException(401, "Session invalide.")
+    with db() as conn:
+        current_count = conn.execute(
+            "SELECT COUNT(*) as n FROM identities WHERE referred_by_token=?", (referrer["token"],)
+        ).fetchone()["n"]
+    if current_count >= REFERRAL_MAX:
+        raise HTTPException(403, f"Quota de {REFERRAL_MAX} filleuls déjà atteint.")
+    invite_token = secrets.token_urlsafe(32)
+    invitee_email = req.invitee_email.strip().lower()
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO referral_invites (invite_token, referrer_token, invitee_email) VALUES (?, ?, ?)",
+            (invite_token, referrer["token"], invitee_email),
+        )
+    send_referral_invite_email(invitee_email, referrer["nom"], invite_token)
+    return {"ok": True, "message": "Invitation envoyée."}
+
+
+@app.get("/referral/invite/{invite_token}")
+def referral_invite_info(invite_token: str):
+    with db() as conn:
+        invite = conn.execute(
+            "SELECT referrer_token, invitee_email, used FROM referral_invites WHERE invite_token=?",
+            (invite_token,),
+        ).fetchone()
+    if not invite:
+        raise HTTPException(404, "Invitation introuvable.")
+    if invite["used"]:
+        raise HTTPException(410, "Cette invitation a déjà été utilisée.")
+    with db() as conn:
+        referrer = conn.execute("SELECT nom FROM identities WHERE token=?", (invite["referrer_token"],)).fetchone()
+    return {
+        "invitee_email": invite["invitee_email"],
+        "referrer_nom": referrer["nom"] if referrer else "quelqu'un",
+    }
+
+
+@app.post("/referral/status")
+def referral_status(req: ReferralStatusRequest):
+    with db() as conn:
+        referrer = conn.execute(
+            "SELECT token FROM identities WHERE session_token=?", (req.session_token,)
+        ).fetchone()
+    if not referrer:
+        raise HTTPException(401, "Session invalide.")
+    with db() as conn:
+        used = conn.execute(
+            "SELECT COUNT(*) as n FROM identities WHERE referred_by_token=?", (referrer["token"],)
+        ).fetchone()["n"]
+        invites = conn.execute(
+            "SELECT invitee_email, used FROM referral_invites WHERE referrer_token=? ORDER BY created_at DESC",
+            (referrer["token"],),
+        ).fetchall()
+    return {
+        "used": used,
+        "remaining": max(0, REFERRAL_MAX - used),
+        "max": REFERRAL_MAX,
+        "invites": [{"email": i["invitee_email"], "used": bool(i["used"])} for i in invites],
+    }
 
 
 @app.post("/forgot-password")
