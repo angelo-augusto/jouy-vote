@@ -100,6 +100,10 @@ async def test_login_success(client, registered_user):
     assert "session_token" in data
     assert data["nom"] == "Alice"
     assert data["email"] == "alice@test.fr"
+    # Nécessaire pour que la page Voter fonctionne après une reconnexion (pas seulement juste
+    # après l'inscription dans le même navigateur) : /login doit aussi renvoyer le jeton
+    # d'identité, déjà renvoyé une fois à l'inscription.
+    assert data["token"] == registered_user["token"]
 
 
 @pytest.mark.anyio

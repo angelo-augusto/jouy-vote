@@ -15,6 +15,7 @@ from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -334,7 +335,7 @@ def send_reset_email(to_email: str, reset_token: str) -> bool:
     """
     if not BREVO_API_KEY:
         return False
-    reset_link = f"{SITE_URL}/?reset_token={reset_token}"
+    reset_link = f"{SITE_URL}/reset-password?token={reset_token}"
     body = json.dumps(
         {
             "sender": {"email": BREVO_SENDER_EMAIL, "name": "Jouy Vote Citoyen"},
@@ -373,7 +374,7 @@ def send_referral_invite_email(to_email: str, referrer_nom: str, invite_token: s
     send_reset_email)."""
     if not BREVO_API_KEY:
         return False
-    invite_link = f"{SITE_URL}/?invite_token={invite_token}"
+    invite_link = f"{SITE_URL}/register?token={invite_token}"
     body = json.dumps(
         {
             "sender": {"email": BREVO_SENDER_EMAIL, "name": "Jouy Vote Citoyen"},
@@ -515,7 +516,13 @@ def login(req: LoginRequest):
     session_token = secrets.token_urlsafe(32)
     with db() as conn:
         conn.execute("UPDATE identities SET session_token=? WHERE token=?", (session_token, row["token"]))
-    return {"session_token": session_token, "nom": row["nom"], "email": req.email}
+    # token renvoyé en plus de session_token : c'est le jeton d'identité nécessaire pour voter
+    # (POST /vote), déjà renvoyé une fois à l'inscription mais jamais récupérable après si
+    # l'utilisateur se reconnecte sur un autre appareil ou après avoir vidé son navigateur —
+    # sans ça la page Voter serait cassée pour quasi tout le monde. Aucun pouvoir nouveau accordé
+    # : l'utilisateur est déjà propriétaire légitime de ce token en s'étant authentifié par
+    # mot de passe (c'est la clé primaire de sa propre ligne dans identities).
+    return {"session_token": session_token, "token": row["token"], "nom": row["nom"], "email": req.email}
 
 
 @app.post("/logout")
@@ -839,7 +846,21 @@ def results(question_id: int):
     }
 
 
-app.mount("/", StaticFiles(directory="static_files", html=True), name="static")
+# Routes de "fallback SPA" : le routage entre pages se fait côté client (JS, history.pushState),
+# mais une navigation directe ou un rafraîchissement sur /vote, /assistant, etc. doit quand même
+# renvoyer l'appli (index.html), pas un 404 — StaticFiles seul ne sait servir que des fichiers
+# qui existent réellement sur disque. /register et /reset-password ne sont jamais dans le menu
+# (accessibles seulement via un lien reçu par email) mais ont besoin du même traitement.
+_SPA_ROUTES = ["/", "/login", "/vote", "/assistant", "/parrainer", "/compte", "/register", "/reset-password"]
+for _route in _SPA_ROUTES:
+    app.add_api_route(
+        _route,
+        lambda: FileResponse("static_files/index.html"),
+        methods=["GET"],
+        include_in_schema=False,
+    )
+
+app.mount("/static_files", StaticFiles(directory="static_files"), name="static")
 
 
 if __name__ == "__main__":
