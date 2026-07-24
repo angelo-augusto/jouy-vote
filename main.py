@@ -266,6 +266,10 @@ class ReferralStatusRequest(BaseModel):
     session_token: str
 
 
+class MyVoteTokenRequest(BaseModel):
+    session_token: str
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -617,6 +621,16 @@ def referral_status(req: ReferralStatusRequest):
         "max": REFERRAL_MAX,
         "invites": [{"email": i["invitee_email"], "used": bool(i["used"])} for i in invites],
     }
+
+
+@app.post("/my-vote-token")
+def my_vote_token(req: MyVoteTokenRequest):
+    # vote_token est le MÊME pour toutes les questions d'un utilisateur (dérivé uniquement de
+    # son token d'identité + le pepper, jamais du question_id) — c'est ce qu'il retrouve déjà
+    # publiquement dans /results à côté de son choix. Calcul nécessairement côté serveur : le
+    # pepper est un secret serveur, jamais exposé au client.
+    identity_token = _require_identity(req.session_token)
+    return {"vote_token": compute_vote_token(identity_token)}
 
 
 def _require_identity(session_token: str) -> str:

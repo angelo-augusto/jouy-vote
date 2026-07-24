@@ -147,6 +147,20 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <p><strong>Nom :</strong> <span id="compteNom"></span></p>
   <p><strong>Email :</strong> <span id="compteEmail"></span></p>
   <hr>
+  <label>Mon jeton de vote</label>
+  <p>
+    <span id="voteTokenMasked" style="font-family: monospace;">••••••••••••••••••••••••••••••••</span>
+    <span id="voteTokenValue" class="hidden" style="font-family: monospace; word-break: break-all;"></span>
+  </p>
+  <button class="btn-link" id="voteTokenToggleBtn">Afficher</button>
+  <p id="voteTokenExplain" class="info hidden">
+    Ce code apparaît déjà publiquement à côté de ton choix dans les résultats de chaque vote —
+    il n'est pas caché en soi. Ce qui protège ton anonymat, c'est que TOI SEUL sais qu'il
+    t'appartient. Ne dis jamais à personne que ce code précis est le tien, même à un
+    administrateur : c'est la seule façon de garder ton vote anonyme. Utilise-le pour retrouver
+    ta ligne dans les résultats et vérifier que ton choix a bien été compté.
+  </p>
+  <hr>
   <details class="settings">
     <summary>⚙️ Changer mon mot de passe</summary>
     <div id="changePasswordMsg" class="msg"></div>
@@ -269,6 +283,7 @@ function render() {
   else if (pageName === 'Compte') {
     document.getElementById('compteNom').textContent = localStorage.getItem('user_nom');
     document.getElementById('compteEmail').textContent = localStorage.getItem('user_email');
+    resetVoteTokenDisplay();
   }
 }
 
@@ -569,6 +584,41 @@ async function sendReferralInvite() {
 }
 
 // ---------- mon compte ----------
+let revealedVoteToken = null;
+function resetVoteTokenDisplay() {
+  revealedVoteToken = null;
+  document.getElementById('voteTokenMasked').classList.remove('hidden');
+  document.getElementById('voteTokenValue').classList.add('hidden');
+  document.getElementById('voteTokenValue').textContent = '';
+  document.getElementById('voteTokenExplain').classList.add('hidden');
+  document.getElementById('voteTokenToggleBtn').textContent = 'Afficher';
+}
+async function toggleVoteToken() {
+  const masked = document.getElementById('voteTokenMasked');
+  const value = document.getElementById('voteTokenValue');
+  const explain = document.getElementById('voteTokenExplain');
+  const btn = document.getElementById('voteTokenToggleBtn');
+  if (!masked.classList.contains('hidden')) {
+    // révéler : va chercher la valeur au moment du clic, jamais avant
+    const session_token = localStorage.getItem('session_token');
+    try {
+      const data = await api('/my-vote-token', { session_token });
+      revealedVoteToken = data.vote_token;
+      value.textContent = revealedVoteToken;
+      masked.classList.add('hidden');
+      value.classList.remove('hidden');
+      explain.classList.remove('hidden');
+      btn.textContent = 'Masquer';
+    } catch (e) {
+      showMsg('compteMsg', e.message, 'error');
+    }
+  } else {
+    masked.classList.remove('hidden');
+    value.classList.add('hidden');
+    explain.classList.add('hidden');
+    btn.textContent = 'Afficher';
+  }
+}
 async function changePassword() {
   const current_password = document.getElementById('currentPassword').value;
   const new_password = document.getElementById('newPassword').value;
@@ -628,6 +678,7 @@ document.getElementById('chatSaveBtn').addEventListener('click', proposeSaveChat
 document.getElementById('chatConfirmSaveBtn').addEventListener('click', confirmSaveChatSummary);
 document.getElementById('chatCancelSaveBtn').addEventListener('click', () => document.getElementById('chatSummaryProposal').classList.add('hidden'));
 document.getElementById('referralSubmitBtn').addEventListener('click', sendReferralInvite);
+document.getElementById('voteTokenToggleBtn').addEventListener('click', toggleVoteToken);
 document.getElementById('changePasswordBtn').addEventListener('click', changePassword);
 document.getElementById('unsubscribeBtn').addEventListener('click', unsubscribe);
 

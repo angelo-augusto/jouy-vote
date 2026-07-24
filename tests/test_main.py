@@ -723,6 +723,28 @@ async def test_referral_status_invalid_session(client):
     assert resp.status_code == 401
 
 
+@pytest.mark.anyio
+async def test_my_vote_token_matches_results(client, admin_question, registered_user, logged_in_user):
+    qid = admin_question
+    token = registered_user["token"]
+    vote_resp = await client.post("/vote", json={"token": token, "question_id": qid, "choix": "Oui"})
+    expected_vote_token = vote_resp.json()["vote_token"]
+
+    resp = await client.post("/my-vote-token", json={"session_token": logged_in_user["session_token"]})
+    assert resp.status_code == 200
+    assert resp.json()["vote_token"] == expected_vote_token
+
+    # même valeur retrouvée publiquement dans /results, à côté du choix
+    results = await client.get(f"/results/{qid}")
+    assert {"vote_token": expected_vote_token, "choix": "Oui"} in results.json()["votes"]
+
+
+@pytest.mark.anyio
+async def test_my_vote_token_invalid_session(client):
+    resp = await client.post("/my-vote-token", json={"session_token": "fake"})
+    assert resp.status_code == 401
+
+
 @pytest.fixture
 def mocked_chat_llm(monkeypatch):
     """Intercepte call_chat_llm au lieu d'appeler OpenRouter : capture les messages envoyés,
