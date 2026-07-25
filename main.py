@@ -49,6 +49,11 @@ BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
 BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL", "noreply@jouyvote.fr")
 SITE_URL = os.environ.get("SITE_URL", "https://jouyvote.fr")
 
+# Destinataire des signalements de bug / demandes d'intervention admin (2026-07-25, demande
+# développeur) — adresse confirmée par Angelo, déjà pontée email→Matrix côté angelobot. Même
+# garde-fou qu'au-dessus : absente = fonctionnalité désactivée proprement, jamais un crash.
+ADMIN_BUG_EMAIL = os.environ.get("ADMIN_BUG_EMAIL", "ab@angeloaugusto.fr")
+
 # URL interne (réseau Docker, service "wiki" du même docker-compose.yml) pour aller chercher le
 # contenu de la page d'accueil du wiki à afficher sur la page d'accueil de jouyvote.fr — plus
 # rapide et plus fiable qu'un aller-retour par le tunnel Cloudflare public.
@@ -344,6 +349,32 @@ def init_db():
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_admin_messages_recipient ON admin_messages(recipient_debate_token)"
+        )
+        # Signalement de bug / demande d'intervention admin (2026-07-25, demande développeur) —
+        # 2 tables séparées bien que même mécanique (email direct, pas de confirmation utilisateur,
+        # rate-limité) : sémantiquement différentes (bug logiciel général vs demande personnelle
+        # sur son propre compte, ex. anonymat compromis). debate_token sert UNIQUEMENT au
+        # rate-limiting côté serveur — jamais inclus dans le corps de l'email envoyé (voir
+        # send_bug_report_email/send_admin_intervention_email).
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS bug_reports (
+                report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                debate_token TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bug_reports_debate_token ON bug_reports(debate_token)")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS admin_intervention_requests (
+                request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                debate_token TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_admin_intervention_debate_token ON admin_intervention_requests(debate_token)"
         )
     with db() as conn:
         # Type explicite par colonne (pas juste TEXT pour tout) : ADD COLUMN ne s'applique que
@@ -997,6 +1028,93 @@ def send_reset_email(to_email: str, reset_token: str) -> bool:
         return False
 
 
+def _send_admin_email(subject: str, description: str) -> bool:
+    """Envoi générique vers ADMIN_BUG_EMAIL (même pattern Brevo que send_reset_email) — utilisé
+    par report_bug ET request_admin_intervention (2026-07-25, demande développeur : même
+    mécanique pour les deux). Le corps ne contient QUE la description — jamais d'email, de
+    session_token ou d'identity_token, même si l'appelant les avait sous la main."""
+    if not BREVO_API_KEY or not ADMIN_BUG_EMAIL:
+        return False
+    body = json.dumps(
+        {
+            "sender": {"email": BREVO_SENDER_EMAIL, "name": "Jouy Vote Citoyen"},
+            "to": [{"email": ADMIN_BUG_EMAIL}],
+            "subject": subject,
+            "htmlContent": f"<p>{description}</p>",
+        }
+    ).encode()
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=body,
+        headers={
+            "api-key": BREVO_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.URLError:
+        return False
+
+
+def _recent_reports_count(table: str, debate_token: str, window_minutes: int = 60) -> int:
+    """Rate-limit anti-abus (2026-07-25) : compte les signalements/demandes récents de CETTE
+    identité (debate_token peppé, jamais le token brut) — protège contre un LLM manipulé qui
+    spammerait l'envoi d'emails. "table" toujours un littéral interne (jamais dérivé d'une entrée
+    utilisateur), pas de risque d'injection SQL malgré l'absence de paramétrage sur ce nom."""
+    with db() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM {table} WHERE debate_token=? AND created_at >= datetime('now', ?)",
+            (debate_token, f"-{window_minutes} minutes"),
+        ).fetchone()
+    return row["cnt"]
+
+
+BUG_REPORT_RATE_LIMIT = 3
+ADMIN_INTERVENTION_RATE_LIMIT = 3
+
+
+def submit_bug_report(identity_token: str, description: str) -> dict:
+    """SEUL point d'écriture + d'envoi réel pour un signalement de bug — appelé DIRECTEMENT par
+    l'action LLM report_bug (chatbot_actions.py), pas via un clic de confirmation utilisateur.
+    Exception délibérée au principe "jamais d'écriture directe par le LLM" appliqué partout
+    ailleurs ce soir (opinions, réactions, remarques...) : un signalement de bug est PRIVÉ (visible
+    seulement par angelobot/le développeur, jamais public), à faible enjeu, et rate-limité — profil
+    de risque très différent d'une opinion publique et permanente."""
+    description = description.strip()
+    if not description:
+        raise ValueError("description vide")
+    debate_token = compute_debate_token(identity_token)
+    if _recent_reports_count("bug_reports", debate_token) >= BUG_REPORT_RATE_LIMIT:
+        raise ValueError("trop de signalements récents, réessaie dans un moment")
+    with db() as conn:
+        conn.execute("INSERT INTO bug_reports (debate_token, description) VALUES (?, ?)", (debate_token, description))
+    sent = _send_admin_email("Signalement de bug — jouyvote.fr", description)
+    return {"sent": sent}
+
+
+def submit_admin_intervention_request(identity_token: str, description: str) -> dict:
+    """Même mécanique que submit_bug_report (2026-07-25, demande développeur explicite : même
+    mécanique pour les 2) — table séparée car sémantiquement différent : une demande personnelle
+    sur son propre compte (ex: exigence d'anonymat compromise), pas un bug logiciel général."""
+    description = description.strip()
+    if not description:
+        raise ValueError("description vide")
+    debate_token = compute_debate_token(identity_token)
+    if _recent_reports_count("admin_intervention_requests", debate_token) >= ADMIN_INTERVENTION_RATE_LIMIT:
+        raise ValueError("trop de demandes récentes, réessaie dans un moment")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO admin_intervention_requests (debate_token, description) VALUES (?, ?)",
+            (debate_token, description),
+        )
+    sent = _send_admin_email("Demande d'intervention admin — jouyvote.fr", description)
+    return {"sent": sent}
+
+
 def send_referral_invite_email(to_email: str, referrer_nom: str, invite_token: str) -> bool:
     """Envoie le lien d'inscription pré-approuvé au filleul. Le lien EST le déclencheur
     d'inscription (pas une validation a posteriori d'un compte déjà créé) : le filleul clique,
@@ -1316,6 +1434,12 @@ def chat_v2(req: ChatRequest):
         # get_thread — voir get_public_forum_snapshot pour la justification anonymat (jamais un
         # brouillon, jamais de corrélation privé↔privé).
         "threads": get_public_forum_snapshot(),
+        # report_bug/request_admin_intervention (2026-07-25) : callables plutôt que données brutes
+        # — chatbot_actions.py reste sans accès DB/réseau direct, l'écriture + l'envoi d'email
+        # réels restent entièrement dans main.py (voir submit_bug_report/submit_admin_intervention_
+        # request pour la justification de l'exception "écriture directe par le LLM").
+        "report_bug_fn": lambda description: submit_bug_report(identity_token, description),
+        "request_admin_intervention_fn": lambda description: submit_admin_intervention_request(identity_token, description),
     }
     trace_requested = bool(req.admin_key) and req.admin_key == ADMIN_KEY
     result = run_turn(system_prompt, conversation_messages, ctx, trace=trace_requested)

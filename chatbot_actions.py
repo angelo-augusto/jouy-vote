@@ -378,6 +378,45 @@ def propose_remarque(params: dict, ctx: dict) -> dict:
     }
 
 
+def report_bug(params: dict, ctx: dict) -> dict:
+    """Signale un problème technique rencontré pendant la conversation (bug, incohérence,
+    comportement inattendu) — PAS un canal pour une opinion/doléance citoyenne (ça, c'est le
+    Forum). Envoie DIRECTEMENT un rapport, sans confirmation utilisateur (2026-07-25, exception
+    délibérée décidée avec le développeur) : contrairement aux opinions publiques et permanentes,
+    un signalement de bug est privé (visible seulement par l'équipe technique), à faible enjeu, et
+    rate-limité côté serveur contre l'abus. L'exécution réelle (écriture + envoi d'email) reste
+    entièrement dans main.py (ctx["report_bug_fn"]) — ce module reste sans accès DB/réseau
+    direct."""
+    description = params.get("description", "").strip()
+    if not description:
+        return {"sent": False, "error": "description vide"}
+    fn = ctx.get("report_bug_fn")
+    if fn is None:
+        return {"sent": False, "error": "signalement indisponible pour l'instant"}
+    try:
+        return fn(description)
+    except ValueError as e:
+        return {"sent": False, "error": str(e)}
+
+
+def request_admin_intervention(params: dict, ctx: dict) -> dict:
+    """Même mécanique que report_bug (2026-07-25, demande développeur explicite) — mais pour une
+    demande PERSONNELLE sur son propre compte (ex: exigence d'anonymat compromise, besoin
+    d'intervention humaine sur une situation précise), pas un bug logiciel général. Envoie
+    DIRECTEMENT, sans confirmation utilisateur, rate-limité — même profil de risque que
+    report_bug (privé, faible enjeu)."""
+    description = params.get("description", "").strip()
+    if not description:
+        return {"sent": False, "error": "description vide"}
+    fn = ctx.get("request_admin_intervention_fn")
+    if fn is None:
+        return {"sent": False, "error": "demande indisponible pour l'instant"}
+    try:
+        return fn(description)
+    except ValueError as e:
+        return {"sent": False, "error": str(e)}
+
+
 def propose_summary(params: dict, ctx: dict) -> dict:
     """Génère un résumé PRIVÉ proposé (brouillon, jamais sauvegardé ici — save_summary reste un
     endpoint backend/UI séparé, déclenché uniquement par un clic utilisateur explicite)."""
@@ -412,6 +451,11 @@ def propose_summary(params: dict, ctx: dict) -> dict:
 # propose_opinion/propose_reaction/propose_remarque ajoutés en phase 3 (2026-07-25) — même
 # principe : lecture/validation pure, l'écriture réelle passe par /opinion|reaction|remarque/
 # confirm (main.py), jamais par une action LLM-callable.
+# report_bug/request_admin_intervention ajoutés le même soir — SEULE exception (avec
+# admin_messages) où une action LLM déclenche directement un effet réel (email), décidée avec le
+# développeur : signalement privé, faible enjeu, rate-limité — profil de risque très différent des
+# opinions publiques/permanentes. Toujours pas d'accès DB/réseau direct ICI : l'exécution passe
+# par un callable fourni dans ctx (report_bug_fn/request_admin_intervention_fn, voir main.py).
 ACTIONS = {
     "say_user": say_user,
     "get_vote_token": get_vote_token,
@@ -425,6 +469,8 @@ ACTIONS = {
     "propose_opinion": propose_opinion,
     "propose_reaction": propose_reaction,
     "propose_remarque": propose_remarque,
+    "report_bug": report_bug,
+    "request_admin_intervention": request_admin_intervention,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -551,6 +597,24 @@ ACTIONS_JSON_SCHEMA = {
                         "required": ["action", "thread_id", "body", "reply_to_remarque_id", "reply_to_opinion_id"],
                         "additionalProperties": False,
                     },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "report_bug"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["action", "description"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "request_admin_intervention"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["action", "description"],
+                        "additionalProperties": False,
+                    },
                 ]
             },
         }
@@ -651,6 +715,22 @@ sont toutes des LECTURES/VALIDATIONS PURES : aucune action de publication (crée
 réellement une opinion/réaction/remarque en base) n'existe pour toi — n'invente JAMAIS qu'une
 telle action serait disponible, et ne prétends jamais qu'un fil/une opinion/une réaction a été
 créé(e) sans qu'un bouton de confirmation n'ait été cliqué par l'utilisateur.
+
+- report_bug(description) : signale un problème TECHNIQUE (bug, incohérence, comportement
+  inattendu) rencontré pendant la conversation — PAS un canal pour une opinion/doléance citoyenne
+  (ça, c'est le Forum, voir plus haut). Contrairement à TOUTES les autres actions d'écriture de ce
+  document, celle-ci ENVOIE RÉELLEMENT le signalement dès que tu l'appelles — aucune confirmation
+  utilisateur n'est nécessaire pour cette action précise (un signalement de bug est privé et à
+  faible enjeu, pas une opinion publique et permanente). Utilise-la de ta propre initiative si tu
+  détectes un problème technique clair, ou si l'utilisateur te le demande explicitement — jamais
+  pour signaler un désaccord de fond ou une doléance citoyenne, qui relèvent du Forum.
+- request_admin_intervention(description) : même mécanique que report_bug (envoi RÉEL et
+  immédiat, sans confirmation), mais pour une demande PERSONNELLE de l'utilisateur sur son PROPRE
+  compte (ex: il pense que son anonymat a été compromis, il a besoin qu'un humain intervienne sur
+  sa situation précise) — jamais pour signaler un bug logiciel général (ça, c'est report_bug), et
+  jamais à ta propre initiative : uniquement si l'utilisateur en fait clairement la demande.
+  Renvoie sent=false + une erreur si trop de demandes ont déjà été envoyées récemment (rate-limit
+  anti-abus) — dans ce cas, dis-le honnêtement plutôt que de prétendre que ça a marché.
 
 IMPORTANT sur ces 2 actions pseudo : même quand "available: true", cela signifie SEULEMENT que la
 proposition est libre et jugée appropriée, PAS qu'elle est attribuée. Rien n'est écrit tant que

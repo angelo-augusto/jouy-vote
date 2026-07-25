@@ -804,13 +804,20 @@ async def test_chat_llm_unavailable_returns_503(client, logged_in_user, monkeypa
 def test_chatbot_actions_registry_excludes_commit_actions():
     """Barrière structurelle (revue Opus 2026-07-25, POC tool-calling) : les actions de commit
     ne doivent JAMAIS être dans le registre appelable par le LLM, quel que soit ce qu'un prompt
-    pourrait dire — c'est le dict ACTIONS qui fait foi, pas une consigne."""
+    pourrait dire — c'est le dict ACTIONS qui fait foi, pas une consigne.
+
+    report_bug/request_admin_intervention (2026-07-25 soir) sont la SEULE exception délibérée
+    (avec admin_messages, jamais LLM-callable non plus en fait) : décidée avec le développeur,
+    documentée comme telle (voir ACTIONS dans chatbot_actions.py) — profil de risque très
+    différent (privé, faible enjeu, rate-limité) des vraies actions de commit ci-dessous, qui
+    restent interdites sans exception."""
     import chatbot_actions
 
     assert set(chatbot_actions.ACTIONS.keys()) == {
         "say_user", "get_vote_token", "propose_summary", "list_summaries",
         "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
         "list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque",
+        "report_bug", "request_admin_intervention",
     }
     for forbidden in (
         "save_summary", "delete_summary", "confirm_publication", "confirm_pseudo",
@@ -819,6 +826,8 @@ def test_chatbot_actions_registry_excludes_commit_actions():
         "create_thread", "publish_thread", "create_opinion", "update_opinion_draft",
         "publish_opinion", "disavow_opinion", "supersede_opinion", "add_reaction",
         "publish_reaction", "create_remarque", "publish_remarque", "send_admin_message",
+        "create_thread_with_opinion", "delete_thread_if_empty",
+        "submit_bug_report", "submit_admin_intervention_request",
     ):
         assert forbidden not in chatbot_actions.ACTIONS
 
@@ -1506,6 +1515,166 @@ def test_delete_thread_if_empty_errors_on_unknown_thread():
 
     with pytest.raises(ValueError, match="introuvable"):
         main_module.delete_thread_if_empty(999999)
+
+
+# ===== report_bug / request_admin_intervention (2026-07-25 soir, demande développeur) — envoi =====
+# ===== DIRECT sans confirmation utilisateur, exception délibérée, rate-limitée =====
+
+
+def test_submit_bug_report_writes_row_and_attempts_send(monkeypatch):
+    import main as main_module
+
+    sent_calls = []
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: sent_calls.append((subject, description)) or True)
+
+    result = main_module.submit_bug_report("identity-bugreport-1", "Le bouton de confirmation n'apparaît pas")
+    assert result["sent"] is True
+    assert len(sent_calls) == 1
+    assert "Le bouton de confirmation n'apparaît pas" in sent_calls[0][1]
+
+    debate_token = main_module.compute_debate_token("identity-bugreport-1")
+    with main.db() as conn:
+        row = conn.execute("SELECT description FROM bug_reports WHERE debate_token=?", (debate_token,)).fetchone()
+    assert row["description"] == "Le bouton de confirmation n'apparaît pas"
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+
+
+def test_submit_bug_report_rejects_empty_description():
+    import main as main_module
+
+    with pytest.raises(ValueError, match="vide"):
+        main_module.submit_bug_report("identity-bugreport-2", "   ")
+
+
+def test_submit_bug_report_rate_limited_after_threshold(monkeypatch):
+    """Régression anti-abus (2026-07-25) : un LLM manipulé ne doit pas pouvoir spammer l'envoi
+    d'emails — au-delà de BUG_REPORT_RATE_LIMIT signalements récents pour la même identité, la
+    fonction refuse plutôt que d'envoyer indéfiniment."""
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: True)
+    identity_token = "identity-bugreport-ratelimit"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+
+    for i in range(main_module.BUG_REPORT_RATE_LIMIT):
+        main_module.submit_bug_report(identity_token, f"Signalement {i}")
+
+    with pytest.raises(ValueError, match="trop de signalements"):
+        main_module.submit_bug_report(identity_token, "Signalement de trop")
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+
+
+def test_submit_admin_intervention_request_writes_row_and_attempts_send(monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: True)
+    result = main_module.submit_admin_intervention_request("identity-admin-intervention-1", "Je crois qu'on a deviné mon identité")
+    assert result["sent"] is True
+
+    debate_token = main_module.compute_debate_token("identity-admin-intervention-1")
+    with main.db() as conn:
+        row = conn.execute("SELECT description FROM admin_intervention_requests WHERE debate_token=?", (debate_token,)).fetchone()
+    assert row["description"] == "Je crois qu'on a deviné mon identité"
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_intervention_requests WHERE debate_token=?", (debate_token,))
+
+
+def test_submit_admin_intervention_request_rate_limited_independently_from_bug_reports(monkeypatch):
+    """Les 2 rate-limits sont INDÉPENDANTS (2 tables séparées) — épuiser celui de report_bug ne
+    doit pas affecter request_admin_intervention pour la même identité."""
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: True)
+    identity_token = "identity-independent-ratelimits"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+        conn.execute("DELETE FROM admin_intervention_requests WHERE debate_token=?", (debate_token,))
+
+    for i in range(main_module.BUG_REPORT_RATE_LIMIT):
+        main_module.submit_bug_report(identity_token, f"Signalement {i}")
+    with pytest.raises(ValueError):
+        main_module.submit_bug_report(identity_token, "Signalement de trop")
+
+    result = main_module.submit_admin_intervention_request(identity_token, "Une vraie demande distincte")
+    assert result["sent"] is True
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+        conn.execute("DELETE FROM admin_intervention_requests WHERE debate_token=?", (debate_token,))
+
+
+def test_report_bug_action_calls_ctx_callable():
+    import chatbot_actions
+
+    calls = []
+    ctx = {"report_bug_fn": lambda description: calls.append(description) or {"sent": True}}
+    result = chatbot_actions.report_bug({"description": "Un vrai bug rencontré"}, ctx)
+    assert result == {"sent": True}
+    assert calls == ["Un vrai bug rencontré"]
+
+
+def test_report_bug_action_rejects_empty_description_without_calling_ctx():
+    import chatbot_actions
+
+    calls = []
+    ctx = {"report_bug_fn": lambda description: calls.append(description) or {"sent": True}}
+    result = chatbot_actions.report_bug({"description": "   "}, ctx)
+    assert result["sent"] is False
+    assert calls == []  # jamais appelé pour une description vide
+
+
+def test_report_bug_action_surfaces_rate_limit_error_from_ctx_callable():
+    import chatbot_actions
+
+    def raising_fn(description):
+        raise ValueError("trop de signalements récents, réessaie dans un moment")
+
+    result = chatbot_actions.report_bug({"description": "Un bug"}, {"report_bug_fn": raising_fn})
+    assert result["sent"] is False
+    assert "trop de signalements" in result["error"]
+
+
+def test_request_admin_intervention_action_calls_ctx_callable():
+    import chatbot_actions
+
+    calls = []
+    ctx = {"request_admin_intervention_fn": lambda description: calls.append(description) or {"sent": True}}
+    result = chatbot_actions.request_admin_intervention({"description": "J'ai besoin d'aide"}, ctx)
+    assert result == {"sent": True}
+    assert calls == ["J'ai besoin d'aide"]
+
+
+@pytest.mark.anyio
+async def test_chat_v2_passes_report_bug_and_admin_intervention_callables_in_ctx(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    captured_ctx = {}
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+        captured_ctx.update(ctx)
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: True)
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "salut"})
+
+    assert callable(captured_ctx["report_bug_fn"])
+    assert callable(captured_ctx["request_admin_intervention_fn"])
+    result = captured_ctx["report_bug_fn"]("Test d'intégration ctx")
+    assert result["sent"] is True
+
+    identity_token = logged_in_user["token"]
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
 
 
 def test_propose_opinion_action_new_thread_valid():
