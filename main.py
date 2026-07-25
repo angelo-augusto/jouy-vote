@@ -262,6 +262,13 @@ def init_db():
             )"""
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status)")
+        # Filet anti-race (2026-07-25, création de fil couplée au 1er post d'opinion, demande
+        # développeur) : titre unique tous fils confondus — si 2 personnes proposent quasi
+        # simultanément un fil au titre EXACTEMENT identique, la 2e INSERT échoue proprement
+        # (voir create_thread_with_opinion) plutôt que de dupliquer silencieusement le sujet.
+        # Ne résout QUE la collision de titre identique — la vraie déduplication sémantique
+        # (titres différents mais même sujet) reste la phase 4 (RAG/Qdrant), pas ce filet.
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_title ON threads(title)")
         # PAS de table opinion_versions séparée (1re version d'Opus, abandonnée le soir même) :
         # les réactions pointaient vers l'opinion en général, pas une version précise — modifier le
         # texte aurait fait porter silencieusement d'anciennes réactions sur un texte jamais vu.
@@ -478,7 +485,11 @@ class PseudoConfirmRequest(BaseModel):
 
 class OpinionConfirmRequest(BaseModel):
     session_token: str
-    thread_id: int
+    # Soit thread_id (fil EXISTANT déjà publié), soit new_thread_title (création couplée d'un
+    # nouveau fil, 2026-07-25, décision développeur) — jamais les deux, voir opinion_confirm.
+    thread_id: int | None = None
+    new_thread_title: str | None = None
+    new_thread_summary: str | None = None
     body: str
     argumentaire: str | None = None
 
@@ -629,6 +640,72 @@ def publish_thread(thread_id: int) -> dict:
     return {"thread_id": thread_id, "status": "published"}
 
 
+def delete_thread_if_empty(thread_id: int) -> dict:
+    """Filet de sécurité (2026-07-25, décision développeur, "retire la pression de bien choisir/
+    regrouper parfaitement du premier coup") : supprime un fil qui n'a AUCUNE opinion ni remarque
+    dedans, quel que soit leur statut (même un brouillon compte comme "pas vide" — mieux vaut un
+    faux négatif ici qu'un vrai risque de supprimer un fil qui contient quelque chose). Utilisé en
+    interne par create_thread_with_opinion si la publication de l'opinion échoue juste après la
+    création du fil (échec partiel), mais reste appelable indépendamment (ex: nettoyage manuel)."""
+    with db() as conn:
+        thread_row = conn.execute("SELECT thread_id FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
+        if thread_row is None:
+            raise ValueError("fil introuvable")
+        if conn.execute("SELECT 1 FROM opinions WHERE thread_id=? LIMIT 1", (thread_id,)).fetchone():
+            raise ValueError("ce fil contient au moins une opinion, il ne peut pas être supprimé")
+        if conn.execute("SELECT 1 FROM thread_remarques WHERE thread_id=? LIMIT 1", (thread_id,)).fetchone():
+            raise ValueError("ce fil contient au moins une remarque, il ne peut pas être supprimé")
+        conn.execute("DELETE FROM threads WHERE thread_id=?", (thread_id,))
+    return {"thread_id": thread_id, "deleted": True}
+
+
+def create_thread_with_opinion(
+    title: str, author_identity_token: str, body: str,
+    argumentaire: str | None = None, summary: str | None = None,
+) -> dict:
+    """Création de fil COUPLÉE au 1er post d'opinion (2026-07-25, décision développeur, en
+    réponse directe à la question posée plus tôt sur le wiki) : pas de création spéculative d'un
+    fil vide — le fil et sa 1re opinion naissent dans le MÊME geste. 2 garde-fous :
+
+    1. Filet anti-race : UNIQUE(title) en DB (voir init_db). Si 2 personnes proposent quasi
+       simultanément un fil au titre EXACTEMENT identique, la 2e ne subit pas une erreur brute —
+       son opinion est automatiquement rattachée au fil qui vient de gagner la course, comme si
+       elle avait choisi ce fil existant depuis le début (elle n'y est pour rien dans la
+       collision technique, ce serait injuste de la lui faire subir). Ne couvre QUE la collision
+       de titre identique — la vraie déduplication sémantique reste la phase 4 (RAG).
+    2. Auto-nettoyage : si la création de l'opinion échoue APRÈS que le fil a été créé (body vide,
+       validation qui échoue...), le fil tout juste créé — encore vide à ce stade — est supprimé
+       avant de relayer l'erreur, plutôt que de laisser une trace orpheline en base."""
+    title = title.strip()
+    if not title:
+        raise ValueError("titre de fil manquant")
+    with db() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO threads (title, summary, status, published_at) "
+                "VALUES (?, ?, 'published', CURRENT_TIMESTAMP)",
+                (title, summary),
+            )
+            thread_id = cur.lastrowid
+        except sqlite3.IntegrityError:
+            row = conn.execute("SELECT thread_id FROM threads WHERE title=?", (title,)).fetchone()
+            if row is None:
+                raise
+            thread_id = row["thread_id"]
+
+    try:
+        opinion = create_opinion(thread_id, author_identity_token, body, argumentaire)
+        published = publish_opinion(opinion["opinion_id"])
+    except ValueError:
+        try:
+            delete_thread_if_empty(thread_id)
+        except ValueError:
+            pass  # le fil n'était finalement pas vide (ex: quelqu'un d'autre y a posté entre-temps via la course perdue) — rien à nettoyer
+        raise
+
+    return {"thread_id": thread_id, "opinion_id": opinion["opinion_id"], "status": published["status"]}
+
+
 def _opinion_has_reactions(conn: sqlite3.Connection, opinion_id: int) -> bool:
     row = conn.execute(
         "SELECT 1 FROM opinion_reactions WHERE opinion_id=? LIMIT 1", (opinion_id,)
@@ -642,7 +719,12 @@ def create_opinion(thread_id: int, author_identity_token: str, body: str, argume
     on n'attache jamais une opinion à un fil encore en brouillon ou inexistant (durcissement
     2026-07-25, phase 3 : ce garde-fou manquait en phase 1, jamais exploitable tant que seul
     khadasbot appelait ces fonctions directement, mais devient un vrai risque dès que thread_id
-    vient d'un paramètre LLM/utilisateur, voir propose_opinion/chatbot_actions.py)."""
+    vient d'un paramètre LLM/utilisateur, voir propose_opinion/chatbot_actions.py). "body" non vide
+    validé ICI aussi (pas seulement côté propose_opinion, lecture/validation LLM) — même principe
+    de défense en profondeur que le reste du module : ne jamais faire reposer une contrainte sur
+    une seule couche."""
+    if not body.strip():
+        raise ValueError("le corps de l'opinion est vide")
     with db() as conn:
         thread_row = conn.execute("SELECT status FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
         if thread_row is None:
@@ -1261,9 +1343,21 @@ def opinion_confirm(req: OpinionConfirmRequest):
     lecture/validation pure). Crée le brouillon ET le publie en un seul geste (contrairement au
     pseudo, une opinion n'a pas de phase "brouillon persistant consultable plus tard" côté produit
     — le brouillon décrit dans le wiki se passe entièrement EN CONVERSATION, pas en DB), déclenché
-    uniquement par un clic utilisateur explicite."""
+    uniquement par un clic utilisateur explicite.
+
+    2 chemins exclusifs (2026-07-25, création de fil couplée) : soit thread_id (fil EXISTANT déjà
+    publié, chemin historique), soit new_thread_title (nouveau fil créé dans le MÊME geste que
+    cette opinion — voir create_thread_with_opinion pour le filet anti-race et l'auto-nettoyage)."""
     identity_token = _require_identity(req.session_token)
+    if req.thread_id is not None and req.new_thread_title is not None:
+        raise HTTPException(400, "précise soit thread_id, soit new_thread_title, jamais les deux")
     try:
+        if req.new_thread_title is not None:
+            return create_thread_with_opinion(
+                req.new_thread_title, identity_token, req.body, req.argumentaire, req.new_thread_summary
+            )
+        if req.thread_id is None:
+            raise ValueError("il faut soit thread_id (fil existant), soit new_thread_title (nouveau fil)")
         opinion = create_opinion(req.thread_id, identity_token, req.body, req.argumentaire)
         return publish_opinion(opinion["opinion_id"])
     except ValueError as e:

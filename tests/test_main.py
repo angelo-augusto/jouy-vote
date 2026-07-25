@@ -1411,6 +1411,163 @@ def test_send_admin_message_indexes_by_peppered_debate_token_not_raw_identity():
     assert row["body"] == "Message de l'administration"
 
 
+# ===== Création de fil couplée au 1er post d'opinion (2026-07-25 soir, décision développeur) =====
+
+
+def test_create_thread_with_opinion_happy_path():
+    import main as main_module
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Sujet couplé création",))
+
+    result = main_module.create_thread_with_opinion(
+        "Sujet couplé création", "identity-forum-coupled-1", "Je pense que...", argumentaire="parce que..."
+    )
+    assert result["status"] == "published"
+
+    with main.db() as conn:
+        thread_row = conn.execute("SELECT status FROM threads WHERE thread_id=?", (result["thread_id"],)).fetchone()
+        opinion_row = conn.execute("SELECT status, body FROM opinions WHERE opinion_id=?", (result["opinion_id"],)).fetchone()
+    assert thread_row["status"] == "published"
+    assert opinion_row["status"] == "published"
+    assert opinion_row["body"] == "Je pense que..."
+
+
+def test_create_thread_with_opinion_race_reattaches_loser_to_winner_thread():
+    """Régression du filet anti-race (2026-07-25) : si un fil au titre EXACTEMENT identique existe
+    déjà (course perdue), l'opinion est rattachée à CE fil plutôt que de subir une erreur brute —
+    la personne n'y est pour rien dans la collision technique."""
+    import main as main_module
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Sujet course anti-race",))
+
+    winner = main_module.create_thread_with_opinion(
+        "Sujet course anti-race", "identity-forum-race-1", "Première opinion (gagnant de la course)"
+    )
+    loser = main_module.create_thread_with_opinion(
+        "Sujet course anti-race", "identity-forum-race-2", "Deuxième opinion (perdant de la course)"
+    )
+
+    assert loser["thread_id"] == winner["thread_id"]  # rattaché au MÊME fil, pas un doublon
+    assert loser["status"] == "published"
+
+    with main.db() as conn:
+        threads = conn.execute("SELECT thread_id FROM threads WHERE title=?", ("Sujet course anti-race",)).fetchall()
+    assert len(threads) == 1  # un seul fil créé, pas 2
+
+
+def test_create_thread_with_opinion_cleans_up_empty_thread_on_partial_failure():
+    """Régression de l'auto-nettoyage (2026-07-25) : si le fil est créé mais que la publication de
+    l'opinion échoue juste après (ici : body vide), le fil tout juste créé — encore vide — est
+    supprimé plutôt que de laisser une trace orpheline en base."""
+    import main as main_module
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Sujet échec partiel",))
+
+    with pytest.raises(ValueError):
+        main_module.create_thread_with_opinion("Sujet échec partiel", "identity-forum-partial-1", "   ")
+
+    with main.db() as conn:
+        threads = conn.execute("SELECT thread_id FROM threads WHERE title=?", ("Sujet échec partiel",)).fetchall()
+    assert threads == []  # aucune trace orpheline
+
+
+def test_delete_thread_if_empty_rejects_thread_with_content():
+    import main as main_module
+
+    thread = main_module.create_thread("Fil non vide pour test suppression")
+    main_module.publish_thread(thread["thread_id"])
+    main_module.create_opinion(thread["thread_id"], "identity-forum-delete-1", "Une opinion")
+
+    with pytest.raises(ValueError, match="contient au moins une opinion"):
+        main_module.delete_thread_if_empty(thread["thread_id"])
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM opinions WHERE thread_id=?", (thread["thread_id"],))
+        conn.execute("DELETE FROM threads WHERE thread_id=?", (thread["thread_id"],))
+
+
+def test_delete_thread_if_empty_succeeds_on_truly_empty_thread():
+    import main as main_module
+
+    thread = main_module.create_thread("Fil vide pour test suppression")
+    result = main_module.delete_thread_if_empty(thread["thread_id"])
+    assert result["deleted"] is True
+
+    with main.db() as conn:
+        row = conn.execute("SELECT thread_id FROM threads WHERE thread_id=?", (thread["thread_id"],)).fetchone()
+    assert row is None
+
+
+def test_delete_thread_if_empty_errors_on_unknown_thread():
+    import main as main_module
+
+    with pytest.raises(ValueError, match="introuvable"):
+        main_module.delete_thread_if_empty(999999)
+
+
+def test_propose_opinion_action_new_thread_valid():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_opinion(
+        {"new_thread_title": "Un tout nouveau sujet", "body": "Je pense que..."}, {"threads": []}
+    )
+    assert result["available"] is True
+    assert result["new_thread_title"] == "Un tout nouveau sujet"
+
+
+def test_propose_opinion_action_new_thread_rejects_exact_title_collision():
+    import chatbot_actions
+
+    ctx = {"threads": [{"thread_id": 5, "title": "Sujet déjà existant", "summary": None, "opinions": []}]}
+    result = chatbot_actions.propose_opinion(
+        {"new_thread_title": "Sujet déjà existant", "body": "Je pense que..."}, ctx
+    )
+    assert result["available"] is False
+    assert "thread_id=5" in result["error"]
+
+
+def test_propose_opinion_action_rejects_both_thread_id_and_new_thread_title():
+    import chatbot_actions
+
+    ctx = {"threads": [{"thread_id": 1, "title": "Sujet", "summary": None, "opinions": []}]}
+    result = chatbot_actions.propose_opinion(
+        {"thread_id": 1, "new_thread_title": "Autre titre", "body": "Je pense que..."}, ctx
+    )
+    assert result["available"] is False
+
+
+@pytest.mark.anyio
+async def test_opinion_confirm_endpoint_creates_new_thread_coupled_with_opinion(client, logged_in_user):
+    import main as main_module
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Fil créé via endpoint couplé",))
+
+    resp = await client.post("/opinion/confirm", json={
+        "session_token": logged_in_user["session_token"],
+        "new_thread_title": "Fil créé via endpoint couplé",
+        "body": "Je pense que...",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "published"
+
+    with main.db() as conn:
+        row = conn.execute("SELECT status FROM threads WHERE title=?", ("Fil créé via endpoint couplé",)).fetchone()
+    assert row["status"] == "published"
+
+
+@pytest.mark.anyio
+async def test_opinion_confirm_endpoint_rejects_both_thread_id_and_new_thread_title(client, logged_in_user):
+    resp = await client.post("/opinion/confirm", json={
+        "session_token": logged_in_user["session_token"],
+        "thread_id": 1, "new_thread_title": "Autre titre", "body": "Je pense que...",
+    })
+    assert resp.status_code == 400
+
+
 def test_tools_description_lists_actual_palette_no_stale_count():
     """Régression (2026-07-25, via angelobot) : TOOLS_DESCRIPTION disait "parmi les 8" en dur,
     devenu faux dès l'ajout de "gris" (9e couleur) — pire, le modèle n'avait jamais la liste

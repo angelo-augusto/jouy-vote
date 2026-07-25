@@ -286,18 +286,45 @@ def propose_opinion(params: dict, ctx: dict) -> dict:
     réelle (création + publication en un seul geste) passe par /opinion/confirm (main.py),
     déclenché uniquement par un clic utilisateur explicite, jamais par toi.
 
-    LIMITÉ AUX FILS EXISTANTS DÉJÀ PUBLIÉS pour l'instant — la création automatique d'un nouveau
-    fil par toi n'existe pas encore (question ouverte documentée sur le wiki, à trancher avec le
-    développeur) : si aucun fil existant ne convient, dis-le honnêtement à l'utilisateur plutôt
-    que d'inventer un thread_id ou de prétendre qu'un nouveau fil a été créé."""
+    2 chemins EXCLUSIFS (2026-07-25 soir, création de fil couplée décidée par le développeur) :
+    - thread_id : rattache l'opinion à un fil EXISTANT et déjà publié (trouvé via list_threads/
+      get_thread). Chemin à privilégier — TOUJOURS vérifier d'abord qu'aucun fil existant ne
+      convient déjà (objectif : limiter le nombre de fils, pas en créer un pour chaque nuance).
+    - new_thread_title (+ new_thread_summary optionnel) : propose un NOUVEAU fil, créé dans le
+      même geste que cette opinion SEULEMENT si l'utilisateur confirme — jamais de création
+      spéculative avant. N'utilise ce chemin QUE si tu as vérifié via list_threads qu'aucun fil
+      existant ne correspond vraiment au sujet."""
     thread_id = params.get("thread_id")
+    new_thread_title = params.get("new_thread_title")
+    new_thread_summary = params.get("new_thread_summary")
     body = params.get("body", "")
     argumentaire = params.get("argumentaire")
+
+    if thread_id is not None and new_thread_title is not None:
+        return {"available": False, "error": "précise soit thread_id (fil existant), soit new_thread_title (nouveau fil), jamais les deux"}
+    if not body.strip():
+        return {"available": False, "error": "le corps de l'opinion est vide"}
+
+    if new_thread_title is not None:
+        title = new_thread_title.strip()
+        if not title:
+            return {"available": False, "error": "titre de fil manquant"}
+        existing = next((t for t in ctx.get("threads", []) if t["title"] == title), None)
+        if existing is not None:
+            return {
+                "available": False,
+                "error": f'un fil au titre exactement identique existe déjà ("{title}") — utilise plutôt thread_id={existing["thread_id"]}',
+            }
+        return {
+            "new_thread_title": title, "new_thread_summary": new_thread_summary,
+            "body": body, "argumentaire": argumentaire, "available": True,
+        }
+
+    if thread_id is None:
+        return {"available": False, "error": "il faut soit thread_id (fil existant), soit new_thread_title (nouveau fil)"}
     thread = next((t for t in ctx.get("threads", []) if t["thread_id"] == thread_id), None)
     if thread is None:
         return {"available": False, "error": "fil introuvable (ou pas encore publié)"}
-    if not body.strip():
-        return {"available": False, "error": "le corps de l'opinion est vide"}
     return {
         "thread_id": thread_id, "thread_title": thread["title"],
         "body": body, "argumentaire": argumentaire, "available": True,
@@ -483,15 +510,22 @@ ACTIONS_JSON_SCHEMA = {
                         "type": "object",
                         "properties": {
                             "action": {"const": "propose_opinion"},
-                            "thread_id": {"type": "integer"},
+                            # thread_id (fil existant) OU new_thread_title(+summary) (nouveau
+                            # fil couplé, 2026-07-25) — mutuellement exclusifs, voir docstring
+                            # Python. Nullable plutôt qu'absent de "required" : le schéma
+                            # json_schema "strict" (voir RESPONSE_FORMAT) exige que CHAQUE
+                            # propriété soit dans "required" — un champ optionnel s'exprime en le
+                            # rendant nullable, jamais en l'omettant de la liste.
+                            "thread_id": {"type": ["integer", "null"]},
+                            "new_thread_title": {"type": ["string", "null"]},
+                            "new_thread_summary": {"type": ["string", "null"]},
                             "body": {"type": "string"},
-                            # Nullable plutôt qu'absent de "required" : le schéma json_schema
-                            # "strict" (voir RESPONSE_FORMAT) exige que CHAQUE propriété soit dans
-                            # "required" — un champ optionnel s'exprime en le rendant nullable,
-                            # jamais en l'omettant de la liste.
                             "argumentaire": {"type": ["string", "null"]},
                         },
-                        "required": ["action", "thread_id", "body", "argumentaire"],
+                        "required": [
+                            "action", "thread_id", "new_thread_title", "new_thread_summary",
+                            "body", "argumentaire",
+                        ],
                         "additionalProperties": False,
                     },
                     {
@@ -586,14 +620,21 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   argumentaire). Utile pour repérer si une opinion très proche de celle que quelqu'un s'apprête à
   formuler existe déjà, AVANT de la publier — dans ce cas, propose-lui plutôt d'adhérer à
   l'opinion existante (voir plus bas les réactions) que d'en créer une en double.
-- propose_opinion(thread_id, body, argumentaire) : brouillon d'opinion sur un fil EXISTANT et déjà
-  publié (utilise d'abord list_threads/get_thread pour trouver le bon thread_id — LIMITÉ AUX FILS
-  EXISTANTS pour l'instant : tu ne peux PAS créer de nouveau fil, si aucun fil ne correspond
-  vraiment au sujet, dis-le honnêtement plutôt que d'inventer un thread_id). "body" = la position
-  ("je pense que..."), "argumentaire" = le raisonnement à l'appui ("parce que..."), optionnel.
-  Renvoie available=false si le fil n'existe pas/n'est pas publié ou si "body" est vide. Comme pour
-  le pseudo : available=true signifie SEULEMENT que le brouillon est valide, PAS qu'il est publié
-  — rien n'est écrit tant que l'utilisateur n'a pas cliqué sur le bouton de confirmation.
+- propose_opinion(thread_id OU new_thread_title+new_thread_summary, body, argumentaire) : brouillon
+  d'opinion. 2 chemins EXCLUSIFS (mets l'autre à null) :
+    - thread_id : rattache l'opinion à un fil EXISTANT et déjà publié — utilise d'abord
+      list_threads/get_thread pour trouver le bon thread_id. TOUJOURS le chemin à privilégier.
+    - new_thread_title (+ new_thread_summary optionnel) : propose un NOUVEAU fil, créé dans le
+      MÊME geste que cette opinion si l'utilisateur confirme (2026-07-25, création couplée —
+      jamais de fil créé "à part" avant qu'une opinion ne l'alimente). N'utilise CE chemin QUE si
+      tu as vérifié via list_threads qu'aucun fil existant ne correspond vraiment au sujet —
+      l'objectif reste de limiter le nombre de fils, pas d'en créer un pour chaque nuance.
+  "body" = la position ("je pense que..."), "argumentaire" = le raisonnement à l'appui ("parce
+  que..."), optionnel. Renvoie available=false si le fil n'existe pas/n'est pas publié, si "body"
+  est vide, ou si un fil au titre EXACTEMENT identique à new_thread_title existe déjà (dans ce cas
+  utilise plutôt son thread_id, indiqué dans l'erreur). Comme pour le pseudo : available=true
+  signifie SEULEMENT que le brouillon est valide, PAS qu'il est publié — rien n'est écrit tant que
+  l'utilisateur n'a pas cliqué sur le bouton de confirmation.
 - propose_reaction(opinion_id, stance, argumentaire) : brouillon de réaction à une opinion
   EXISTANTE et publiée (trouvée via get_thread). "stance" doit être "adherer", "opposer" ou
   "neutre" — ce 3e état est une VRAIE réaction (l'utilisateur a lu et reste neutre), jamais à
