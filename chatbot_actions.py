@@ -23,10 +23,49 @@ from chatbot_llm import call_openrouter
 # y compris via mcp_chatbot_executor.py sans dépendre du reste de l'app jouyvote.
 JOUY_VOTE_PEPPER = os.environ.get("JOUY_VOTE_PEPPER", "")
 
+# Pepper DÉDIÉ, distinct de JOUY_VOTE_PEPPER (voir wiki architecture-technique : "pseudo/
+# debate_token dérivé séparément" + "aucune table ne doit permettre de relier vote_token et
+# pseudo entre eux, ni l'un ou l'autre à l'identité déclarée") — même avec les deux peppers en
+# main, un admin ne peut pas relier vote_token et debate_token d'une même personne, puisqu'ils ne
+# partagent aucun secret commun.
+JOUY_PSEUDO_PEPPER = os.environ.get("JOUY_PSEUDO_PEPPER", "")
+
 
 def compute_vote_token(identity_token: str) -> str:
     raw = f"{identity_token}:{JOUY_VOTE_PEPPER}"
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def compute_debate_token(identity_token: str) -> str:
+    raw = f"{identity_token}:{JOUY_PSEUDO_PEPPER}:pseudo"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# Mot (objet/être) + couleur — convention du wiki (themes:pseudonyme, architecture-technique).
+# Liste volontairement modeste pour cette passe technique (pas de choix collaboratif avec
+# l'utilisateur pour l'instant, voir docstring de get_or_assign_pseudo) : suffisant à l'échelle
+# de Jouy, affinable plus tard sans changer le mécanisme de dérivation lui-même.
+PSEUDO_WORDS = [
+    "Renard", "Hibou", "Chêne", "Lanterne", "Étoile", "Rivière", "Nuage", "Phare",
+    "Comète", "Sentier", "Écureuil", "Orage", "Prairie", "Faucon", "Ruche", "Glacier",
+    "Roseau", "Aurore", "Cascade", "Bourgeon", "Falaise", "Marée", "Clairière", "Genêt",
+    "Corail", "Frimas", "Tilleul", "Brume", "Sittelle", "Ravin",
+]
+PSEUDO_COLORS = [
+    "bleu", "vert", "rouge", "jaune", "violet", "orange", "indigo", "turquoise",
+    "corail", "ambre", "cuivre", "argenté", "doré", "ivoire", "olive", "ardoise",
+    "carmin", "safran", "lilas", "émeraude",
+]
+
+
+def derive_pseudo(debate_token: str) -> dict:
+    """Dérivation déterministe mot+couleur à partir du debate_token — même token, même pseudo,
+    toujours, tant que le mécanisme n'est pas régénéré manuellement (fuite, voir wiki). N'appelle
+    jamais la DB : c'est ensure_pseudo() côté main.py qui décide de stocker le résultat."""
+    digest = hashlib.sha256(debate_token.encode()).hexdigest()
+    word = PSEUDO_WORDS[int(digest[:8], 16) % len(PSEUDO_WORDS)]
+    color = PSEUDO_COLORS[int(digest[8:16], 16) % len(PSEUDO_COLORS)]
+    return {"word": word, "color": color}
 
 
 def say_user(params: dict, ctx: dict) -> dict:
@@ -40,6 +79,23 @@ def get_vote_token(params: dict, ctx: dict) -> dict:
     if not identity_token:
         return {"error": "identité manquante dans le contexte"}
     return {"vote_token": compute_vote_token(identity_token)}
+
+
+def get_or_assign_pseudo(params: dict, ctx: dict) -> dict:
+    """Lecture pure : le pseudo (mot+couleur) est fourni via ctx["pseudo"], déjà garanti exister
+    par l'appelant (main.py appelle ensure_pseudo() — qui écrit en DB si c'est la première fois —
+    AVANT de lancer la boucle LLM). Volontairement PAS de write ici : mandat angelobot 2026-07-25
+    explicite ('lecture seule pour lui, pas de commit direct') — l'attribution elle-même est un
+    mécanisme backend de confiance, jamais une décision discrétionnaire du LLM à chaque tour.
+
+    Portée réduite de cette passe (pas encore construit) : pas de choix collaboratif du pseudo
+    avec l'utilisateur (proposer plusieurs combinaisons, laisser choisir) ni de laïus d'accueil —
+    seulement le mécanisme technique d'attribution déterministe + stockage. Le texte d'onboarding
+    complet viendra brancher ce même ctx["pseudo"] une fois rédigé et validé."""
+    pseudo = ctx.get("pseudo")
+    if not pseudo:
+        return {"error": "pseudo non disponible"}
+    return dict(pseudo)
 
 
 def list_summaries(params: dict, ctx: dict) -> dict:
@@ -74,11 +130,14 @@ def propose_summary(params: dict, ctx: dict) -> dict:
 
 # Registre nom→fonction. list_summaries ajouté en fast-follow (2026-07-25, priorité validée par
 # angelobot) — lecture pure, aucun risque nouveau, referme le seul gap connu du POC initial.
+# get_or_assign_pseudo ajouté ensuite (brique technique pseudo, séquencement pseudo-avant-débats
+# tranché par le développeur) — lecture pure également, même barrière que save_summary/etc.
 ACTIONS = {
     "say_user": say_user,
     "get_vote_token": get_vote_token,
     "propose_summary": propose_summary,
     "list_summaries": list_summaries,
+    "get_or_assign_pseudo": get_or_assign_pseudo,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -117,6 +176,12 @@ ACTIONS_JSON_SCHEMA = {
                         "required": ["action"],
                         "additionalProperties": False,
                     },
+                    {
+                        "type": "object",
+                        "properties": {"action": {"const": "get_or_assign_pseudo"}},
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    },
                 ]
             },
         }
@@ -146,6 +211,10 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   jamais par toi). Aucun paramètre.
 - list_summaries() : renvoie la liste des résumés PRIVÉS déjà sauvegardés par l'utilisateur
   (titre/date). Aucun paramètre.
+- get_or_assign_pseudo() : renvoie le pseudonyme stable de l'utilisateur (mot + couleur, ex.
+  "Renard bleu"), déjà attribué automatiquement — utilise-le pour reformuler ta réponse à la
+  1re personne du singulier envers l'utilisateur, jamais en 3e personne comme s'il parlait de
+  quelqu'un d'autre. Aucun paramètre.
 
 Pour référencer dans un say_user le résultat de l'action juste avant, utilise littéralement le
 texte "{{résultat}}" à l'endroit voulu — il sera remplacé automatiquement par la valeur réelle

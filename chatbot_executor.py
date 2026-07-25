@@ -35,15 +35,19 @@ def build_system_prompt(base_prompt: str, context_block: str = "") -> str:
 
 
 def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
+    """Bug réel trouvé en conditions réelles (2026-07-25, test get_or_assign_pseudo) : un résultat
+    à UNE clé (vote_token, summary...) donnait un texte naturel, mais un résultat à PLUSIEURS clés
+    (pseudo: {word, color}) tombait dans le fallback JSON brut — "Ton pseudo est :
+    {"word": "Clairière", "color": "corail"}" affiché tel quel à un vrai utilisateur. Fix : joindre
+    les valeurs par un espace plutôt que sérialiser le dict, ce qui donne "Clairière corail" (et
+    reste correct pour le cas à une seule clé, qui redonne simplement cette valeur seule)."""
     if "{{résultat}}" not in text or not previous_result:
         return text
-    # Une seule valeur "principale" par action (vote_token, summary...) — si le résultat n'a
-    # qu'une clé utile, on la prend directement plutôt que de sérialiser tout le dict brut.
     if "error" in previous_result:
         value = previous_result["error"]
     else:
-        values = [v for k, v in previous_result.items() if k != "text"]
-        value = values[0] if len(values) == 1 else json.dumps(previous_result, ensure_ascii=False)
+        values = [str(v) for k, v in previous_result.items() if k != "text"]
+        value = " ".join(values) if values else json.dumps(previous_result, ensure_ascii=False)
     return text.replace("{{résultat}}", str(value))
 
 

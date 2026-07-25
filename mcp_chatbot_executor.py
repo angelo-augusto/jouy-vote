@@ -16,7 +16,7 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-from chatbot_actions import compute_vote_token
+from chatbot_actions import compute_debate_token, compute_vote_token, derive_pseudo
 from chatbot_executor import build_system_prompt, run_turn
 
 mcp = FastMCP("jouyvote-chatbot-executor")
@@ -42,8 +42,8 @@ _TEST_SUMMARIES = [
 @mcp.tool()
 def run_chat_turn(user_message: str, history_json: str = "[]") -> dict:
     """Exécute un tour complet de la boucle d'actions du chatbot jouyvote (say_user/
-    get_vote_token/propose_summary/list_summaries) avec une identité de test fixe, et retourne
-    les répliques produites + le détail de chaque action exécutée.
+    get_vote_token/propose_summary/list_summaries/get_or_assign_pseudo) avec une identité de
+    test fixe, et retourne les répliques produites + le détail de chaque action exécutée.
 
     Args:
         user_message: le message envoyé par l'utilisateur de test.
@@ -59,10 +59,12 @@ def run_chat_turn(user_message: str, history_json: str = "[]") -> dict:
 
     system_prompt = build_system_prompt(BASE_PROMPT)
     conversation_messages = list(history) + [{"role": "user", "content": user_message}]
+    test_debate_token = compute_debate_token(_TEST_IDENTITY_TOKEN)
     ctx = {
         "identity_token": _TEST_IDENTITY_TOKEN,
         "history": conversation_messages,
         "summaries": _TEST_SUMMARIES,
+        "pseudo": derive_pseudo(test_debate_token),
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     result["_test_vote_token"] = compute_vote_token(_TEST_IDENTITY_TOKEN)

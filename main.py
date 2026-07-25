@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from chatbot_actions import compute_debate_token, derive_pseudo
 from chatbot_executor import build_system_prompt, run_turn
 
 DB_PATH = os.environ.get("DB_PATH") or os.path.join(os.path.dirname(__file__), "vote.db")
@@ -29,6 +30,14 @@ if not ADMIN_KEY:
 JOUY_VOTE_PEPPER = os.environ.get("JOUY_VOTE_PEPPER")
 if not JOUY_VOTE_PEPPER:
     raise RuntimeError("La variable d'environnement JOUY_VOTE_PEPPER doit être définie.")
+
+# Pepper dédié au pseudo (distinct de JOUY_VOTE_PEPPER, voir chatbot_actions.compute_debate_token)
+# — même exigence de présence que le pepper de vote : un pseudo dérivé d'un pepper vide/absent
+# perdrait sa garantie de non-corrélation, mieux vaut un crash net au démarrage qu'une faille
+# silencieuse.
+JOUY_PSEUDO_PEPPER = os.environ.get("JOUY_PSEUDO_PEPPER")
+if not JOUY_PSEUDO_PEPPER:
+    raise RuntimeError("La variable d'environnement JOUY_PSEUDO_PEPPER doit être définie.")
 
 # Envoi d'email (lien de réinitialisation de mot de passe) via l'API transactionnelle Brevo.
 # BREVO_API_KEY absente = fonctionnalité désactivée proprement (pas de crash au démarrage,
@@ -168,6 +177,22 @@ def init_db():
                 owner_token TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        # Indexée par debate_token (sha256(identity_token+JOUY_PSEUDO_PEPPER), voir
+        # chatbot_actions.compute_debate_token), JAMAIS par identities.token en clair — au
+        # contraire de chat_summaries.owner_token ci-dessus. Contrainte explicite du wiki
+        # (architecture-technique) : "aucune table ne doit permettre de relier vote_token et
+        # pseudo entre eux, ni l'un ou l'autre à l'identité déclarée" — un FK en clair vers
+        # identities permettrait un JOIN trivial identité→pseudo pour quiconque a accès à la DB,
+        # ce que ce pseudonyme est censé empêcher structurellement (contrairement aux résumés,
+        # privés par design mais pas soumis à cette contrainte).
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pseudos (
+                debate_token TEXT PRIMARY KEY,
+                word TEXT NOT NULL,
+                color TEXT NOT NULL,
+                assigned_at TEXT DEFAULT CURRENT_TIMESTAMP
             )"""
         )
     with db() as conn:
@@ -336,6 +361,25 @@ def compute_identity_hash(nom: str, adresse: str) -> str:
 def compute_vote_token(token: str) -> str:
     raw = f"{token}:{JOUY_VOTE_PEPPER}"
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def ensure_pseudo(identity_token: str) -> dict:
+    """Get-or-create : renvoie le pseudo (mot+couleur) déjà attribué, ou en assigne un nouveau et
+    le stocke si c'est la 1re fois. Le seul endroit qui écrit dans la table pseudos — le LLM ne
+    fait jamais que lire ce résultat via ctx["pseudo"] (voir chatbot_actions.get_or_assign_pseudo)."""
+    debate_token = compute_debate_token(identity_token)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT word, color FROM pseudos WHERE debate_token=?", (debate_token,)
+        ).fetchone()
+        if row:
+            return {"word": row["word"], "color": row["color"]}
+        pseudo = derive_pseudo(debate_token)
+        conn.execute(
+            "INSERT INTO pseudos (debate_token, word, color) VALUES (?, ?, ?)",
+            (debate_token, pseudo["word"], pseudo["color"]),
+        )
+        return pseudo
 
 
 def send_reset_email(to_email: str, reset_token: str) -> bool:
@@ -686,6 +730,7 @@ def chat_v2(req: ChatRequest):
         "identity_token": identity_token,
         "history": conversation_messages,
         "summaries": [dict(r) for r in summary_rows],
+        "pseudo": ensure_pseudo(identity_token),
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     if result["error"] == "llm_indisponible":

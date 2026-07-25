@@ -4,6 +4,7 @@ from httpx import ASGITransport, AsyncClient
 
 os.environ["JOUY_ADMIN_KEY"] = "test-admin-key-42"
 os.environ["JOUY_VOTE_PEPPER"] = "test-vote-pepper-42"
+os.environ["JOUY_PSEUDO_PEPPER"] = "test-pseudo-pepper-42"
 
 import main
 
@@ -27,6 +28,7 @@ def reset_db():
         conn.execute("DELETE FROM votes")
         conn.execute("DELETE FROM questions")
         conn.execute("DELETE FROM identities")
+        conn.execute("DELETE FROM pseudos")
 
 
 @pytest.fixture
@@ -806,7 +808,7 @@ def test_chatbot_actions_registry_excludes_commit_actions():
     import chatbot_actions
 
     assert set(chatbot_actions.ACTIONS.keys()) == {
-        "say_user", "get_vote_token", "propose_summary", "list_summaries",
+        "say_user", "get_vote_token", "propose_summary", "list_summaries", "get_or_assign_pseudo",
     }
     for forbidden in ("save_summary", "delete_summary", "confirm_publication"):
         assert forbidden not in chatbot_actions.ACTIONS
@@ -817,6 +819,99 @@ def test_get_vote_token_action_matches_compute_vote_token():
 
     result = chatbot_actions.get_vote_token({}, {"identity_token": "un-token-de-test"})
     assert result["vote_token"] == chatbot_actions.compute_vote_token("un-token-de-test")
+
+
+def test_debate_token_distinct_from_vote_token_for_same_identity():
+    """Pepper dédié (revue de sécurité 2026-07-25) : même identity_token, deux dérivations
+    totalement indépendantes — condition nécessaire pour qu'un admin connaissant un pepper ne
+    puisse pas en déduire l'autre jeton."""
+    import chatbot_actions
+
+    identity_token = "un-token-de-test"
+    assert chatbot_actions.compute_debate_token(identity_token) != chatbot_actions.compute_vote_token(identity_token)
+
+
+def test_debate_token_deterministic():
+    import chatbot_actions
+
+    a = chatbot_actions.compute_debate_token("token-x")
+    b = chatbot_actions.compute_debate_token("token-x")
+    assert a == b
+    assert a != chatbot_actions.compute_debate_token("token-y")
+
+
+def test_derive_pseudo_deterministic_and_valid():
+    import chatbot_actions
+
+    debate_token = chatbot_actions.compute_debate_token("token-x")
+    pseudo_a = chatbot_actions.derive_pseudo(debate_token)
+    pseudo_b = chatbot_actions.derive_pseudo(debate_token)
+    assert pseudo_a == pseudo_b
+    assert pseudo_a["word"] in chatbot_actions.PSEUDO_WORDS
+    assert pseudo_a["color"] in chatbot_actions.PSEUDO_COLORS
+
+
+def test_get_or_assign_pseudo_action_reads_from_ctx():
+    import chatbot_actions
+
+    result = chatbot_actions.get_or_assign_pseudo({}, {"pseudo": {"word": "Renard", "color": "bleu"}})
+    assert result == {"word": "Renard", "color": "bleu"}
+
+
+def test_get_or_assign_pseudo_action_errors_without_ctx():
+    import chatbot_actions
+
+    result = chatbot_actions.get_or_assign_pseudo({}, {})
+    assert "error" in result
+
+
+def test_ensure_pseudo_creates_once_and_reuses(monkeypatch):
+    """1er appel : insère en DB. 2e appel (même identity_token) : relit la même ligne, ne
+    recalcule/n'insère pas une 2e fois."""
+    import main as main_module
+
+    identity_token = "identity-pour-pseudo-test"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+
+    first = main_module.ensure_pseudo(identity_token)
+    second = main_module.ensure_pseudo(identity_token)
+    assert first == second
+
+    with main.db() as conn:
+        rows = conn.execute("SELECT * FROM pseudos WHERE debate_token=?", (debate_token,)).fetchall()
+    assert len(rows) == 1
+    # La table ne doit JAMAIS contenir le jeton d'identité en clair, seulement le hash dérivé.
+    assert rows[0]["debate_token"] != identity_token
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+
+
+@pytest.mark.anyio
+async def test_chat_v2_ensures_pseudo_and_reuses_across_calls(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    identity_token = logged_in_user["token"]
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+
+    captured = []
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5):
+        captured.append(ctx["pseudo"])
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "salut"})
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "encore"})
+
+    assert captured[0] == captured[1]  # même pseudo aux deux appels, pas régénéré à chaque tour
+    with main.db() as conn:
+        rows = conn.execute("SELECT * FROM pseudos WHERE debate_token=?", (debate_token,)).fetchall()
+    assert len(rows) == 1
 
 
 @pytest.fixture
@@ -884,6 +979,31 @@ async def test_run_turn_chains_action_then_say_user_in_same_batch(mocked_openrou
     assert len(calls) == 1
     expected = __import__("chatbot_actions").compute_vote_token("tok-abc")
     assert result["replies"] == [f"Ton jeton : {expected}"]
+
+
+@pytest.mark.anyio
+async def test_run_turn_substitutes_multi_field_result_naturally(mocked_openrouter_structured):
+    """Régression (bug réel trouvé en conditions réelles le 2026-07-25) : get_or_assign_pseudo
+    renvoie 2 clés (word, color) — la 1re version de _substitute_placeholder dumpait le dict JSON
+    brut dans la réponse affichée à l'utilisateur au lieu d'un texte naturel."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "get_or_assign_pseudo"},
+            {"action": "say_user", "text": "Tu es {{résultat}}"},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "mon pseudo ?"}],
+        {"pseudo": {"word": "Clairière", "color": "corail"}},
+    )
+    assert result["error"] is None
+    assert result["replies"] == ["Tu es Clairière corail"]
+    assert "{" not in result["replies"][0]  # jamais de JSON brut affiché à l'utilisateur
 
 
 @pytest.mark.anyio
