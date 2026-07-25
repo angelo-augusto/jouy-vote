@@ -677,7 +677,16 @@ def chat_v2(req: ChatRequest):
     system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT)
     conversation_messages = [{"role": m.role, "content": m.content} for m in req.history[-20:]]
     conversation_messages.append({"role": "user", "content": req.message})
-    ctx = {"identity_token": identity_token, "history": conversation_messages}
+    with db() as conn:
+        summary_rows = conn.execute(
+            "SELECT id, summary, created_at FROM chat_summaries WHERE owner_token=? ORDER BY created_at DESC",
+            (identity_token,),
+        ).fetchall()
+    ctx = {
+        "identity_token": identity_token,
+        "history": conversation_messages,
+        "summaries": [dict(r) for r in summary_rows],
+    }
     result = run_turn(system_prompt, conversation_messages, ctx)
     if result["error"] == "llm_indisponible":
         raise HTTPException(503, "Le chatbot est momentanément indisponible.")

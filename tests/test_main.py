@@ -805,8 +805,10 @@ def test_chatbot_actions_registry_excludes_commit_actions():
     pourrait dire — c'est le dict ACTIONS qui fait foi, pas une consigne."""
     import chatbot_actions
 
-    assert set(chatbot_actions.ACTIONS.keys()) == {"say_user", "get_vote_token", "propose_summary"}
-    for forbidden in ("save_summary", "delete_summary", "confirm_publication", "list_summaries"):
+    assert set(chatbot_actions.ACTIONS.keys()) == {
+        "say_user", "get_vote_token", "propose_summary", "list_summaries",
+    }
+    for forbidden in ("save_summary", "delete_summary", "confirm_publication"):
         assert forbidden not in chatbot_actions.ACTIONS
 
 
@@ -832,6 +834,20 @@ def mocked_openrouter_structured(monkeypatch):
 
     monkeypatch.setattr(chatbot_executor, "call_openrouter", fake_call)
     return calls, responses
+
+
+def test_list_summaries_action_reads_from_ctx():
+    import chatbot_actions
+
+    fake_summaries = [{"id": 1, "summary": "test", "created_at": "2026-07-25T00:00:00"}]
+    result = chatbot_actions.list_summaries({}, {"summaries": fake_summaries})
+    assert result["summaries"] == fake_summaries
+
+
+def test_list_summaries_action_defaults_to_empty_list():
+    import chatbot_actions
+
+    assert chatbot_actions.list_summaries({}, {}) == {"summaries": []}
 
 
 @pytest.mark.anyio
@@ -943,6 +959,35 @@ async def test_chat_v2_success(client, logged_in_user, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["replies"] == ["réponse simulée v2"]
+
+
+@pytest.mark.anyio
+async def test_chat_v2_passes_saved_summaries_in_ctx(client, logged_in_user, monkeypatch):
+    """L'endpoint doit charger les résumés déjà sauvegardés depuis la DB et les fournir dans
+    ctx["summaries"] — c'est ce que list_summaries lit, sans accès DB propre (voir
+    chatbot_actions.list_summaries)."""
+    import main as main_module
+
+    identity_token = logged_in_user["token"]
+    with main.db() as conn:
+        conn.execute(
+            "INSERT INTO chat_summaries (owner_token, summary) VALUES (?, ?)",
+            (identity_token, "un résumé déjà sauvegardé"),
+        )
+
+    captured_ctx = {}
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5):
+        captured_ctx.update(ctx)
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    await client.post(
+        "/chat/v2",
+        json={"session_token": logged_in_user["session_token"], "message": "bonjour"},
+    )
+    assert len(captured_ctx["summaries"]) == 1
+    assert captured_ctx["summaries"][0]["summary"] == "un résumé déjà sauvegardé"
 
 
 @pytest.mark.anyio

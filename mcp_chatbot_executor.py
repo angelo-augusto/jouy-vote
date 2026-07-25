@@ -32,13 +32,18 @@ BASE_PROMPT = (
 # Identité de test fixe (pas de vraie base de données ici) : le POC MCP sert à observer le
 # comportement de la boucle d'actions, pas à rejouer de vraies données citoyennes.
 _TEST_IDENTITY_TOKEN = "test-identity-token-mcp-debug"
+# Résumés de test fixes (pas de vraie DB ici) — juste de quoi observer list_summaries renvoyer
+# quelque chose de non trivial plutôt qu'une liste toujours vide.
+_TEST_SUMMARIES = [
+    {"id": 1, "summary": "J'ai signalé un trottoir dangereux rue de la Mairie.", "created_at": "2026-07-20T10:00:00"},
+]
 
 
 @mcp.tool()
 def run_chat_turn(user_message: str, history_json: str = "[]") -> dict:
     """Exécute un tour complet de la boucle d'actions du chatbot jouyvote (say_user/
-    get_vote_token/propose_summary) avec une identité de test fixe, et retourne les répliques
-    produites + le détail de chaque action exécutée.
+    get_vote_token/propose_summary/list_summaries) avec une identité de test fixe, et retourne
+    les répliques produites + le détail de chaque action exécutée.
 
     Args:
         user_message: le message envoyé par l'utilisateur de test.
@@ -57,6 +62,7 @@ def run_chat_turn(user_message: str, history_json: str = "[]") -> dict:
     ctx = {
         "identity_token": _TEST_IDENTITY_TOKEN,
         "history": conversation_messages,
+        "summaries": _TEST_SUMMARIES,
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     result["_test_vote_token"] = compute_vote_token(_TEST_IDENTITY_TOKEN)

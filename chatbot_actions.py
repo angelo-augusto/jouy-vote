@@ -42,6 +42,13 @@ def get_vote_token(params: dict, ctx: dict) -> dict:
     return {"vote_token": compute_vote_token(identity_token)}
 
 
+def list_summaries(params: dict, ctx: dict) -> dict:
+    """Lecture pure : les résumés déjà sauvegardés sont fournis via ctx["summaries"] (chargés en
+    amont par l'appelant — main.py fait la requête DB, mcp_chatbot_executor.py passe une liste
+    de test) — même pattern que ctx["history"], pour garder ce module sans dépendance DB."""
+    return {"summaries": ctx.get("summaries", [])}
+
+
 def propose_summary(params: dict, ctx: dict) -> dict:
     """Génère un résumé PRIVÉ proposé (brouillon, jamais sauvegardé ici — save_summary reste un
     endpoint backend/UI séparé, déclenché uniquement par un clic utilisateur explicite)."""
@@ -65,12 +72,13 @@ def propose_summary(params: dict, ctx: dict) -> dict:
     return {"summary": summary.strip()}
 
 
-# Registre nom→fonction. Seules ces 3 actions sont dans le scope du POC (mandat 2026-07-25) —
-# list_summaries est un fast-follow trivial (lecture pure), pas ajouté ici pour l'instant.
+# Registre nom→fonction. list_summaries ajouté en fast-follow (2026-07-25, priorité validée par
+# angelobot) — lecture pure, aucun risque nouveau, referme le seul gap connu du POC initial.
 ACTIONS = {
     "say_user": say_user,
     "get_vote_token": get_vote_token,
     "propose_summary": propose_summary,
+    "list_summaries": list_summaries,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -103,6 +111,12 @@ ACTIONS_JSON_SCHEMA = {
                         "required": ["action"],
                         "additionalProperties": False,
                     },
+                    {
+                        "type": "object",
+                        "properties": {"action": {"const": "list_summaries"}},
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    },
                 ]
             },
         }
@@ -130,6 +144,8 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
 - propose_summary() : génère un résumé PRIVÉ proposé de la conversation en cours (brouillon,
   PAS encore sauvegardé — la sauvegarde réelle se fait uniquement via un bouton de l'interface,
   jamais par toi). Aucun paramètre.
+- list_summaries() : renvoie la liste des résumés PRIVÉS déjà sauvegardés par l'utilisateur
+  (titre/date). Aucun paramètre.
 
 Pour référencer dans un say_user le résultat de l'action juste avant, utilise littéralement le
 texte "{{résultat}}" à l'endroit voulu — il sera remplacé automatiquement par la valeur réelle
