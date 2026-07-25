@@ -19,6 +19,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from chatbot_executor import build_system_prompt, run_turn
+
 DB_PATH = os.environ.get("DB_PATH") or os.path.join(os.path.dirname(__file__), "vote.db")
 ADMIN_KEY = os.environ.get("JOUY_ADMIN_KEY")
 if not ADMIN_KEY:
@@ -661,6 +663,25 @@ def chat(req: ChatRequest):
     if reply is None:
         raise HTTPException(503, "Le chatbot est momentanément indisponible.")
     return {"reply": reply}
+
+
+@app.post("/chat/v2")
+def chat_v2(req: ChatRequest):
+    """POC tool-calling (mandat angelobot 2026-07-25, voir wiki.jouyvote.fr/themes:prompt-chatbot).
+
+    Isolé de /chat (production, inchangé) tant que ce POC n'est pas validé — même contrat
+    d'entrée (ChatRequest) pour rester simple à tester en parallèle, mais boucle d'exécution
+    entièrement différente (liste d'actions typées + response_format json_schema strict, voir
+    chatbot_executor.py/chatbot_actions.py)."""
+    identity_token = _require_identity(req.session_token)
+    system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT)
+    conversation_messages = [{"role": m.role, "content": m.content} for m in req.history[-20:]]
+    conversation_messages.append({"role": "user", "content": req.message})
+    ctx = {"identity_token": identity_token, "history": conversation_messages}
+    result = run_turn(system_prompt, conversation_messages, ctx)
+    if result["error"] == "llm_indisponible":
+        raise HTTPException(503, "Le chatbot est momentanément indisponible.")
+    return result
 
 
 @app.post("/chat/summarize")

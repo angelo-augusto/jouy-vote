@@ -799,6 +799,166 @@ async def test_chat_llm_unavailable_returns_503(client, logged_in_user, monkeypa
     assert resp.status_code == 503
 
 
+def test_chatbot_actions_registry_excludes_commit_actions():
+    """Barrière structurelle (revue Opus 2026-07-25, POC tool-calling) : les actions de commit
+    ne doivent JAMAIS être dans le registre appelable par le LLM, quel que soit ce qu'un prompt
+    pourrait dire — c'est le dict ACTIONS qui fait foi, pas une consigne."""
+    import chatbot_actions
+
+    assert set(chatbot_actions.ACTIONS.keys()) == {"say_user", "get_vote_token", "propose_summary"}
+    for forbidden in ("save_summary", "delete_summary", "confirm_publication", "list_summaries"):
+        assert forbidden not in chatbot_actions.ACTIONS
+
+
+def test_get_vote_token_action_matches_compute_vote_token():
+    import chatbot_actions
+
+    result = chatbot_actions.get_vote_token({}, {"identity_token": "un-token-de-test"})
+    assert result["vote_token"] == chatbot_actions.compute_vote_token("un-token-de-test")
+
+
+@pytest.fixture
+def mocked_openrouter_structured(monkeypatch):
+    """Intercepte chatbot_llm.call_openrouter tel qu'importé dans chatbot_executor — capture les
+    appels, retourne des réponses JSON pré-scriptées dans l'ordre fourni par le test."""
+    import chatbot_executor
+
+    calls = []
+    responses = []
+
+    def fake_call(messages, response_format=None, max_tokens=4096, model=None):
+        calls.append(messages)
+        return responses.pop(0), {}
+
+    monkeypatch.setattr(chatbot_executor, "call_openrouter", fake_call)
+    return calls, responses
+
+
+@pytest.mark.anyio
+async def test_run_turn_single_say_user_closes_turn(mocked_openrouter_structured):
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "Bonjour !"}]}))
+
+    result = chatbot_executor.run_turn("system", [{"role": "user", "content": "salut"}], {})
+    assert result["error"] is None
+    assert result["replies"] == ["Bonjour !"]
+    assert len(calls) == 1  # un seul aller-retour, pas de relance
+
+
+@pytest.mark.anyio
+async def test_run_turn_chains_action_then_say_user_in_same_batch(mocked_openrouter_structured):
+    """Un lot {action non-parole puis say_user} doit se clore en UN SEUL appel LLM (pas de
+    relance) — c'est justement l'intérêt du format liste face au function-calling natif."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "get_vote_token"},
+            {"action": "say_user", "text": "Ton jeton : {{résultat}}"},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn("system", [{"role": "user", "content": "mon jeton ?"}], {"identity_token": "tok-abc"})
+    assert result["error"] is None
+    assert len(calls) == 1
+    expected = __import__("chatbot_actions").compute_vote_token("tok-abc")
+    assert result["replies"] == [f"Ton jeton : {expected}"]
+
+
+@pytest.mark.anyio
+async def test_run_turn_relaunches_llm_when_batch_ends_without_say_user(mocked_openrouter_structured):
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({"actions": [{"action": "get_vote_token"}]}))
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "Voilà."}]}))
+
+    result = chatbot_executor.run_turn("system", [{"role": "user", "content": "mon jeton ?"}], {"identity_token": "tok-abc"})
+    assert result["error"] is None
+    assert len(calls) == 2  # relance car le 1er lot ne se termine pas par say_user
+    assert result["replies"] == ["Voilà."]
+
+
+@pytest.mark.anyio
+async def test_run_turn_rejects_unregistered_action_without_executing_it(mocked_openrouter_structured):
+    """Même si un JSON malformé/hostile contenait une action de commit, elle est ignorée — le
+    dispatch ne connaît que ACTIONS.get(), jamais d'exécution par nom arbitraire."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "save_summary", "text": "je triche"},
+            {"action": "say_user", "text": "fin"},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn("system", [{"role": "user", "content": "x"}], {})
+    assert result["replies"] == ["fin"]
+    rejected = [a for a in result["actions_log"] if a["action"] == "save_summary"]
+    assert rejected and rejected[0]["error"] == "action non autorisée pour le LLM"
+
+
+@pytest.mark.anyio
+async def test_run_turn_max_iterations_reached(mocked_openrouter_structured):
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    for _ in range(3):
+        responses.append(json.dumps({"actions": [{"action": "get_vote_token"}]}))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "x"}], {"identity_token": "t"}, max_iterations=3
+    )
+    assert result["error"] == "max_iterations_atteinte"
+    assert len(calls) == 3
+
+
+@pytest.mark.anyio
+async def test_chat_v2_requires_valid_session(client):
+    resp = await client.post("/chat/v2", json={"session_token": "fake", "message": "bonjour"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_chat_v2_success(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5):
+        assert ctx["identity_token"]  # résolu depuis la session, pas None/vide
+        return {"replies": ["réponse simulée v2"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    resp = await client.post(
+        "/chat/v2",
+        json={"session_token": logged_in_user["session_token"], "message": "bonjour"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["replies"] == ["réponse simulée v2"]
+
+
+@pytest.mark.anyio
+async def test_chat_v2_llm_unavailable_returns_503(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(
+        main_module, "run_turn",
+        lambda *a, **k: {"replies": [], "actions_log": [], "error": "llm_indisponible"},
+    )
+    resp = await client.post(
+        "/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "bonjour"}
+    )
+    assert resp.status_code == 503
+
+
 @pytest.mark.anyio
 async def test_chat_summarize_requires_history(client, logged_in_user):
     resp = await client.post(

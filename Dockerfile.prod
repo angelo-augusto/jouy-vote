@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn
 
-COPY main.py .
+COPY main.py chatbot_llm.py chatbot_actions.py chatbot_executor.py .
 COPY static_files ./static_files
 # Répertoire dédié pour la base SQLite, monté en volume pour survivre aux redéploiements —
 # vote.db ne doit JAMAIS vivre dans l'image elle-même (perdu à chaque rebuild sinon).

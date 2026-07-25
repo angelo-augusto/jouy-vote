@@ -8,3 +8,4 @@ vote.db-shm
 .opencode/
 .pytest_cache/
 uvicorn.log
+logs/
