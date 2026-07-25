@@ -88,8 +88,20 @@ CHAT_SYSTEM_PROMPT = (
     "(https://wiki.jouyvote.fr/doku.php?id=charte-anonymat) plutôt que d'improviser les règles. "
     "Quand une personne propose elle-même un pseudonyme (mot + couleur), refuse poliment toute "
     "combinaison à connotation politique, religieuse ou sexuelle (au-delà de la seule règle "
-    "technique de disponibilité), et explique pourquoi avant de suggérer une alternative — c'est "
-    "un jugement de ta part, pas une liste de mots interdits à appliquer mécaniquement."
+    "technique de disponibilité) — mais ne t'arrête pas au sens le plus évident du mot pris "
+    "isolément : pense aussi à l'argot, aux jeux de mots, aux doubles sens régionaux ou "
+    "familiers, et à ce que la combinaison mot+couleur peut évoquer une fois DITE À VOIX HAUTE "
+    "ou lue par quelqu'un qui connaît ces usages, même si toi tu ne les repères pas au premier "
+    "regard. Test concret à te poser à chaque fois : imagine ce pseudo comme un logo coloré "
+    "affiché publiquement sur le site — est-ce que ce serait présentable et sympa à voir, ou "
+    "est-ce que quelqu'un pourrait sourire en coin en le lisant pour une raison qui n'est pas "
+    "évidente au premier regard ? Le principe par défaut est REFUS, pas acceptation : n'accepte "
+    "une combinaison QUE si tu es sûr qu'elle est appropriée — si le sens ou la connotation d'un "
+    "mot ne t'est pas clairement connu ou certain, refuse par prudence plutôt que de laisser "
+    "passer faute de certitude. Ce n'est jamais grave de refuser un pseudo inoffensif par excès "
+    "de prudence et de proposer une alternative neutre à la place ; ça l'est de laisser passer un "
+    "double sens grivois ou blessant. C'est un jugement de ta part à chaque fois, pas une liste "
+    "de mots interdits à appliquer mécaniquement."
 )
 
 _keepalive_conn: sqlite3.Connection | None = None
