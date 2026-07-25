@@ -240,6 +240,102 @@ def init_db():
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pseudos_word_color ON pseudos(word, color)"
         )
+        # Forum (2026-07-25, spec wiki.jouyvote.fr/themes:chatbot-fonctionnalites, section
+        # "Page Forum" — schéma revu par Opus puis corrigé par angelobot le même soir). Comme pour
+        # pseudos ci-dessus : tout ce qui est attribué à un utilisateur est indexé par
+        # debate_token peppé, jamais identities.token en clair — même contrainte
+        # architecture-technique ("aucune table ne doit permettre de relier vote_token et pseudo
+        # entre eux, ni l'un ou l'autre à l'identité déclarée").
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS threads (
+                thread_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                summary TEXT,
+                creator_debate_token TEXT,
+                status TEXT NOT NULL DEFAULT 'draft'
+                    CHECK (status IN ('draft', 'published', 'archived')),
+                embedding_ref TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                published_at TEXT
+            )"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status)")
+        # PAS de table opinion_versions séparée (1re version d'Opus, abandonnée le soir même) :
+        # les réactions pointaient vers l'opinion en général, pas une version précise — modifier le
+        # texte aurait fait porter silencieusement d'anciennes réactions sur un texte jamais vu.
+        # body/argumentaire vivent directement sur la table, FIGÉS DÈS LA 1re RÉACTION (voir
+        # update_opinion_draft ci-dessous, garde applicative — rien en SQL pur ne peut exprimer
+        # cette contrainte). Changer d'avis après coup = nouvelle ligne opinion +
+        # superseded_by_opinion_id sur l'ancienne, jamais de mutation de ce qui a déjà été réagi.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS opinions (
+                opinion_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL REFERENCES threads(thread_id),
+                author_debate_token TEXT NOT NULL,
+                body TEXT NOT NULL,
+                argumentaire TEXT,
+                status TEXT NOT NULL DEFAULT 'draft'
+                    CHECK (status IN ('draft', 'published', 'disavowed')),
+                superseded_by_opinion_id INTEGER REFERENCES opinions(opinion_id),
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                published_at TEXT
+            )"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_opinions_thread ON opinions(thread_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_opinions_author ON opinions(author_debate_token)")
+        # PAS de UNIQUE(opinion_id, reactor_debate_token) — une même personne peut réagir plusieurs
+        # fois dans le temps à la même opinion (changer d'avis) ; chaque réaction est une NOUVELLE
+        # ligne, jamais un écrasement. Seule la plus récente (created_at max) compte dans le
+        # décompte courant, les précédentes restent visibles comme historique.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS opinion_reactions (
+                reaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opinion_id INTEGER NOT NULL REFERENCES opinions(opinion_id),
+                reactor_debate_token TEXT NOT NULL,
+                stance TEXT NOT NULL CHECK (stance IN ('adherer', 'opposer', 'neutre')),
+                argumentaire TEXT,
+                status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published')),
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_opinion_reactions_opinion ON opinion_reactions(opinion_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_opinion_reactions_reactor ON opinion_reactions(reactor_debate_token)"
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS thread_remarques (
+                remarque_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL REFERENCES threads(thread_id),
+                author_debate_token TEXT NOT NULL,
+                body TEXT NOT NULL,
+                reply_to_remarque_id INTEGER REFERENCES thread_remarques(remarque_id),
+                reply_to_opinion_id INTEGER REFERENCES opinions(opinion_id),
+                status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published')),
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_thread_remarques_thread ON thread_remarques(thread_id)"
+        )
+        # Seule exception au principe "chatbot = passage obligé" : l'administration s'adresse
+        # directement à un citoyen, jamais via le chatbot comme intermédiaire. admin_identity est
+        # une identité FIXE et publique par construction (jamais un pseudo, jamais peppée) —
+        # recipient_debate_token reste peppé comme partout ailleurs, même pour ce canal privilégié.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS admin_messages (
+                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient_debate_token TEXT NOT NULL,
+                admin_identity TEXT NOT NULL DEFAULT 'administration',
+                body TEXT NOT NULL,
+                read_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_admin_messages_recipient ON admin_messages(recipient_debate_token)"
+        )
     with db() as conn:
         # Type explicite par colonne (pas juste TEXT pour tout) : ADD COLUMN ne s'applique que
         # si la colonne n'existe pas encore, donc ceci ne corrige que les tables qui n'ont
@@ -474,6 +570,220 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
         except sqlite3.IntegrityError:
             raise ValueError("ce mot+couleur est déjà pris par quelqu'un d'autre")
     return {"word": word, "color": color}
+
+
+# ===== Forum (2026-07-25, phase 1 : schéma + fonctions d'écriture + tests, ZÉRO branchement =====
+# ===== chatbot — voir wiki.jouyvote.fr/themes:chatbot-fonctionnalites, section "Page Forum" =====
+#
+# Même principe brouillon→confirmation que pseudos/résumés : chaque table publiable porte un
+# statut "draft"/"published" (et "disavowed" pour les opinions). Ces fonctions sont les SEULS
+# points d'écriture — futur point de vigilance pour la phase chatbot (à venir) : comme pour
+# save_summary/confirm_pseudo, aucune action LLM-callable ne doit jamais pouvoir faire passer un
+# statut à "published" directement ; seul un endpoint déclenché par un clic utilisateur explicite
+# doit appeler *_publish ci-dessous.
+
+
+def create_thread(title: str, summary: str | None = None, creator_identity_token: str | None = None) -> dict:
+    """Un fil peut être créé par le chatbot seul (regroupement thématique automatique, voir wiki)
+    — creator_debate_token reste NULL dans ce cas plutôt que de forcer une attribution factice."""
+    creator_debate_token = compute_debate_token(creator_identity_token) if creator_identity_token else None
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO threads (title, summary, creator_debate_token) VALUES (?, ?, ?)",
+            (title, summary, creator_debate_token),
+        )
+        thread_id = cur.lastrowid
+    return {"thread_id": thread_id, "title": title, "summary": summary, "status": "draft"}
+
+
+def publish_thread(thread_id: int) -> dict:
+    with db() as conn:
+        conn.execute(
+            "UPDATE threads SET status='published', published_at=CURRENT_TIMESTAMP WHERE thread_id=?",
+            (thread_id,),
+        )
+    return {"thread_id": thread_id, "status": "published"}
+
+
+def _opinion_has_reactions(conn: sqlite3.Connection, opinion_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM opinion_reactions WHERE opinion_id=? LIMIT 1", (opinion_id,)
+    ).fetchone()
+    return row is not None
+
+
+def create_opinion(thread_id: int, author_identity_token: str, body: str, argumentaire: str | None = None) -> dict:
+    """Brouillon initial — body/argumentaire librement modifiables tant qu'AUCUNE réaction n'a
+    encore été publiée dessus (voir update_opinion_draft)."""
+    author_debate_token = compute_debate_token(author_identity_token)
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO opinions (thread_id, author_debate_token, body, argumentaire) VALUES (?, ?, ?, ?)",
+            (thread_id, author_debate_token, body, argumentaire),
+        )
+        opinion_id = cur.lastrowid
+    return {"opinion_id": opinion_id, "thread_id": thread_id, "body": body, "argumentaire": argumentaire, "status": "draft"}
+
+
+def update_opinion_draft(opinion_id: int, body: str | None = None, argumentaire: str | None = None) -> dict:
+    """Règle d'intégrité centrale de ce schéma (2026-07-25, root cause de l'abandon de la 1re
+    version d'Opus avec table opinion_versions séparée) : dès qu'une réaction existe sur cette
+    opinion, body/argumentaire sont GELÉS — les modifier silencieusement ferait porter d'anciennes
+    réactions sur un texte qu'elles n'ont jamais vu. Pour changer d'avis après une réaction, créer
+    une NOUVELLE opinion et appeler supersede_opinion sur l'ancienne, jamais muter celle-ci."""
+    with db() as conn:
+        if _opinion_has_reactions(conn, opinion_id):
+            raise ValueError("cette opinion a déjà des réactions, elle ne peut plus être modifiée — crée une nouvelle opinion à la place")
+        row = conn.execute("SELECT status FROM opinions WHERE opinion_id=?", (opinion_id,)).fetchone()
+        if row is None:
+            raise ValueError("opinion introuvable")
+        if row["status"] != "draft":
+            raise ValueError("cette opinion n'est plus un brouillon")
+        updates, params = [], []
+        if body is not None:
+            updates.append("body=?")
+            params.append(body)
+        if argumentaire is not None:
+            updates.append("argumentaire=?")
+            params.append(argumentaire)
+        if updates:
+            params.append(opinion_id)
+            conn.execute(f"UPDATE opinions SET {', '.join(updates)} WHERE opinion_id=?", params)
+    return {"opinion_id": opinion_id}
+
+
+def publish_opinion(opinion_id: int) -> dict:
+    with db() as conn:
+        conn.execute(
+            "UPDATE opinions SET status='published', published_at=CURRENT_TIMESTAMP "
+            "WHERE opinion_id=? AND status='draft'",
+            (opinion_id,),
+        )
+    return {"opinion_id": opinion_id, "status": "published"}
+
+
+def disavow_opinion(opinion_id: int, author_identity_token: str) -> dict:
+    """"Désavouer" (statut à part, distinct de superseded_by_opinion_id) : l'auteur retire son
+    soutien à une opinion SANS la remplacer par une nouvelle formulation — cas explicitement
+    évoqué par le développeur ("tant que l'auteur ne désavoue pas son opinion")."""
+    author_debate_token = compute_debate_token(author_identity_token)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT author_debate_token FROM opinions WHERE opinion_id=?", (opinion_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("opinion introuvable")
+        if row["author_debate_token"] != author_debate_token:
+            raise ValueError("seul l'auteur peut désavouer sa propre opinion")
+        conn.execute("UPDATE opinions SET status='disavowed' WHERE opinion_id=?", (opinion_id,))
+    return {"opinion_id": opinion_id, "status": "disavowed"}
+
+
+def supersede_opinion(old_opinion_id: int, new_opinion_id: int, author_identity_token: str) -> dict:
+    """Changement d'avis APRÈS que l'ancienne opinion a déjà des réactions (sinon, autant utiliser
+    update_opinion_draft) : la nouvelle opinion est une ligne à part entière (même thread, même
+    auteur), l'ancienne pointe vers elle via superseded_by_opinion_id. Les réactions déjà données
+    sur l'ancienne restent des faits historiques vrais — pas de désaveu automatique, pas de
+    suppression, l'affichage doit juste les recontextualiser comme "réactions à une version
+    antérieure" (logique d'affichage, hors scope de cette fonction DB pure)."""
+    author_debate_token = compute_debate_token(author_identity_token)
+    with db() as conn:
+        old_row = conn.execute(
+            "SELECT author_debate_token, thread_id FROM opinions WHERE opinion_id=?", (old_opinion_id,)
+        ).fetchone()
+        new_row = conn.execute(
+            "SELECT author_debate_token, thread_id FROM opinions WHERE opinion_id=?", (new_opinion_id,)
+        ).fetchone()
+        if old_row is None or new_row is None:
+            raise ValueError("opinion introuvable")
+        if old_row["author_debate_token"] != author_debate_token or new_row["author_debate_token"] != author_debate_token:
+            raise ValueError("seul l'auteur peut remplacer sa propre opinion")
+        if old_row["thread_id"] != new_row["thread_id"]:
+            raise ValueError("la nouvelle opinion doit appartenir au même fil de discussion")
+        conn.execute(
+            "UPDATE opinions SET superseded_by_opinion_id=? WHERE opinion_id=?",
+            (new_opinion_id, old_opinion_id),
+        )
+    return {"opinion_id": old_opinion_id, "superseded_by_opinion_id": new_opinion_id}
+
+
+def add_reaction(opinion_id: int, reactor_identity_token: str, stance: str, argumentaire: str | None = None) -> dict:
+    """TOUJOURS un INSERT, jamais un UPDATE (pas de contrainte UNIQUE sur (opinion_id,
+    reactor_debate_token), voir init_db) — changer d'avis (adhérer→opposer par ex.) crée une
+    NOUVELLE ligne, l'ancienne réaction reste visible comme historique, jamais écrasée ni
+    supprimée."""
+    if stance not in ("adherer", "opposer", "neutre"):
+        raise ValueError("stance invalide")
+    reactor_debate_token = compute_debate_token(reactor_identity_token)
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO opinion_reactions (opinion_id, reactor_debate_token, stance, argumentaire) "
+            "VALUES (?, ?, ?, ?)",
+            (opinion_id, reactor_debate_token, stance, argumentaire),
+        )
+        reaction_id = cur.lastrowid
+    return {"reaction_id": reaction_id, "opinion_id": opinion_id, "stance": stance, "status": "draft"}
+
+
+def publish_reaction(reaction_id: int) -> dict:
+    with db() as conn:
+        conn.execute("UPDATE opinion_reactions SET status='published' WHERE reaction_id=? AND status='draft'", (reaction_id,))
+    return {"reaction_id": reaction_id, "status": "published"}
+
+
+def get_current_reaction(opinion_id: int, reactor_identity_token: str) -> dict | None:
+    """La réaction la plus RÉCENTE (created_at max) compte seule dans le décompte courant — les
+    précédentes restent en base comme historique mais ne sont jamais retournées ici."""
+    reactor_debate_token = compute_debate_token(reactor_identity_token)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT reaction_id, stance, argumentaire, status, created_at FROM opinion_reactions "
+            "WHERE opinion_id=? AND reactor_debate_token=? AND status='published' "
+            "ORDER BY created_at DESC, reaction_id DESC LIMIT 1",
+            (opinion_id, reactor_debate_token),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def create_remarque(
+    thread_id: int, author_identity_token: str, body: str,
+    reply_to_remarque_id: int | None = None, reply_to_opinion_id: int | None = None,
+) -> dict:
+    """Couche informelle en plus du formalisme opinion/réaction — pas de statut "figé", pas de
+    versions : une remarque publiée reste telle quelle (pas de règle de mutation particulière au-
+    delà du cycle générique brouillon→publication)."""
+    if reply_to_remarque_id is not None and reply_to_opinion_id is not None:
+        raise ValueError("une remarque répond à au plus une chose : soit une remarque, soit une opinion, jamais les deux")
+    author_debate_token = compute_debate_token(author_identity_token)
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO thread_remarques "
+            "(thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id),
+        )
+        remarque_id = cur.lastrowid
+    return {"remarque_id": remarque_id, "thread_id": thread_id, "body": body, "status": "draft"}
+
+
+def publish_remarque(remarque_id: int) -> dict:
+    with db() as conn:
+        conn.execute("UPDATE thread_remarques SET status='published' WHERE remarque_id=? AND status='draft'", (remarque_id,))
+    return {"remarque_id": remarque_id, "status": "published"}
+
+
+def send_admin_message(recipient_identity_token: str, body: str) -> dict:
+    """SEULE exception au principe "chatbot = passage obligé" — message direct administration→
+    citoyen, jamais via le chatbot comme intermédiaire (voir init_db pour la justification
+    anonymat : admin_identity est fixe et publique, recipient_debate_token reste peppé)."""
+    recipient_debate_token = compute_debate_token(recipient_identity_token)
+    with db() as conn:
+        cur = conn.execute(
+            "INSERT INTO admin_messages (recipient_debate_token, body) VALUES (?, ?)",
+            (recipient_debate_token, body),
+        )
+        message_id = cur.lastrowid
+    return {"message_id": message_id, "recipient_debate_token": recipient_debate_token, "body": body}
 
 
 def send_reset_email(to_email: str, reset_token: str) -> bool:

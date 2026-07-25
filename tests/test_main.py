@@ -1192,10 +1192,206 @@ def test_confirm_pseudo_rechoice_to_pair_taken_by_another_identity_still_rejecte
     with pytest.raises(ValueError, match="pris par quelqu'un d'autre"):
         main_module.confirm_pseudo(id_b, "Renard", "bleu")
 
+
+# ===== Forum (2026-07-25, phase 1 : schéma + fonctions d'écriture, zéro branchement chatbot) =====
+# Spec : wiki.jouyvote.fr/themes:chatbot-fonctionnalites, section "Page Forum" (version après
+# corrections angelobot du 2026-07-25 soir — plus de table opinion_versions séparée, body/
+# argumentaire directement sur opinions, superseded_by_opinion_id, statut disavowed distinct).
+
+
+def test_create_thread_with_and_without_creator():
+    import main as main_module
+
+    with_creator = main_module.create_thread("Sujet A", summary="résumé", creator_identity_token="identity-forum-1")
+    assert with_creator["status"] == "draft"
+    without_creator = main_module.create_thread("Sujet B (créé par le chatbot seul)")
+    assert without_creator["status"] == "draft"
+
     with main.db() as conn:
-        conn.execute("DELETE FROM pseudos WHERE debate_token IN (?, ?)", (
-            main_module.compute_debate_token(id_a), main_module.compute_debate_token(id_b),
-        ))
+        row_with = conn.execute("SELECT creator_debate_token FROM threads WHERE thread_id=?", (with_creator["thread_id"],)).fetchone()
+        row_without = conn.execute("SELECT creator_debate_token FROM threads WHERE thread_id=?", (without_creator["thread_id"],)).fetchone()
+    assert row_with["creator_debate_token"] == main_module.compute_debate_token("identity-forum-1")
+    assert row_without["creator_debate_token"] is None
+
+    published = main_module.publish_thread(with_creator["thread_id"])
+    assert published["status"] == "published"
+
+
+def test_opinion_draft_freely_editable_before_any_reaction():
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet opinion")
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-2", "Version initiale")
+    assert opinion["status"] == "draft"
+
+    main_module.update_opinion_draft(opinion["opinion_id"], body="Version corrigée avant publication")
+    with main.db() as conn:
+        row = conn.execute("SELECT body FROM opinions WHERE opinion_id=?", (opinion["opinion_id"],)).fetchone()
+    assert row["body"] == "Version corrigée avant publication"
+
+    result = main_module.publish_opinion(opinion["opinion_id"])
+    assert result["status"] == "published"
+
+
+def test_opinion_frozen_once_a_reaction_exists():
+    """Régression du problème identifié par angelobot le 2026-07-25 (root cause de l'abandon de la
+    table opinion_versions séparée) : modifier le texte après une réaction ferait porter
+    silencieusement cette réaction sur un texte jamais vu — doit être structurellement impossible."""
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet gel")
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-3", "Opinion publiée")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    main_module.add_reaction(opinion["opinion_id"], "identity-forum-4", "adherer")
+
+    with pytest.raises(ValueError, match="déjà des réactions"):
+        main_module.update_opinion_draft(opinion["opinion_id"], body="Tentative de modification après réaction")
+
+    with main.db() as conn:
+        row = conn.execute("SELECT body FROM opinions WHERE opinion_id=?", (opinion["opinion_id"],)).fetchone()
+    assert row["body"] == "Opinion publiée"  # inchangé
+
+
+def test_disavow_opinion_requires_author_and_sets_status():
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet désaveu")
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-5", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    with pytest.raises(ValueError, match="seul l'auteur"):
+        main_module.disavow_opinion(opinion["opinion_id"], "identity-forum-6")
+
+    result = main_module.disavow_opinion(opinion["opinion_id"], "identity-forum-5")
+    assert result["status"] == "disavowed"
+
+
+def test_supersede_opinion_links_old_to_new_without_deleting_reactions():
+    """Changer d'avis après une réaction : nouvelle opinion + superseded_by_opinion_id, jamais de
+    suppression — les réactions déjà données sur l'ancienne restent des faits historiques vrais."""
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet supersede")
+    old_opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-7", "Ancienne position")
+    main_module.publish_opinion(old_opinion["opinion_id"])
+    reaction = main_module.add_reaction(old_opinion["opinion_id"], "identity-forum-8", "adherer")
+    main_module.publish_reaction(reaction["reaction_id"])
+
+    new_opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-7", "Nouvelle position")
+    main_module.publish_opinion(new_opinion["opinion_id"])
+
+    result = main_module.supersede_opinion(old_opinion["opinion_id"], new_opinion["opinion_id"], "identity-forum-7")
+    assert result["superseded_by_opinion_id"] == new_opinion["opinion_id"]
+
+    with main.db() as conn:
+        old_row = conn.execute(
+            "SELECT superseded_by_opinion_id, status FROM opinions WHERE opinion_id=?", (old_opinion["opinion_id"],)
+        ).fetchone()
+        reaction_row = conn.execute(
+            "SELECT status FROM opinion_reactions WHERE reaction_id=?", (reaction["reaction_id"],)
+        ).fetchone()
+    assert old_row["superseded_by_opinion_id"] == new_opinion["opinion_id"]
+    assert old_row["status"] == "published"  # pas de désaveu automatique
+    assert reaction_row["status"] == "published"  # réaction jamais supprimée/altérée
+
+
+def test_supersede_opinion_rejects_different_author_or_thread():
+    import main as main_module
+
+    thread_a = main_module.create_thread("Fil A")
+    thread_b = main_module.create_thread("Fil B")
+    opinion_a = main_module.create_opinion(thread_a["thread_id"], "identity-forum-9", "Opinion A")
+    opinion_b_other_author = main_module.create_opinion(thread_a["thread_id"], "identity-forum-10", "Opinion B")
+    opinion_c_other_thread = main_module.create_opinion(thread_b["thread_id"], "identity-forum-9", "Opinion C")
+
+    with pytest.raises(ValueError, match="seul l'auteur"):
+        main_module.supersede_opinion(opinion_a["opinion_id"], opinion_b_other_author["opinion_id"], "identity-forum-9")
+
+    with pytest.raises(ValueError, match="même fil"):
+        main_module.supersede_opinion(opinion_a["opinion_id"], opinion_c_other_thread["opinion_id"], "identity-forum-9")
+
+
+def test_reactions_allow_multiple_over_time_no_unique_constraint():
+    """Régression du design retenu (2026-07-25, corrigé le même soir par angelobot) : plus de
+    contrainte UNIQUE(opinion_id, reactor_debate_token) — une personne peut changer d'avis
+    plusieurs fois, chaque réaction est une ligne à part, la plus récente PUBLIÉE compte seule."""
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet réactions multiples")
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-11", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    r1 = main_module.add_reaction(opinion["opinion_id"], "identity-forum-12", "adherer", argumentaire="Je suis d'accord")
+    main_module.publish_reaction(r1["reaction_id"])
+    current = main_module.get_current_reaction(opinion["opinion_id"], "identity-forum-12")
+    assert current["stance"] == "adherer"
+
+    r2 = main_module.add_reaction(opinion["opinion_id"], "identity-forum-12", "opposer", argumentaire="J'ai changé d'avis")
+    main_module.publish_reaction(r2["reaction_id"])
+    current = main_module.get_current_reaction(opinion["opinion_id"], "identity-forum-12")
+    assert current["stance"] == "opposer"
+    assert current["reaction_id"] == r2["reaction_id"]
+
+    with main.db() as conn:
+        rows = conn.execute(
+            "SELECT reaction_id, stance FROM opinion_reactions WHERE opinion_id=? AND reactor_debate_token=?",
+            (opinion["opinion_id"], main_module.compute_debate_token("identity-forum-12")),
+        ).fetchall()
+    assert len(rows) == 2  # les 2 réactions coexistent, aucune écrasée/supprimée
+
+
+def test_add_reaction_rejects_invalid_stance():
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet stance invalide")
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-13", "Une opinion")
+
+    with pytest.raises(ValueError, match="stance invalide"):
+        main_module.add_reaction(opinion["opinion_id"], "identity-forum-14", "pour")
+
+
+def test_create_remarque_reply_to_remarque_or_opinion_but_not_both():
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet remarques")
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-15", "Une opinion")
+    remarque1 = main_module.create_remarque(thread["thread_id"], "identity-forum-16", "Bonjour tout le monde")
+    main_module.publish_remarque(remarque1["remarque_id"])
+
+    reply_to_remarque = main_module.create_remarque(
+        thread["thread_id"], "identity-forum-17", "Réponse à la remarque", reply_to_remarque_id=remarque1["remarque_id"]
+    )
+    assert reply_to_remarque["status"] == "draft"
+
+    reply_to_opinion = main_module.create_remarque(
+        thread["thread_id"], "identity-forum-18", "Réaction informelle à l'opinion", reply_to_opinion_id=opinion["opinion_id"]
+    )
+    assert reply_to_opinion["status"] == "draft"
+
+    with pytest.raises(ValueError, match="au plus une chose"):
+        main_module.create_remarque(
+            thread["thread_id"], "identity-forum-19", "Impossible",
+            reply_to_remarque_id=remarque1["remarque_id"], reply_to_opinion_id=opinion["opinion_id"],
+        )
+
+
+def test_send_admin_message_indexes_by_peppered_debate_token_not_raw_identity():
+    """Seule exception au chatbot-passage-obligé — mais l'anonymat reste respecté : le
+    destinataire est indexé par debate_token peppé, jamais identities.token en clair."""
+    import main as main_module
+
+    identity_token = "identity-forum-admin-recipient"
+    result = main_module.send_admin_message(identity_token, "Message de l'administration")
+    assert result["recipient_debate_token"] == main_module.compute_debate_token(identity_token)
+    assert result["recipient_debate_token"] != identity_token
+
+    with main.db() as conn:
+        row = conn.execute(
+            "SELECT admin_identity, body FROM admin_messages WHERE message_id=?", (result["message_id"],)
+        ).fetchone()
+    assert row["admin_identity"] == "administration"
+    assert row["body"] == "Message de l'administration"
 
 
 def test_tools_description_lists_actual_palette_no_stale_count():
