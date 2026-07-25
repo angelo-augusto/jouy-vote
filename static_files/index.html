@@ -516,21 +516,23 @@ function renderPseudoCandidates(actionsLog) {
     box.classList.add('hidden');
     return;
   }
-  const { word, color } = proposeAction.result;
+  const { word, color, display } = proposeAction.result;
   list.innerHTML = '';
   const btn = document.createElement('button');
   btn.className = 'btn-primary';
-  btn.textContent = word + ' ' + color;
-  btn.addEventListener('click', () => confirmPseudo(word, color));
+  // "display" = forme accordée grammaticalement (ex. "Clairière verte") — word/color restent la
+  // forme canonique envoyée telle quelle à /pseudo/confirm, inchangée par l'accord d'affichage.
+  btn.textContent = display || (word + ' ' + color);
+  btn.addEventListener('click', () => confirmPseudo(word, color, btn.textContent));
   list.appendChild(btn);
   box.classList.remove('hidden');
 }
-async function confirmPseudo(word, color) {
+async function confirmPseudo(word, color, displayText) {
   const session_token = localStorage.getItem('session_token');
   try {
     await api('/pseudo/confirm', { session_token, word, color });
     document.getElementById('pseudoProposal').classList.add('hidden');
-    chatHistory.push({ role: 'assistant', content: 'Pseudo confirmé : ' + word + ' ' + color + '.' });
+    chatHistory.push({ role: 'assistant', content: 'Pseudo confirmé : ' + (displayText || (word + ' ' + color)) + '.' });
     renderChatMessages();
   } catch (e) {
     showMsg('chatMsg', e.message, 'error');

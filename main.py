@@ -100,7 +100,14 @@ CHAT_SYSTEM_PROMPT = (
     "mot ne t'est pas clairement connu ou certain, refuse par prudence plutôt que de laisser "
     "passer faute de certitude. Ce n'est jamais grave de refuser un pseudo inoffensif par excès "
     "de prudence et de proposer une alternative neutre à la place ; ça l'est de laisser passer un "
-    "double sens grivois ou blessant. C'est un jugement de ta part à chaque fois, pas une liste "
+    "double sens grivois ou blessant. Nuance importante : ce principe de prudence par défaut vise "
+    "l'IGNORANCE (un mot ou un argot que tu ne comprends pas clairement), pas un vague sentiment "
+    "de méfiance sur un mot que tu comprends bien. Quand tu refuses, identifie et nomme la "
+    "référence CONCRÈTE et réelle qui justifie ce refus (l'expression, la connotation précise) — "
+    "un « ça pourrait éventuellement évoquer quelque chose selon le contexte » sans rien de "
+    "concret n'est PAS un motif de refus valable, et sur-refuse des pseudos parfaitement anodins. "
+    "Si aucune association concrète ne te vient à l'esprit, accepte plutôt que de refuser par "
+    "précaution générique non fondée. C'est un jugement de ta part à chaque fois, pas une liste "
     "de mots interdits à appliquer mécaniquement."
 )
 

@@ -38,6 +38,26 @@ def _strip_unresolved_placeholder(text: str) -> str:
     return text.replace("{{résultat}}", "").replace("  ", " ").strip()
 
 
+def _render_result_value(previous_result: dict | None) -> str:
+    """Meilleure représentation textuelle d'un résultat d'action — réutilisée à la fois pour
+    substituer {{résultat}} et pour générer un texte de repli quand le LLM laisse un say_user
+    vide juste après une action (voir bug #5 plus bas). Préfère "display" (forme déjà accordée
+    grammaticalement, voir chatbot_actions._agree_pseudo_display) s'il existe, sinon joint les
+    valeurs scalaires restantes (hors champs de statut interne)."""
+    if not previous_result:
+        return ""
+    if "error" in previous_result:
+        return str(previous_result["error"])
+    display = previous_result.get("display")
+    if isinstance(display, str) and display:
+        return display
+    scalar_values = [
+        str(v) for k, v in previous_result.items()
+        if k not in ("text", "available", "display") and isinstance(v, (str, int, float)) and not isinstance(v, bool)
+    ]
+    return " ".join(scalar_values)
+
+
 def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     """Bug réel #1 trouvé en conditions réelles (2026-07-25, test get_or_assign_pseudo) : un
     résultat à UNE clé (vote_token, summary...) donnait un texte naturel, mais un résultat à
@@ -73,19 +93,10 @@ def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     résumé...)."""
     if "{{résultat}}" not in text:
         return text
-    if not previous_result:
+    value = _render_result_value(previous_result)
+    if not value:
         return _strip_unresolved_placeholder(text)
-    if "error" in previous_result:
-        value = previous_result["error"]
-    else:
-        scalar_values = [
-            str(v) for k, v in previous_result.items()
-            if k not in ("text", "available") and isinstance(v, (str, int, float)) and not isinstance(v, bool)
-        ]
-        if not scalar_values:
-            return _strip_unresolved_placeholder(text)
-        value = " ".join(scalar_values)
-    return text.replace("{{résultat}}", str(value))
+    return text.replace("{{résultat}}", value)
 
 
 def run_turn(
@@ -104,6 +115,15 @@ def run_turn(
     messages = [{"role": "system", "content": system_prompt}] + conversation_messages
     replies: list[str] = []
     actions_log: list[dict] = []
+    # Bug réel #7 (2026-07-25, cause profonde des bugs #5/#6 : mesuré à ~2/5 même après leurs
+    # fixes) : quand un lot se termine par une action non-parole (relance LLM), le résultat de
+    # cette action était PERDU au début de l'itération suivante — "previous_result" était
+    # réinitialisé à None à chaque nouvelle complétion, alors que le say_user qui arrive dans LA
+    # COMPLÉTION SUIVANTE en a justement besoin pour son fallback. Concrètement : le modèle
+    # proposait un candidat dans un 1er appel (lot sans say_user final → relance), puis le
+    # say_user "troué" du 2e appel n'avait plus aucune trace du résultat à substituer. Fix :
+    # transporter le résultat en attente ("carried_result") d'une itération à l'autre.
+    carried_result: dict | None = None
 
     for _iteration in range(max_iterations):
         content, _usage = call_openrouter(messages, response_format=RESPONSE_FORMAT, max_tokens=4096, model=model)
@@ -120,7 +140,8 @@ def run_turn(
         if not actions:
             return {"replies": replies, "actions_log": actions_log, "error": "liste_actions_vide"}
 
-        previous_result: dict | None = None
+        previous_result: dict | None = carried_result
+        carried_result = None
         for cmd in actions:
             action = cmd.get("action")
             fn = ACTIONS.get(action)
@@ -134,6 +155,31 @@ def run_turn(
                 continue
             if action == "say_user":
                 text = _substitute_placeholder(cmd.get("text", ""), previous_result)
+                fallback = _render_result_value(previous_result) if previous_result else ""
+                # "display" (pseudo word+couleur accordé) n'existe que pour les actions pseudo —
+                # c'est UNIQUEMENT là que le modèle est explicitement tenu de nommer le résultat
+                # (voir TOOLS_DESCRIPTION) ; d'autres actions (ex: get_vote_token) tolèrent un
+                # accusé de réception sans citer littéralement la valeur brute ("Voilà." est un
+                # say_user valide après get_vote_token, pas la peine de forcer le jeton dedans).
+                display_value = previous_result.get("display") if previous_result else None
+                is_pseudo_result = isinstance(display_value, str) and bool(display_value)
+                if fallback and not text.strip():
+                    # Bug réel #5 (2026-07-25, root cause d'une répétition signalée par le
+                    # développeur : "Clairière vert" reproposé 5 fois) : le LLM laisse parfois
+                    # say_user vide juste après une action de proposition — sans texte, le filtre
+                    # frontend anti-bulle-vide masque la bulle, effaçant toute trace du candidat
+                    # proposé dans l'historique renvoyé au modèle au tour suivant. Sans mémoire de
+                    # ce qu'il vient d'offrir, le modèle repart d'index=0 → répétition.
+                    text = fallback
+                elif is_pseudo_result and display_value not in text:
+                    # Bug réel #6 (même jour, mesuré à ~2 tentatives sur 5 malgré une clarification
+                    # de prompt) : le LLM ne laisse pas toujours le say_user TOTALEMENT vide — il
+                    # écrit parfois du texte autour d'un "trou" ("Que penses-tu de **** ?"), sans
+                    # jamais avoir inclus le token {{résultat}} littéral (donc rien à substituer).
+                    # Un simple test "texte vide ?" ne détecte pas ce cas. Restreint aux actions
+                    # pseudo (display présent) : c'est la seule famille où citer le résultat est
+                    # une exigence explicite du prompt, pas une généralisation à toute action.
+                    text = fallback
                 replies.append(text)
                 actions_log.append({"action": action, "text": text})
                 previous_result = None
@@ -145,6 +191,10 @@ def run_turn(
         last_action = actions[-1].get("action")
         if last_action == "say_user":
             return {"replies": replies, "actions_log": actions_log, "error": None}
+
+        # Reporté à l'itération suivante (voir "Bug réel #7" plus haut) : le say_user qui clôturera
+        # potentiellement le tour prochain doit encore pouvoir substituer/vérifier CE résultat-ci.
+        carried_result = previous_result
 
         # Le lot se termine par une action non-parole : le LLM a besoin du résultat pour
         # continuer à raisonner (sinon il aurait clos par un say_user) — on relance avec ce

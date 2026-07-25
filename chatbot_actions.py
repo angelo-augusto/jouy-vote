@@ -59,6 +59,34 @@ PSEUDO_WORDS = [
 # un public général. Table pseudos vide en prod au moment du changement, aucune migration requise.
 PSEUDO_COLORS = ["rouge", "orange", "jaune", "vert", "bleu", "violet", "blanc", "noir"]
 
+# Genre grammatical de chaque mot — pour l'accord de la couleur ("Clairière VERTE", pas "Clairière
+# vert"). Bug réel signalé par le développeur (2026-07-25). Seules 3 des 8 couleurs varient en
+# genre en français (rouge/orange/jaune/violet sont invariables) — voir PSEUDO_COLOR_FEMININE.
+PSEUDO_WORD_GENDER = {
+    "Renard": "m", "Hibou": "m", "Chêne": "m", "Lanterne": "f", "Rivière": "f", "Nuage": "m",
+    "Phare": "m", "Comète": "f", "Sentier": "m", "Écureuil": "m", "Orage": "m", "Prairie": "f",
+    "Faucon": "m", "Ruche": "f", "Glacier": "m", "Roseau": "m", "Aurore": "f", "Cascade": "f",
+    "Bourgeon": "m", "Falaise": "f", "Clairière": "f", "Genêt": "m", "Corail": "m", "Frimas": "m",
+    "Tilleul": "m", "Brume": "f", "Sittelle": "f", "Ravin": "m",
+}
+# 5 couleurs variables en genre (vert/bleu/violet/blanc/noir), 3 invariables (rouge/orange/jaune)
+# — "bleu" et "violet" initialement oubliés (2 corrections successives d'angelobot/développeur,
+# 2026-07-25), vérifiés avant ce commit.
+PSEUDO_COLOR_FEMININE = {
+    "vert": "verte", "bleu": "bleue", "violet": "violette", "blanc": "blanche", "noir": "noire",
+}
+
+
+def _agree_pseudo_display(word: str, color: str) -> str:
+    """Forme accordée pour l'AFFICHAGE uniquement (texte du modèle, libellé du bouton) — le
+    stockage/la validation/l'unicité restent toujours sur la forme canonique (word, color) telle
+    quelle, jamais sur cette version accordée. Genre inconnu (mot personnalisé hors de
+    PSEUDO_WORD_GENDER, via propose_custom_pseudo) → masculin par défaut, convention française
+    pour un genre incertain plutôt qu'une règle non fiable sur un mot libre."""
+    gender = PSEUDO_WORD_GENDER.get(word, "m")
+    display_color = PSEUDO_COLOR_FEMININE.get(color, color) if gender == "f" else color
+    return f"{word} {display_color}"
+
 
 def derive_pseudo(debate_token: str) -> dict:
     """Dérivation déterministe mot+couleur à partir du debate_token — même token, même pseudo,
@@ -109,9 +137,10 @@ def _check_pseudo_availability(word: str, color: str, ctx: dict) -> dict:
         return {"available": False, "error": "mot manquant"}
     if color not in PSEUDO_COLORS:
         return {"available": False, "error": f"couleur non valide, choisis parmi : {', '.join(PSEUDO_COLORS)}"}
+    display = _agree_pseudo_display(word, color)
     if (word, color) in ctx.get("taken_pseudos", set()):
-        return {"word": word, "color": color, "available": False, "error": "déjà pris par quelqu'un d'autre"}
-    return {"word": word, "color": color, "available": True}
+        return {"word": word, "color": color, "display": display, "available": False, "error": "déjà pris par quelqu'un d'autre"}
+    return {"word": word, "color": color, "display": display, "available": True}
 
 
 def say_user(params: dict, ctx: dict) -> dict:
@@ -138,7 +167,32 @@ def get_or_assign_pseudo(params: dict, ctx: dict) -> dict:
     pseudo = ctx.get("pseudo")
     if not pseudo:
         return {"error": "pas encore de pseudo confirmé — utilise propose_pseudo_candidates"}
-    return dict(pseudo)
+    result = dict(pseudo)
+    result.setdefault("display", _agree_pseudo_display(result["word"], result["color"]))
+    return result
+
+
+def _availability_with_content_gate(word: str, color: str, appropriate: bool, ctx: dict) -> dict:
+    """Bug réel trouvé en conditions réelles (2026-07-25, signalé par le développeur avec
+    capture) : le jugement de contenu du modèle (politique/religieux/sexuel/argot) ne vivait QUE
+    dans son say_user en texte libre — le résultat structuré "available" (qui pilote SEUL
+    l'affichage du bouton de confirmation côté frontend) ne connaissait que les 2 règles
+    techniques. Conséquence vécue : le texte disait "je refuse par prudence" et le bouton
+    cliquable apparaissait quand même juste en dessous pour LE MÊME pseudo — un utilisateur
+    pressé pouvait obtenir exactement ce que le système venait de refuser en mots.
+
+    Fix structurel : "appropriate" devient un paramètre OBLIGATOIRE du schéma JSON strict (le
+    modèle doit littéralement se positionner à chaque appel, pas juste en informer l'utilisateur
+    après coup) — si False, available=False est renvoyé AVANT même de vérifier quoi que ce soit
+    de technique, donc AUCUN bouton ne peut structurellement apparaître pour un pseudo que le
+    modèle vient de juger inapproprié, quel que soit le texte qu'il écrit ensuite."""
+    if not appropriate:
+        w, c = word.strip(), color.strip().lower()
+        return {
+            "word": w, "color": c, "display": _agree_pseudo_display(w, c),
+            "available": False, "error": "jugé inapproprié (connotation)",
+        }
+    return _check_pseudo_availability(word, color, ctx)
 
 
 def propose_pseudo_candidates(params: dict, ctx: dict) -> dict:
@@ -146,8 +200,10 @@ def propose_pseudo_candidates(params: dict, ctx: dict) -> dict:
     "index" (0, 1, 2...) de la séquence propre à cette identité — pas une liste figée. Pour
     négocier tour après tour ("celle-ci ne te plaît pas ? en voici une autre"), rappelle cette
     action avec index+1 : la conversation tâtonne naturellement, l'interface affiche un bouton de
-    confirmation pour LA proposition la plus récente, jamais une liste posée d'un coup. Vérifie
-    aussi la disponibilité (voir _check_pseudo_availability) — le vrai commit reste dans
+    confirmation pour LA proposition la plus récente, jamais une liste posée d'un coup. "appropriate"
+    (obligatoire) : ton propre jugement sur CE candidat précis avant de le montrer — la liste
+    déterministe a déjà été relue une fois, mais reste vigilant sur chaque combinaison réelle.
+    Vérifie aussi la disponibilité (voir _check_pseudo_availability) — le vrai commit reste dans
     confirm_pseudo (main.py), jamais un write direct depuis cette action."""
     identity_token = ctx.get("identity_token")
     if not identity_token:
@@ -159,18 +215,22 @@ def propose_pseudo_candidates(params: dict, ctx: dict) -> dict:
     if index >= len(candidates):
         return {"error": "plus de nouvelles idées déterministes — propose un pseudo personnalisé avec propose_custom_pseudo"}
     candidate = candidates[index]
-    return _check_pseudo_availability(candidate["word"], candidate["color"], ctx)
+    return _availability_with_content_gate(
+        candidate["word"], candidate["color"], params.get("appropriate", True), ctx
+    )
 
 
 def propose_custom_pseudo(params: dict, ctx: dict) -> dict:
     """Lecture pure (aucun write) : vérifie la disponibilité d'un pseudo proposé par
-    l'UTILISATEUR lui-même (mot + couleur de son choix, pas une idée générée). Mêmes 2 règles
-    dures que propose_pseudo_candidates (couleur valide, pas déjà pris) — le contenu du mot n'est
-    pas techniquement restreint, à ton jugement (nom réel, contenu inapproprié...). Le vrai commit
-    reste dans confirm_pseudo (main.py), jamais un write direct depuis cette action."""
+    l'UTILISATEUR lui-même (mot + couleur de son choix, pas une idée générée). "appropriate"
+    (obligatoire) : TON jugement de contenu sur CE mot+couleur précis, rendu explicite dans les
+    données — mêmes 2 règles techniques que propose_pseudo_candidates (couleur valide, pas déjà
+    pris) si appropriate=true, mais un "appropriate=false" court-circuite tout le reste : le
+    résultat est refusé structurellement, pas seulement à l'oral. Le vrai commit reste dans
+    confirm_pseudo (main.py), jamais un write direct depuis cette action."""
     word = params.get("word", "")
     color = params.get("color", "")
-    return _check_pseudo_availability(word, color, ctx)
+    return _availability_with_content_gate(word, color, params.get("appropriate", True), ctx)
 
 
 def list_summaries(params: dict, ctx: dict) -> dict:
@@ -224,6 +284,7 @@ ACTIONS_JSON_SCHEMA = {
     "properties": {
         "actions": {
             "type": "array",
+            "minItems": 1,
             "items": {
                 "anyOf": [
                     {
@@ -264,8 +325,9 @@ ACTIONS_JSON_SCHEMA = {
                         "properties": {
                             "action": {"const": "propose_pseudo_candidates"},
                             "index": {"type": "integer"},
+                            "appropriate": {"type": "boolean"},
                         },
-                        "required": ["action", "index"],
+                        "required": ["action", "index", "appropriate"],
                         "additionalProperties": False,
                     },
                     {
@@ -274,8 +336,9 @@ ACTIONS_JSON_SCHEMA = {
                             "action": {"const": "propose_custom_pseudo"},
                             "word": {"type": "string"},
                             "color": {"type": "string"},
+                            "appropriate": {"type": "boolean"},
                         },
-                        "required": ["action", "word", "color"],
+                        "required": ["action", "word", "color", "appropriate"],
                         "additionalProperties": False,
                     },
                 ]
@@ -310,38 +373,51 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
 - get_or_assign_pseudo() : renvoie le pseudonyme DÉJÀ CONFIRMÉ de l'utilisateur (mot + couleur),
   s'il en a un. Si aucun pseudo n'est encore confirmé, renvoie une erreur — dans ce cas utilise
   plutôt propose_pseudo_candidates. Aucun paramètre.
-- propose_pseudo_candidates(index) : renvoie UNE SEULE proposition déterministe de pseudo (mot +
-  couleur) à la position "index" (commence à 0). PAS une liste figée : tâtonne avec
-  l'utilisateur, une idée à la fois. IMPORTANT : n'énonce JAMAIS un mot+couleur précis dans ton
-  say_user avant d'avoir réellement appelé cette action dans le MÊME lot et lu son résultat — ne
-  te sers d'aucun exemple de cette documentation comme s'il s'agissait d'une vraie proposition, ce
-  ne sont que des illustrations du ton à employer, pas des candidats réels (aucun bouton n'existe
-  pour eux). Si ça ne lui plaît pas ou que le pseudo est déjà pris, rappelle cette action avec
-  index+1 pour une AUTRE idée. TOUJOURS la même séquence pour un même utilisateur (déterministe),
-  donc index=0 redonnera toujours la même 1re idée. Tu ne peux PAS choisir ni confirmer à sa
-  place : présente UNE proposition (issue du résultat réel de l'action), laisse l'utilisateur
-  cliquer sur le bouton qui apparaît pour CETTE proposition précise. N'appelle JAMAIS cette action
-  si l'utilisateur a déjà un pseudo confirmé (vérifie d'abord avec get_or_assign_pseudo si tu
-  n'es pas sûr) — un pseudo confirmé est stable, il ne se change pas à volonté ; si on te le
-  redemande, rappelle simplement le pseudo déjà attribué. Le résultat contient "available"
-  (true/false) — si false, explique pourquoi (déjà pris) et propose l'index suivant, ne l'affiche
-  jamais comme un choix valide.
-- propose_custom_pseudo(word, color) : même vérification de disponibilité, mais pour un pseudo
-  proposé par l'UTILISATEUR lui-même (pas une idée générée) — utilise cette action quand il te
-  suggère un mot et une couleur de son choix. "color" doit être une des 8 couleurs de la palette
-  (si l'utilisateur en propose une autre, dis-lui laquelle choisir parmi les 8). Le mot lui-même
-  n'est pas restreint techniquement — à ton jugement habituel (jamais un nom réel, jamais un
-  contenu inapproprié, et refuse aussi toute connotation politique/religieuse/sexuelle même si la
-  couleur est libre et le mot inoffensif isolément). Même résultat "available" que ci-dessus.
+- propose_pseudo_candidates(index, appropriate) : renvoie UNE SEULE proposition déterministe de
+  pseudo (mot + couleur) à la position "index" (commence à 0). PAS une liste figée : tâtonne avec
+  l'utilisateur, une idée à la fois. "appropriate" est OBLIGATOIRE et te force à juger CE candidat
+  précis (politique/religieux/sexuel/argot/double sens, voir le socle) AVANT même de savoir s'il
+  est libre — mets false si tu as le moindre doute (défaut = refus, pas acceptation) : dans ce
+  cas le résultat renvoie automatiquement available=false, AUCUN bouton n'apparaîtra pour ce
+  candidat quoi que tu écrives ensuite, passe à index+1 sans le présenter comme une option.
+  IMPORTANT : n'énonce JAMAIS un mot+couleur précis dans ton say_user avant d'avoir réellement
+  appelé cette action dans le MÊME lot et lu son résultat — ne te sers d'aucun exemple de cette
+  documentation comme s'il s'agissait d'une vraie proposition, ce ne sont que des illustrations du
+  ton à employer. Si le candidat est approprié mais déjà pris, ou si l'utilisateur ne l'aime pas,
+  rappelle cette action avec index+1. TOUJOURS la même séquence pour un même utilisateur
+  (déterministe), donc index=0 avec appropriate=true redonnera toujours la même 1re idée. Tu ne
+  peux PAS choisir ni confirmer à sa place. N'appelle JAMAIS cette action si l'utilisateur a déjà
+  un pseudo confirmé (vérifie d'abord avec get_or_assign_pseudo si tu n'es pas sûr).
+- propose_custom_pseudo(word, color, appropriate) : même mécanisme, mais pour un pseudo proposé
+  par l'UTILISATEUR lui-même (pas une idée générée) — utilise cette action quand il te suggère un
+  mot et une couleur de son choix. "color" doit être une des 8 couleurs de la palette (si
+  l'utilisateur en propose une autre, dis-lui laquelle choisir parmi les 8). "appropriate"
+  OBLIGATOIRE : ton jugement de contenu sur CE mot+couleur précis (nom réel, connotation
+  politique/religieuse/sexuelle, argot, double sens — voir le socle pour le détail des critères),
+  à false par défaut si le moindre doute. Si appropriate=false, available=false est renvoyé
+  STRUCTURELLEMENT (avant même de vérifier la disponibilité technique) — aucun bouton de
+  confirmation ne peut apparaître pour ce pseudo, quel que soit le texte que tu écris à côté :
+  ton jugement doit être dans ce paramètre, jamais seulement dans la prose.
 
-IMPORTANT sur ces 2 actions pseudo : "available: true" signifie SEULEMENT que la proposition est
-LIBRE, PAS qu'elle est attribuée. Rien n'est écrit tant que l'utilisateur n'a pas cliqué sur le
-bouton de confirmation qui apparaît dans l'interface. Ne dis JAMAIS "c'est fait"/"bienvenue,
-Untel Untel !"/"ton pseudo est confirmé" à ce stade — dis simplement que la proposition est
-disponible et invite à cliquer sur le bouton pour valider. N'appelle PAS get_or_assign_pseudo
-juste après avoir proposé un candidat dans le même tour en supposant que ça a marché : tant que
-l'utilisateur n'a pas cliqué, get_or_assign_pseudo renverra logiquement une erreur ("pas encore de
-pseudo confirmé"), et l'utiliser prématurément mènera à une phrase confuse.
+IMPORTANT sur ces 2 actions pseudo : même quand "available: true", cela signifie SEULEMENT que la
+proposition est libre et jugée appropriée, PAS qu'elle est attribuée. Rien n'est écrit tant que
+l'utilisateur n'a pas cliqué sur le bouton de confirmation qui apparaît dans l'interface. Ne dis
+JAMAIS "c'est fait"/"bienvenue, Untel Untel !"/"ton pseudo est confirmé" à ce stade — dis
+simplement que la proposition est disponible et invite à cliquer sur le bouton pour valider.
+N'appelle PAS get_or_assign_pseudo juste après avoir proposé un candidat dans le même tour en
+supposant que ça a marché : tant que l'utilisateur n'a pas cliqué, get_or_assign_pseudo renverra
+logiquement une erreur ("pas encore de pseudo confirmé"), et l'utiliser prématurément mènera à une
+phrase confuse.
+
+Le résultat de ces 2 actions contient aussi "display" : la forme mot+couleur déjà ACCORDÉE
+grammaticalement (ex. "Clairière verte", pas "Clairière vert") — utilise TOUJOURS ce champ tel
+quel quand tu mentionnes le pseudo dans ton say_user, ne recolle jamais "word" et "color"
+toi-même (tu casserais l'accord). Ton say_user qui suit un propose_pseudo_candidates/
+propose_custom_pseudo ne doit JAMAIS être vide — nomme toujours le candidat via "display", même
+brièvement ("Que penses-tu de {{résultat}} ?") : sans ça, la personne ne sait pas ce qui lui est
+proposé et toi-même perds la trace de ce que tu as déjà offert lors des tours suivants. Écris
+"{{résultat}}" en TEXTE SIMPLE, sans astérisques ni guillemets autour (pas "**{{résultat}}**",
+pas "«{{résultat}}»") — juste le mot littéral au milieu de ta phrase, rien d'autre.
 
 Pour référencer dans un say_user le résultat de l'action juste avant, utilise littéralement le
 texte "{{résultat}}" à l'endroit voulu — il sera remplacé automatiquement par la valeur réelle

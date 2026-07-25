@@ -852,11 +852,54 @@ def test_derive_pseudo_deterministic_and_valid():
     assert pseudo_a["color"] in chatbot_actions.PSEUDO_COLORS
 
 
+def test_agree_pseudo_display_feminine_word_agrees_variable_colors():
+    """Régression (bug réel signalé par le développeur, 2026-07-25) : 'Clairière vert' au lieu de
+    'Clairière verte' — accord de genre manquant."""
+    import chatbot_actions
+
+    assert chatbot_actions.PSEUDO_WORD_GENDER["Clairière"] == "f"
+    assert chatbot_actions._agree_pseudo_display("Clairière", "vert") == "Clairière verte"
+    assert chatbot_actions._agree_pseudo_display("Clairière", "bleu") == "Clairière bleue"
+    assert chatbot_actions._agree_pseudo_display("Clairière", "violet") == "Clairière violette"
+    assert chatbot_actions._agree_pseudo_display("Clairière", "blanc") == "Clairière blanche"
+    assert chatbot_actions._agree_pseudo_display("Clairière", "noir") == "Clairière noire"
+    # Couleurs invariables en genre : inchangées même pour un mot féminin.
+    assert chatbot_actions._agree_pseudo_display("Clairière", "rouge") == "Clairière rouge"
+    assert chatbot_actions._agree_pseudo_display("Clairière", "orange") == "Clairière orange"
+    assert chatbot_actions._agree_pseudo_display("Clairière", "jaune") == "Clairière jaune"
+
+
+def test_agree_pseudo_display_masculine_word_unchanged():
+    import chatbot_actions
+
+    assert chatbot_actions.PSEUDO_WORD_GENDER["Renard"] == "m"
+    assert chatbot_actions._agree_pseudo_display("Renard", "vert") == "Renard vert"
+    assert chatbot_actions._agree_pseudo_display("Renard", "blanc") == "Renard blanc"
+
+
+def test_agree_pseudo_display_unknown_word_defaults_masculine():
+    """Mot personnalisé (propose_custom_pseudo) hors de PSEUDO_WORD_GENDER — genre inconnu, pas
+    de règle fiable sur un mot libre, donc masculin par défaut (convention française)."""
+    import chatbot_actions
+
+    assert "Loup" not in chatbot_actions.PSEUDO_WORD_GENDER
+    assert chatbot_actions._agree_pseudo_display("Loup", "vert") == "Loup vert"
+
+
+def test_check_pseudo_availability_includes_display_field():
+    import chatbot_actions
+
+    result = chatbot_actions._check_pseudo_availability("Clairière", "vert", {"taken_pseudos": set()})
+    assert result["display"] == "Clairière verte"
+
+
 def test_get_or_assign_pseudo_action_reads_from_ctx():
     import chatbot_actions
 
     result = chatbot_actions.get_or_assign_pseudo({}, {"pseudo": {"word": "Renard", "color": "bleu"}})
-    assert result == {"word": "Renard", "color": "bleu"}
+    assert result["word"] == "Renard"
+    assert result["color"] == "bleu"
+    assert result["display"] == "Renard bleu"
 
 
 def test_get_or_assign_pseudo_action_errors_without_ctx():
@@ -885,7 +928,10 @@ def test_check_pseudo_availability_valid_and_free():
     import chatbot_actions
 
     result = chatbot_actions._check_pseudo_availability("Renard", "bleu", {"taken_pseudos": set()})
-    assert result == {"word": "Renard", "color": "bleu", "available": True}
+    assert result["word"] == "Renard"
+    assert result["color"] == "bleu"
+    assert result["available"] is True
+    assert result["display"] == "Renard bleu"
 
 
 def test_check_pseudo_availability_rejects_invalid_color():
@@ -940,13 +986,43 @@ def test_propose_custom_pseudo_action_checks_availability():
     import chatbot_actions
 
     result = chatbot_actions.propose_custom_pseudo(
-        {"word": "Loup", "color": "gris"}, {"taken_pseudos": set()}
+        {"word": "Loup", "color": "gris", "appropriate": True}, {"taken_pseudos": set()}
     )
     assert result["available"] is False  # "gris" hors palette des 8 couleurs
     result_ok = chatbot_actions.propose_custom_pseudo(
-        {"word": "Loup", "color": "bleu"}, {"taken_pseudos": set()}
+        {"word": "Loup", "color": "bleu", "appropriate": True}, {"taken_pseudos": set()}
     )
-    assert result_ok == {"word": "Loup", "color": "bleu", "available": True}
+    assert result_ok["word"] == "Loup"
+    assert result_ok["color"] == "bleu"
+    assert result_ok["available"] is True
+    assert result_ok["display"] == "Loup bleu"
+
+
+def test_propose_custom_pseudo_content_gate_blocks_button_regardless_of_technical_validity():
+    """Régression (bug réel signalé par le développeur avec capture d'écran, 2026-07-25,
+    'étoile noir') : le texte de l'assistant disait 'je refuse par prudence' mais le bouton de
+    confirmation restait cliquable — le jugement de contenu ne vivait que dans le texte libre,
+    jamais dans le résultat structuré qui pilote le bouton côté frontend. Fix : 'appropriate'
+    devient obligatoire et court-circuite AVANT toute vérification technique."""
+    import chatbot_actions
+
+    result = chatbot_actions.propose_custom_pseudo(
+        {"word": "Étoile", "color": "noir", "appropriate": False}, {"taken_pseudos": set()}
+    )
+    assert result["available"] is False
+    assert "error" in result
+    # Même avec une couleur techniquement valide et un mot non pris : appropriate=False gagne.
+    assert result["word"] == "Étoile"
+    assert result["color"] == "noir"
+
+
+def test_propose_pseudo_candidates_content_gate_blocks_button():
+    import chatbot_actions
+
+    ctx = {"identity_token": "identity-x", "taken_pseudos": set()}
+    result = chatbot_actions.propose_pseudo_candidates({"index": 0, "appropriate": False}, ctx)
+    assert result["available"] is False
+    assert "error" in result
 
 
 def test_get_existing_pseudo_none_then_set_after_confirm():
@@ -1202,6 +1278,76 @@ def test_substitute_placeholder_excludes_boolean_flags():
     assert "False" not in result
 
 
+def test_substitute_placeholder_prefers_display_field():
+    """"display" (forme accordée grammaticalement) doit primer sur la jointure brute word+color,
+    pour que {{résultat}} rende "Clairière verte" et non "Clairière vert"."""
+    import chatbot_executor
+
+    result = chatbot_executor._substitute_placeholder(
+        "Que penses-tu de {{résultat}} ?",
+        {"word": "Clairière", "color": "vert", "display": "Clairière verte", "available": True},
+    )
+    assert result == "Que penses-tu de Clairière verte ?"
+
+
+@pytest.mark.anyio
+async def test_run_turn_fills_empty_say_user_after_proposal_with_fallback_text(mocked_openrouter_structured):
+    """Régression (root cause d'une répétition signalée par le développeur, 2026-07-25,
+    "Clairière vert" reproposé 5 fois) : le LLM laisse parfois say_user vide juste après une
+    action de proposition — sans texte, le filtre frontend anti-bulle-vide masque la bulle,
+    effaçant toute trace du candidat dans l'historique renvoyé au modèle au tour suivant, qui
+    "oublie" alors ce qu'il a déjà proposé et repart d'index=0. Le filet de sécurité doit
+    remplir automatiquement un texte de repli plutôt que de laisser un vide silencieux."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+            {"action": "say_user", "text": ""},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "propose"}], {"identity_token": "tok-abc", "taken_pseudos": set()}
+    )
+    assert result["error"] is None
+    assert result["replies"] != [""]
+    assert result["replies"][0].strip() != ""
+
+
+@pytest.mark.anyio
+async def test_run_turn_replaces_text_when_result_content_missing_despite_nonempty_text(mocked_openrouter_structured):
+    """Régression (bug réel #6, mesuré à ~2/5 en conditions réelles malgré une clarification de
+    prompt, 2026-07-25) : le LLM écrit parfois un texte NON VIDE mais avec un "trou" ("Que
+    penses-tu de **** ?") — sans jamais avoir inclus {{résultat}}, donc rien à substituer, et le
+    texte n'est pas vide donc le filet du bug #5 ne se déclenche pas. Fix : si le contenu réel du
+    résultat (word/color accordé) n'apparaît nulle part dans le texte final, remplacer
+    entièrement par le rendu garanti plutôt que de laisser fuiter un message à moitié vide."""
+    import json
+    import chatbot_actions
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+            {"action": "say_user", "text": "Que penses-tu de **** ? Clique pour confirmer."},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "propose"}], {"identity_token": "tok-abc", "taken_pseudos": set()}
+    )
+    assert result["error"] is None
+    assert "****" not in result["replies"][0]
+    # Le texte est remplacé par le rendu garanti (display) plutôt que le texte troué du modèle.
+    candidate = chatbot_actions.generate_pseudo_candidates("tok-abc", n=1)[0]
+    expected_display = chatbot_actions._agree_pseudo_display(candidate["word"], candidate["color"])
+    assert result["replies"][0] == expected_display
+
+
 @pytest.mark.anyio
 async def test_run_turn_substitutes_multi_field_result_naturally(mocked_openrouter_structured):
     """Régression (bug réel trouvé en conditions réelles le 2026-07-25) : get_or_assign_pseudo
@@ -1281,6 +1427,36 @@ async def test_run_turn_relaunches_llm_when_batch_ends_without_say_user(mocked_o
     assert result["error"] is None
     assert len(calls) == 2  # relance car le 1er lot ne se termine pas par say_user
     assert result["replies"] == ["Voilà."]
+
+
+@pytest.mark.anyio
+async def test_run_turn_carries_result_across_relaunch_for_say_user_fallback(mocked_openrouter_structured):
+    """Régression (bug réel #7, root cause profonde des bugs #5/#6, mesurée à ~2 échecs sur 5 en
+    conditions réelles même après leurs fixes) : quand un lot se termine par une action non-parole
+    (relance LLM), le résultat de cette action doit rester disponible pour le say_user qui arrive
+    dans la COMPLÉTION SUIVANTE — avant ce fix, "previous_result" était réinitialisé à None au
+    début de chaque nouvelle itération, donc le say_user "troué" du 2e appel n'avait plus aucune
+    trace du résultat à substituer/vérifier."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    # 1er appel : le lot se termine par l'action de proposition SEULE, sans say_user → relance.
+    responses.append(json.dumps({
+        "actions": [{"action": "propose_pseudo_candidates", "index": 0, "appropriate": True}]
+    }))
+    # 2e appel (après relance) : say_user "troué", sans avoir jamais inclus {{résultat}}.
+    responses.append(json.dumps({
+        "actions": [{"action": "say_user", "text": "Que penses-tu de **** ?"}]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "propose"}], {"identity_token": "tok-abc", "taken_pseudos": set()}
+    )
+    assert result["error"] is None
+    assert len(calls) == 2
+    assert "****" not in result["replies"][0]
+    assert result["replies"][0].strip() != ""
 
 
 @pytest.mark.anyio
