@@ -178,7 +178,7 @@ def run_turn(
             "parsed_actions": actions,
             "carried_result_in": carried_result_in,
         } if trace else None
-        for cmd in actions:
+        for cmd_index, cmd in enumerate(actions):
             action = cmd.get("action")
             fn = ACTIONS.get(action)
             if fn is None:
@@ -190,14 +190,31 @@ def run_turn(
                 actions_log.append({"action": action, "error": "action non autorisée pour le LLM"})
                 continue
             if action == "say_user":
-                text = _substitute_placeholder(cmd.get("text", ""), previous_result)
-                fallback = _render_result_value(previous_result) if previous_result else ""
+                effective_result = previous_result
+                if not effective_result:
+                    # Bug réel #10 (2026-07-25, trouvé via le mode debug/traçage tout juste
+                    # déployé) : le modèle a parfois mis say_user AVANT propose_pseudo_candidates/
+                    # propose_custom_pseudo dans le MÊME lot (au lieu d'après) — previous_result
+                    # encore vide à ce stade, donc "{{résultat}}" ne pouvait rien substituer
+                    # ("Que penses-tu de ?"). Ces 2 actions sont lecture pure/déterministes (même
+                    # identity_token+index → même résultat, jamais d'effet de bord) : les exécuter
+                    # ici EN AVANCE pour résoudre ce texte est sans risque — la ré-exécution
+                    # normale à sa place dans la boucle, un peu plus bas, produira le même résultat
+                    # et ira dans actions_log comme d'habitude.
+                    for next_cmd in actions[cmd_index + 1:]:
+                        if next_cmd.get("action") in ("propose_pseudo_candidates", "propose_custom_pseudo"):
+                            peek_fn = ACTIONS.get(next_cmd.get("action"))
+                            if peek_fn is not None:
+                                effective_result = peek_fn(next_cmd, ctx)
+                            break
+                text = _substitute_placeholder(cmd.get("text", ""), effective_result)
+                fallback = _render_result_value(effective_result) if effective_result else ""
                 # "display" (pseudo word+couleur accordé) n'existe que pour les actions pseudo —
                 # c'est UNIQUEMENT là que le modèle est explicitement tenu de nommer le résultat
                 # (voir TOOLS_DESCRIPTION) ; d'autres actions (ex: get_vote_token) tolèrent un
                 # accusé de réception sans citer littéralement la valeur brute ("Voilà." est un
                 # say_user valide après get_vote_token, pas la peine de forcer le jeton dedans).
-                display_value = previous_result.get("display") if previous_result else None
+                display_value = effective_result.get("display") if effective_result else None
                 is_pseudo_result = isinstance(display_value, str) and bool(display_value)
                 if fallback and not text.strip():
                     # Bug réel #5 (2026-07-25, root cause d'une répétition signalée par le

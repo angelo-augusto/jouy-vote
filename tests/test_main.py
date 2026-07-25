@@ -1610,6 +1610,43 @@ async def test_run_turn_carries_result_across_relaunch_for_say_user_fallback(moc
 
 
 @pytest.mark.anyio
+async def test_run_turn_resolves_say_user_placed_before_propose_in_same_batch(mocked_openrouter_structured):
+    """Régression bug réel #10 (2026-07-25, trouvé via le mode debug/traçage tout juste déployé,
+    différent du bug #7 qui était INTER-itérations) : dans un même lot, le modèle a placé
+    say_user (avec "{{résultat}}") AVANT propose_pseudo_candidates au lieu d'après — previous_result
+    encore vide à ce moment précis de la boucle, donc rien à substituer ("Que penses-tu de ?").
+    Fix : si le say_user référence un résultat vide, on exécute en avance la prochaine action
+    propose_* du même lot (lecture pure/déterministe, sans effet de bord) pour résoudre le texte."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    # Ordre INVERSÉ par rapport à l'usage attendu : say_user avant propose_pseudo_candidates. Le
+    # lot ne se termine pas par say_user (propose est en dernier) → relance normale (bug #7),
+    # d'où une 2e réponse pour clore le tour — pas ce qu'on teste ici, juste réaliste.
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "say_user", "text": "Que penses-tu de {{résultat}} ?"},
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+        ]
+    }))
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "Dis-moi ce que tu en penses !"}]}))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "propose"}], {"identity_token": "tok-ordre-inverse", "taken_pseudos": set()}
+    )
+    assert result["error"] is None
+    assert len(calls) == 2
+    first_reply = result["replies"][0]
+    assert "{{résultat}}" not in first_reply
+    assert first_reply.strip() != ""
+    assert "?" in first_reply
+    # Le mot+couleur réellement proposé (déterministe pour cette identité) doit apparaître.
+    propose_result = [a for a in result["actions_log"] if a["action"] == "propose_pseudo_candidates"][0]["result"]
+    assert propose_result["display"] in first_reply
+
+
+@pytest.mark.anyio
 async def test_run_turn_rejects_unregistered_action_without_executing_it(mocked_openrouter_structured):
     """Même si un JSON malformé/hostile contenait une action de commit, elle est ignorée — le
     dispatch ne connaît que ACTIONS.get(), jamais d'exécution par nom arbitraire."""
