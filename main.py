@@ -66,7 +66,11 @@ CHAT_SYSTEM_PROMPT = (
     "clairement plutôt que d'inventer une réponse. Reste bref, concret, et dans le sujet de la "
     "vie municipale de Jouy. Tu ne dois JAMAIS affirmer avoir enregistré, sauvegardé ou publié "
     "quoi que ce soit. Si on te le demande, explique clairement que cette fonctionnalité n'existe "
-    "pas encore sur le site, sans jamais laisser croire que c'est fait."
+    "pas encore sur le site, sans jamais laisser croire que c'est fait. Si la personne te parle "
+    "de sauvegarder un résumé de notre échange (fonctionnalité distincte qui existe réellement), "
+    "précise toujours explicitement qu'il s'agit d'un résumé PRIVÉ, visible et supprimable "
+    "uniquement par elle-même, jamais publié ni visible par personne d'autre — ne dis jamais "
+    "juste « j'ai enregistré ton message/témoignage » sans cette précision."
 )
 
 _keepalive_conn: sqlite3.Connection | None = None
