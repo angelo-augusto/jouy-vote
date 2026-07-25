@@ -810,12 +810,12 @@ def test_chatbot_actions_registry_excludes_commit_actions():
     assert set(chatbot_actions.ACTIONS.keys()) == {
         "say_user", "get_vote_token", "propose_summary", "list_summaries",
         "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
-        "list_threads", "get_thread",
+        "list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque",
     }
     for forbidden in (
         "save_summary", "delete_summary", "confirm_publication", "confirm_pseudo",
-        # Forum (2026-07-25, phase 2 — lecture seule) : aucune action de publication n'existe
-        # encore pour le LLM, voir main.py pour les fonctions d'écriture correspondantes.
+        # Forum (2026-07-25, phases 2/3 — lecture/validation pure) : aucune action de publication
+        # n'existe encore pour le LLM, voir main.py pour les fonctions d'écriture correspondantes.
         "create_thread", "publish_thread", "create_opinion", "update_opinion_draft",
         "publish_opinion", "disavow_opinion", "supersede_opinion", "add_reaction",
         "publish_reaction", "create_remarque", "publish_remarque", "send_admin_message",
@@ -1229,6 +1229,7 @@ def test_opinion_draft_freely_editable_before_any_reaction():
     import main as main_module
 
     thread = main_module.create_thread("Sujet opinion")
+    main_module.publish_thread(thread["thread_id"])
     opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-2", "Version initiale")
     assert opinion["status"] == "draft"
 
@@ -1248,6 +1249,7 @@ def test_opinion_frozen_once_a_reaction_exists():
     import main as main_module
 
     thread = main_module.create_thread("Sujet gel")
+    main_module.publish_thread(thread["thread_id"])
     opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-3", "Opinion publiée")
     main_module.publish_opinion(opinion["opinion_id"])
 
@@ -1265,6 +1267,7 @@ def test_disavow_opinion_requires_author_and_sets_status():
     import main as main_module
 
     thread = main_module.create_thread("Sujet désaveu")
+    main_module.publish_thread(thread["thread_id"])
     opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-5", "Une opinion")
     main_module.publish_opinion(opinion["opinion_id"])
 
@@ -1281,6 +1284,7 @@ def test_supersede_opinion_links_old_to_new_without_deleting_reactions():
     import main as main_module
 
     thread = main_module.create_thread("Sujet supersede")
+    main_module.publish_thread(thread["thread_id"])
     old_opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-7", "Ancienne position")
     main_module.publish_opinion(old_opinion["opinion_id"])
     reaction = main_module.add_reaction(old_opinion["opinion_id"], "identity-forum-8", "adherer")
@@ -1308,7 +1312,9 @@ def test_supersede_opinion_rejects_different_author_or_thread():
     import main as main_module
 
     thread_a = main_module.create_thread("Fil A")
+    main_module.publish_thread(thread_a["thread_id"])
     thread_b = main_module.create_thread("Fil B")
+    main_module.publish_thread(thread_b["thread_id"])
     opinion_a = main_module.create_opinion(thread_a["thread_id"], "identity-forum-9", "Opinion A")
     opinion_b_other_author = main_module.create_opinion(thread_a["thread_id"], "identity-forum-10", "Opinion B")
     opinion_c_other_thread = main_module.create_opinion(thread_b["thread_id"], "identity-forum-9", "Opinion C")
@@ -1327,6 +1333,7 @@ def test_reactions_allow_multiple_over_time_no_unique_constraint():
     import main as main_module
 
     thread = main_module.create_thread("Sujet réactions multiples")
+    main_module.publish_thread(thread["thread_id"])
     opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-11", "Une opinion")
     main_module.publish_opinion(opinion["opinion_id"])
 
@@ -1353,6 +1360,7 @@ def test_add_reaction_rejects_invalid_stance():
     import main as main_module
 
     thread = main_module.create_thread("Sujet stance invalide")
+    main_module.publish_thread(thread["thread_id"])
     opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-13", "Une opinion")
 
     with pytest.raises(ValueError, match="stance invalide"):
@@ -1363,6 +1371,7 @@ def test_create_remarque_reply_to_remarque_or_opinion_but_not_both():
     import main as main_module
 
     thread = main_module.create_thread("Sujet remarques")
+    main_module.publish_thread(thread["thread_id"])
     opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-15", "Une opinion")
     remarque1 = main_module.create_remarque(thread["thread_id"], "identity-forum-16", "Bonjour tout le monde")
     main_module.publish_remarque(remarque1["remarque_id"])
@@ -1690,6 +1699,183 @@ def test_get_thread_action_errors_on_unknown_thread_id():
 
     result = chatbot_actions.get_thread({"thread_id": 999}, {"threads": []})
     assert "error" in result
+
+
+# ===== Forum phase 3 (2026-07-25) : propose_opinion/propose_reaction/propose_remarque — =====
+# ===== lecture/validation pure, aucun write, même principe que propose_pseudo_candidates =====
+
+
+def test_propose_opinion_action_valid_thread():
+    import chatbot_actions
+
+    ctx = {"threads": [{"thread_id": 1, "title": "Sujet", "summary": None, "opinions": []}]}
+    result = chatbot_actions.propose_opinion({"thread_id": 1, "body": "Je pense que...", "argumentaire": "parce que..."}, ctx)
+    assert result["available"] is True
+    assert result["thread_title"] == "Sujet"
+    assert result["body"] == "Je pense que..."
+
+
+def test_propose_opinion_action_rejects_unknown_or_unpublished_thread():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_opinion({"thread_id": 999, "body": "Je pense que..."}, {"threads": []})
+    assert result["available"] is False
+    assert "error" in result
+
+
+def test_propose_opinion_action_rejects_empty_body():
+    import chatbot_actions
+
+    ctx = {"threads": [{"thread_id": 1, "title": "Sujet", "summary": None, "opinions": []}]}
+    result = chatbot_actions.propose_opinion({"thread_id": 1, "body": "   "}, ctx)
+    assert result["available"] is False
+
+
+def test_propose_reaction_action_valid_opinion():
+    import chatbot_actions
+
+    ctx = {"threads": [{"thread_id": 1, "title": "Sujet", "summary": None, "opinions": [
+        {"opinion_id": 42, "auteur": "Renard bleu", "body": "Une opinion", "argumentaire": None, "superseded_by_opinion_id": None},
+    ]}]}
+    result = chatbot_actions.propose_reaction({"opinion_id": 42, "stance": "adherer"}, ctx)
+    assert result["available"] is True
+    assert result["opinion_body"] == "Une opinion"
+
+
+def test_propose_reaction_action_rejects_invalid_stance():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_reaction({"opinion_id": 42, "stance": "pour"}, {"threads": []})
+    assert result["available"] is False
+    assert result["error"] == "stance invalide"
+
+
+def test_propose_reaction_action_rejects_unknown_opinion():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_reaction({"opinion_id": 999, "stance": "neutre"}, {"threads": []})
+    assert result["available"] is False
+
+
+def test_propose_remarque_action_valid():
+    import chatbot_actions
+
+    ctx = {"threads": [{"thread_id": 1, "title": "Sujet", "summary": None, "opinions": []}]}
+    result = chatbot_actions.propose_remarque({"thread_id": 1, "body": "Bonjour !"}, ctx)
+    assert result["available"] is True
+
+
+def test_propose_remarque_action_rejects_both_reply_targets():
+    import chatbot_actions
+
+    ctx = {"threads": [{"thread_id": 1, "title": "Sujet", "summary": None, "opinions": []}]}
+    result = chatbot_actions.propose_remarque(
+        {"thread_id": 1, "body": "Impossible", "reply_to_remarque_id": 1, "reply_to_opinion_id": 2}, ctx
+    )
+    assert result["available"] is False
+
+
+def test_propose_remarque_action_rejects_unknown_thread():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_remarque({"thread_id": 999, "body": "Bonjour"}, {"threads": []})
+    assert result["available"] is False
+
+
+def test_create_opinion_rejects_unpublished_or_unknown_thread():
+    """Durcissement 2026-07-25 (phase 3) : on n'attache jamais une opinion à un fil en brouillon
+    ou inexistant, même si l'appel vient directement de Python (pas seulement via propose_opinion,
+    qui filtre déjà via ctx["threads"] — filet de sécurité côté fonction elle-même)."""
+    import main as main_module
+
+    with pytest.raises(ValueError, match="introuvable"):
+        main_module.create_opinion(999999, "identity-forum-hardening-1", "Une opinion")
+
+    draft_thread = main_module.create_thread("Fil non publié pour test durcissement")
+    with pytest.raises(ValueError, match="pas encore publié"):
+        main_module.create_opinion(draft_thread["thread_id"], "identity-forum-hardening-2", "Une opinion")
+
+
+def test_add_reaction_rejects_unpublished_or_unknown_opinion():
+    import main as main_module
+
+    with pytest.raises(ValueError, match="introuvable"):
+        main_module.add_reaction(999999, "identity-forum-hardening-3", "adherer")
+
+    thread = main_module.create_thread("Fil pour test durcissement réaction")
+    main_module.publish_thread(thread["thread_id"])
+    draft_opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-hardening-4", "Opinion brouillon")
+    with pytest.raises(ValueError, match="n'est pas publiée"):
+        main_module.add_reaction(draft_opinion["opinion_id"], "identity-forum-hardening-5", "adherer")
+
+
+def test_create_remarque_rejects_unpublished_or_unknown_thread():
+    import main as main_module
+
+    with pytest.raises(ValueError, match="introuvable"):
+        main_module.create_remarque(999999, "identity-forum-hardening-6", "Bonjour")
+
+    draft_thread = main_module.create_thread("Fil non publié pour test remarque")
+    with pytest.raises(ValueError, match="pas encore publié"):
+        main_module.create_remarque(draft_thread["thread_id"], "identity-forum-hardening-7", "Bonjour")
+
+
+@pytest.mark.anyio
+async def test_opinion_confirm_endpoint_creates_and_publishes_in_one_call(client, logged_in_user):
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour test endpoint opinion")
+    main_module.publish_thread(thread["thread_id"])
+
+    resp = await client.post("/opinion/confirm", json={
+        "session_token": logged_in_user["session_token"], "thread_id": thread["thread_id"],
+        "body": "Je pense que...", "argumentaire": "parce que...",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "published"
+
+
+@pytest.mark.anyio
+async def test_opinion_confirm_endpoint_rejects_unpublished_thread(client, logged_in_user):
+    import main as main_module
+
+    draft_thread = main_module.create_thread("Fil brouillon pour test endpoint opinion rejet")
+
+    resp = await client.post("/opinion/confirm", json={
+        "session_token": logged_in_user["session_token"], "thread_id": draft_thread["thread_id"],
+        "body": "Je pense que...",
+    })
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_reaction_confirm_endpoint_creates_and_publishes_in_one_call(client, logged_in_user):
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour test endpoint réaction")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-forum-endpoint-reaction", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    resp = await client.post("/reaction/confirm", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": opinion["opinion_id"], "stance": "adherer",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "published"
+
+
+@pytest.mark.anyio
+async def test_remarque_confirm_endpoint_creates_and_publishes_in_one_call(client, logged_in_user):
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour test endpoint remarque")
+    main_module.publish_thread(thread["thread_id"])
+
+    resp = await client.post("/remarque/confirm", json={
+        "session_token": logged_in_user["session_token"], "thread_id": thread["thread_id"], "body": "Bonjour !",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "published"
 
 
 @pytest.mark.anyio
@@ -2044,6 +2230,35 @@ async def test_run_turn_does_not_force_repeat_citation_of_already_mentioned_pseu
     assert result["error"] is None
     # list_threads (iteration 0) ne produit pas de say_user — le suivi est le 2e reply (index 1).
     assert result["replies"][1] == follow_up_text
+
+
+@pytest.mark.anyio
+async def test_run_turn_forces_error_message_when_say_user_ignores_available_false(mocked_openrouter_structured):
+    """Régression bug réel #12 (2026-07-25, trouvé EN RÉEL en testant propose_opinion, phase 3 du
+    forum) : propose_opinion a renvoyé available=false + error="fil introuvable (ou pas encore
+    publié)" (mauvais thread_id), mais le say_user a quand même affirmé "j'ai préparé le
+    brouillon... clique pour confirmer" — ignorant complètement l'échec structuré. Généralise le
+    principe des bugs #5/#6 (jusque-là réservé aux actions pseudo via "display") à toute action
+    qui expose un booléen "available"."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [{"action": "propose_opinion", "thread_id": 999, "body": "Une opinion"}]
+    }))
+    false_success_text = (
+        "J'ai préparé le brouillon de ton opinion. Clique sur le bouton de confirmation pour valider."
+    )
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": false_success_text}]}))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "publie mon opinion"}],
+        {"identity_token": "tok-opinion-echec", "threads": []},
+    )
+    assert result["error"] is None
+    assert result["replies"][0] != false_success_text
+    assert "introuvable" in result["replies"][0]
 
 
 @pytest.mark.anyio

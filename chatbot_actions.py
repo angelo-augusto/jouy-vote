@@ -280,6 +280,77 @@ def get_thread(params: dict, ctx: dict) -> dict:
     return thread
 
 
+def propose_opinion(params: dict, ctx: dict) -> dict:
+    """Forum, phase 3 (2026-07-25) : lecture/validation pure, AUCUN write — vérifie que le fil
+    existe et est PUBLIÉ (via ctx["threads"]) avant de renvoyer le brouillon proposé. L'écriture
+    réelle (création + publication en un seul geste) passe par /opinion/confirm (main.py),
+    déclenché uniquement par un clic utilisateur explicite, jamais par toi.
+
+    LIMITÉ AUX FILS EXISTANTS DÉJÀ PUBLIÉS pour l'instant — la création automatique d'un nouveau
+    fil par toi n'existe pas encore (question ouverte documentée sur le wiki, à trancher avec le
+    développeur) : si aucun fil existant ne convient, dis-le honnêtement à l'utilisateur plutôt
+    que d'inventer un thread_id ou de prétendre qu'un nouveau fil a été créé."""
+    thread_id = params.get("thread_id")
+    body = params.get("body", "")
+    argumentaire = params.get("argumentaire")
+    thread = next((t for t in ctx.get("threads", []) if t["thread_id"] == thread_id), None)
+    if thread is None:
+        return {"available": False, "error": "fil introuvable (ou pas encore publié)"}
+    if not body.strip():
+        return {"available": False, "error": "le corps de l'opinion est vide"}
+    return {
+        "thread_id": thread_id, "thread_title": thread["title"],
+        "body": body, "argumentaire": argumentaire, "available": True,
+    }
+
+
+def propose_reaction(params: dict, ctx: dict) -> dict:
+    """Forum, phase 3 : même mécanique que propose_opinion — lecture/validation pure, aucun
+    write. Cherche l'opinion dans ctx["threads"] (opinions publiées imbriquées par fil, voir
+    get_thread) pour vérifier qu'elle existe réellement avant de proposer une réaction dessus.
+    "stance" doit être "adherer", "opposer" ou "neutre" — ce 3e état ("neutre") compte comme une
+    vraie réaction (l'utilisateur a lu et reste neutre), distinct de ne pas avoir réagi du tout."""
+    opinion_id = params.get("opinion_id")
+    stance = params.get("stance", "")
+    argumentaire = params.get("argumentaire")
+    if stance not in ("adherer", "opposer", "neutre"):
+        return {"available": False, "error": "stance invalide"}
+    opinion = None
+    for t in ctx.get("threads", []):
+        opinion = next((o for o in t.get("opinions", []) if o["opinion_id"] == opinion_id), None)
+        if opinion is not None:
+            break
+    if opinion is None:
+        return {"available": False, "error": "opinion introuvable (ou pas encore publiée)"}
+    return {
+        "opinion_id": opinion_id, "stance": stance, "argumentaire": argumentaire,
+        "opinion_body": opinion["body"], "available": True,
+    }
+
+
+def propose_remarque(params: dict, ctx: dict) -> dict:
+    """Forum, phase 3 : même mécanique — lecture/validation pure, aucun write. Une remarque est
+    la couche informelle du forum (dire bonjour, élaborer sur le sujet sans passer par le
+    formalisme adhérer/opposer/argumentaire) — "reply_to_remarque_id" et "reply_to_opinion_id"
+    sont mutuellement exclusifs (au plus une chose, ou rien = nouveau message de premier niveau)."""
+    thread_id = params.get("thread_id")
+    body = params.get("body", "")
+    reply_to_remarque_id = params.get("reply_to_remarque_id")
+    reply_to_opinion_id = params.get("reply_to_opinion_id")
+    if reply_to_remarque_id is not None and reply_to_opinion_id is not None:
+        return {"available": False, "error": "une remarque répond à au plus une chose : soit une remarque, soit une opinion, jamais les deux"}
+    thread = next((t for t in ctx.get("threads", []) if t["thread_id"] == thread_id), None)
+    if thread is None:
+        return {"available": False, "error": "fil introuvable (ou pas encore publié)"}
+    if not body.strip():
+        return {"available": False, "error": "la remarque est vide"}
+    return {
+        "thread_id": thread_id, "body": body,
+        "reply_to_remarque_id": reply_to_remarque_id, "reply_to_opinion_id": reply_to_opinion_id,
+        "available": True,
+    }
+
+
 def propose_summary(params: dict, ctx: dict) -> dict:
     """Génère un résumé PRIVÉ proposé (brouillon, jamais sauvegardé ici — save_summary reste un
     endpoint backend/UI séparé, déclenché uniquement par un clic utilisateur explicite)."""
@@ -311,6 +382,9 @@ def propose_summary(params: dict, ctx: dict) -> dict:
 # AUCUNE action de publication (create_thread/create_opinion/publish_*/add_reaction/etc., voir
 # main.py) n'est exposée ici : le point de vigilance signalé par la revue Opus reste respecté par
 # construction, ces actions n'existent que côté Python, jamais LLM-callable.
+# propose_opinion/propose_reaction/propose_remarque ajoutés en phase 3 (2026-07-25) — même
+# principe : lecture/validation pure, l'écriture réelle passe par /opinion|reaction|remarque/
+# confirm (main.py), jamais par une action LLM-callable.
 ACTIONS = {
     "say_user": say_user,
     "get_vote_token": get_vote_token,
@@ -321,6 +395,9 @@ ACTIONS = {
     "propose_custom_pseudo": propose_custom_pseudo,
     "list_threads": list_threads,
     "get_thread": get_thread,
+    "propose_opinion": propose_opinion,
+    "propose_reaction": propose_reaction,
+    "propose_remarque": propose_remarque,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -402,6 +479,44 @@ ACTIONS_JSON_SCHEMA = {
                         "required": ["action", "thread_id"],
                         "additionalProperties": False,
                     },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "propose_opinion"},
+                            "thread_id": {"type": "integer"},
+                            "body": {"type": "string"},
+                            # Nullable plutôt qu'absent de "required" : le schéma json_schema
+                            # "strict" (voir RESPONSE_FORMAT) exige que CHAQUE propriété soit dans
+                            # "required" — un champ optionnel s'exprime en le rendant nullable,
+                            # jamais en l'omettant de la liste.
+                            "argumentaire": {"type": ["string", "null"]},
+                        },
+                        "required": ["action", "thread_id", "body", "argumentaire"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "propose_reaction"},
+                            "opinion_id": {"type": "integer"},
+                            "stance": {"type": "string"},
+                            "argumentaire": {"type": ["string", "null"]},
+                        },
+                        "required": ["action", "opinion_id", "stance", "argumentaire"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "propose_remarque"},
+                            "thread_id": {"type": "integer"},
+                            "body": {"type": "string"},
+                            "reply_to_remarque_id": {"type": ["integer", "null"]},
+                            "reply_to_opinion_id": {"type": ["integer", "null"]},
+                        },
+                        "required": ["action", "thread_id", "body", "reply_to_remarque_id", "reply_to_opinion_id"],
+                        "additionalProperties": False,
+                    },
                 ]
             },
         }
@@ -470,9 +585,31 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   opinions PUBLIÉES avec leur auteur — sous forme de pseudo, jamais d'identité réelle — et leur
   argumentaire). Utile pour repérer si une opinion très proche de celle que quelqu'un s'apprête à
   formuler existe déjà, AVANT de la publier — dans ce cas, propose-lui plutôt d'adhérer à
-  l'opinion existante (voir plus bas les réactions) que d'en créer une en double. Ces 2 actions
-  sont des LECTURES SEULES : aucune action de publication (créer un fil, une opinion, réagir...)
-  n'existe encore pour toi à ce stade — n'invente jamais qu'une telle action serait disponible.
+  l'opinion existante (voir plus bas les réactions) que d'en créer une en double.
+- propose_opinion(thread_id, body, argumentaire) : brouillon d'opinion sur un fil EXISTANT et déjà
+  publié (utilise d'abord list_threads/get_thread pour trouver le bon thread_id — LIMITÉ AUX FILS
+  EXISTANTS pour l'instant : tu ne peux PAS créer de nouveau fil, si aucun fil ne correspond
+  vraiment au sujet, dis-le honnêtement plutôt que d'inventer un thread_id). "body" = la position
+  ("je pense que..."), "argumentaire" = le raisonnement à l'appui ("parce que..."), optionnel.
+  Renvoie available=false si le fil n'existe pas/n'est pas publié ou si "body" est vide. Comme pour
+  le pseudo : available=true signifie SEULEMENT que le brouillon est valide, PAS qu'il est publié
+  — rien n'est écrit tant que l'utilisateur n'a pas cliqué sur le bouton de confirmation.
+- propose_reaction(opinion_id, stance, argumentaire) : brouillon de réaction à une opinion
+  EXISTANTE et publiée (trouvée via get_thread). "stance" doit être "adherer", "opposer" ou
+  "neutre" — ce 3e état est une VRAIE réaction (l'utilisateur a lu et reste neutre), jamais à
+  confondre avec "n'a pas réagi du tout". "argumentaire" (optionnel) : le raisonnement du
+  désaccord/accord, souvent aussi précieux que l'opinion elle-même en cas de désaccord.
+- propose_remarque(thread_id, body, reply_to_remarque_id, reply_to_opinion_id) : brouillon de
+  remarque informelle sur un fil (dire bonjour, élaborer sur le sujet sans passer par le
+  formalisme adhérer/opposer/argumentaire). "reply_to_remarque_id" et "reply_to_opinion_id" sont
+  mutuellement exclusifs (au plus une chose, ou aucun des deux = nouveau message de premier
+  niveau) — mets-les à null si tu ne réponds à rien de précis.
+
+Ces 5 actions forum (list_threads/get_thread/propose_opinion/propose_reaction/propose_remarque)
+sont toutes des LECTURES/VALIDATIONS PURES : aucune action de publication (créer un fil, écrire
+réellement une opinion/réaction/remarque en base) n'existe pour toi — n'invente JAMAIS qu'une
+telle action serait disponible, et ne prétends jamais qu'un fil/une opinion/une réaction a été
+créé(e) sans qu'un bouton de confirmation n'ait été cliqué par l'utilisateur.
 
 IMPORTANT sur ces 2 actions pseudo : même quand "available: true", cela signifie SEULEMENT que la
 proposition est libre et jugée appropriée, PAS qu'elle est attribuée. Rien n'est écrit tant que

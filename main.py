@@ -476,6 +476,28 @@ class PseudoConfirmRequest(BaseModel):
     color: str
 
 
+class OpinionConfirmRequest(BaseModel):
+    session_token: str
+    thread_id: int
+    body: str
+    argumentaire: str | None = None
+
+
+class ReactionConfirmRequest(BaseModel):
+    session_token: str
+    opinion_id: int
+    stance: str
+    argumentaire: str | None = None
+
+
+class RemarqueConfirmRequest(BaseModel):
+    session_token: str
+    thread_id: int
+    body: str
+    reply_to_remarque_id: int | None = None
+    reply_to_opinion_id: int | None = None
+
+
 class ChatSummariesRequest(BaseModel):
     session_token: str
 
@@ -616,7 +638,17 @@ def _opinion_has_reactions(conn: sqlite3.Connection, opinion_id: int) -> bool:
 
 def create_opinion(thread_id: int, author_identity_token: str, body: str, argumentaire: str | None = None) -> dict:
     """Brouillon initial — body/argumentaire librement modifiables tant qu'AUCUNE réaction n'a
-    encore été publiée dessus (voir update_opinion_draft)."""
+    encore été publiée dessus (voir update_opinion_draft). Le fil doit exister et être PUBLIÉ —
+    on n'attache jamais une opinion à un fil encore en brouillon ou inexistant (durcissement
+    2026-07-25, phase 3 : ce garde-fou manquait en phase 1, jamais exploitable tant que seul
+    khadasbot appelait ces fonctions directement, mais devient un vrai risque dès que thread_id
+    vient d'un paramètre LLM/utilisateur, voir propose_opinion/chatbot_actions.py)."""
+    with db() as conn:
+        thread_row = conn.execute("SELECT status FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
+        if thread_row is None:
+            raise ValueError("fil introuvable")
+        if thread_row["status"] != "published":
+            raise ValueError("ce fil n'est pas encore publié")
     author_debate_token = compute_debate_token(author_identity_token)
     with db() as conn:
         cur = conn.execute(
@@ -713,9 +745,17 @@ def add_reaction(opinion_id: int, reactor_identity_token: str, stance: str, argu
     """TOUJOURS un INSERT, jamais un UPDATE (pas de contrainte UNIQUE sur (opinion_id,
     reactor_debate_token), voir init_db) — changer d'avis (adhérer→opposer par ex.) crée une
     NOUVELLE ligne, l'ancienne réaction reste visible comme historique, jamais écrasée ni
-    supprimée."""
+    supprimée. L'opinion doit exister et être PUBLIÉE (durcissement 2026-07-25, phase 3 — même
+    raison que create_opinion : opinion_id devient exploitable dès que la valeur vient d'un
+    paramètre LLM/utilisateur)."""
     if stance not in ("adherer", "opposer", "neutre"):
         raise ValueError("stance invalide")
+    with db() as conn:
+        opinion_row = conn.execute("SELECT status FROM opinions WHERE opinion_id=?", (opinion_id,)).fetchone()
+        if opinion_row is None:
+            raise ValueError("opinion introuvable")
+        if opinion_row["status"] != "published":
+            raise ValueError("cette opinion n'est pas publiée")
     reactor_debate_token = compute_debate_token(reactor_identity_token)
     with db() as conn:
         cur = conn.execute(
@@ -753,9 +793,16 @@ def create_remarque(
 ) -> dict:
     """Couche informelle en plus du formalisme opinion/réaction — pas de statut "figé", pas de
     versions : une remarque publiée reste telle quelle (pas de règle de mutation particulière au-
-    delà du cycle générique brouillon→publication)."""
+    delà du cycle générique brouillon→publication). Le fil doit exister et être PUBLIÉ (même
+    durcissement 2026-07-25, phase 3, que create_opinion/add_reaction)."""
     if reply_to_remarque_id is not None and reply_to_opinion_id is not None:
         raise ValueError("une remarque répond à au plus une chose : soit une remarque, soit une opinion, jamais les deux")
+    with db() as conn:
+        thread_row = conn.execute("SELECT status FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
+        if thread_row is None:
+            raise ValueError("fil introuvable")
+        if thread_row["status"] != "published":
+            raise ValueError("ce fil n'est pas encore publié")
     author_debate_token = compute_debate_token(author_identity_token)
     with db() as conn:
         cur = conn.execute(
@@ -1206,6 +1253,49 @@ def pseudo_confirm(req: PseudoConfirmRequest):
     except ValueError as e:
         status = 409 if "déjà pris" in str(e) else 400
         raise HTTPException(status, str(e))
+
+
+@app.post("/opinion/confirm")
+def opinion_confirm(req: OpinionConfirmRequest):
+    """SEUL endpoint qui écrit une opinion — jamais le LLM (voir chatbot_actions.propose_opinion,
+    lecture/validation pure). Crée le brouillon ET le publie en un seul geste (contrairement au
+    pseudo, une opinion n'a pas de phase "brouillon persistant consultable plus tard" côté produit
+    — le brouillon décrit dans le wiki se passe entièrement EN CONVERSATION, pas en DB), déclenché
+    uniquement par un clic utilisateur explicite."""
+    identity_token = _require_identity(req.session_token)
+    try:
+        opinion = create_opinion(req.thread_id, identity_token, req.body, req.argumentaire)
+        return publish_opinion(opinion["opinion_id"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/reaction/confirm")
+def reaction_confirm(req: ReactionConfirmRequest):
+    """SEUL endpoint qui écrit une réaction — jamais le LLM (voir chatbot_actions.
+    propose_reaction, lecture/validation pure). Même logique que /opinion/confirm : création +
+    publication en un seul geste, déclenché uniquement par un clic utilisateur explicite."""
+    identity_token = _require_identity(req.session_token)
+    try:
+        reaction = add_reaction(req.opinion_id, identity_token, req.stance, req.argumentaire)
+        return publish_reaction(reaction["reaction_id"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/remarque/confirm")
+def remarque_confirm(req: RemarqueConfirmRequest):
+    """SEUL endpoint qui écrit une remarque — jamais le LLM (voir chatbot_actions.
+    propose_remarque, lecture/validation pure). Même logique : création + publication en un seul
+    geste, déclenché uniquement par un clic utilisateur explicite."""
+    identity_token = _require_identity(req.session_token)
+    try:
+        remarque = create_remarque(
+            req.thread_id, identity_token, req.body, req.reply_to_remarque_id, req.reply_to_opinion_id
+        )
+        return publish_remarque(remarque["remarque_id"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/chat/summarize")

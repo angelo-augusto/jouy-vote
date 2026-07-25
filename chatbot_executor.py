@@ -227,6 +227,7 @@ def run_turn(
                 # say_user valide après get_vote_token, pas la peine de forcer le jeton dedans).
                 display_value = effective_result.get("display") if effective_result else None
                 is_pseudo_result = isinstance(display_value, str) and bool(display_value)
+                available_value = effective_result.get("available") if effective_result else None
                 if fallback and not text.strip():
                     # Bug réel #5 (2026-07-25, root cause d'une répétition signalée par le
                     # développeur : "Clairière vert" reproposé 5 fois) : le LLM laisse parfois
@@ -249,6 +250,19 @@ def run_turn(
                     # de SUIVI plus tard dans le même tour ("clique sur le bouton si ça te plaît")
                     # n'a pas besoin de répéter le nom déjà cité une fois, sans quoi son texte
                     # légitime se fait écraser par le simple nom du pseudo en boucle.
+                    text = fallback
+                elif available_value is False and not is_pseudo_result and fallback and fallback not in text:
+                    # Bug réel #12 (2026-07-25, trouvé en réel en testant propose_opinion, phase 3
+                    # du forum) : propose_opinion a renvoyé available=false + error="fil
+                    # introuvable (ou pas encore publié)" (mauvais thread_id), mais le say_user a
+                    # quand même affirmé "j'ai préparé le brouillon... clique pour confirmer" —
+                    # ignorant complètement l'échec structuré, exactement la même famille de bug
+                    # que la modération pseudo (le jugement vivait dans le texte libre, pas dans le
+                    # champ structuré). Généralise le principe des bugs #5/#6 (jusque-là réservés
+                    # aux actions pseudo via "display") à TOUTE action qui expose un booléen
+                    # "available" — si available=false et que le message d'erreur réel n'apparaît
+                    # nulle part dans le texte, force ce message plutôt que de laisser une fausse
+                    # promesse de succès.
                     text = fallback
                 if is_pseudo_result and display_value in text:
                     cited_displays.add(display_value)
