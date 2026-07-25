@@ -112,7 +112,7 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <p class="info">Rien de cet échange n'est conservé, sauf si vous demandez explicitement de sauvegarder un résumé.</p>
   <div id="chatMessages" style="max-height:280px; overflow-y:auto; border:1px solid #eee; border-radius:4px; padding:.6em; margin-bottom:.6em; font-size:.9em;"></div>
   <div id="pseudoProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
-    <p class="info" style="margin:0 0 .5em;">Choisissez votre pseudonyme (stable dans le temps, jamais votre nom réel) :</p>
+    <p class="info" style="margin:0 0 .5em;">Choisissez votre pseudonyme (jamais votre nom réel) :</p>
     <div id="pseudoCandidates"></div>
   </div>
   <div id="chatMsg" class="msg"></div>
@@ -517,15 +517,41 @@ function renderPseudoCandidates(actionsLog) {
     return;
   }
   const { word, color, display } = proposeAction.result;
+  showPseudoProposalButton(word, color, display || (word + ' ' + color));
+  box.classList.remove('hidden');
+}
+// "display" = forme accordée grammaticalement (ex. "Clairière verte") — word/color restent la
+// forme canonique envoyée telle quelle à /pseudo/confirm, inchangée par l'accord d'affichage.
+function showPseudoProposalButton(word, color, displayText) {
+  const list = document.getElementById('pseudoCandidates');
   list.innerHTML = '';
   const btn = document.createElement('button');
   btn.className = 'btn-primary';
-  // "display" = forme accordée grammaticalement (ex. "Clairière verte") — word/color restent la
-  // forme canonique envoyée telle quelle à /pseudo/confirm, inchangée par l'accord d'affichage.
-  btn.textContent = display || (word + ' ' + color);
-  btn.addEventListener('click', () => confirmPseudo(word, color, btn.textContent));
+  btn.textContent = displayText;
+  btn.addEventListener('click', () => askPseudoConfirmation(word, color, displayText));
   list.appendChild(btn);
-  box.classList.remove('hidden');
+}
+// Double confirmation (2026-07-25, demande développeur via angelobot) : le 1er clic ne fait
+// jamais l'écriture réelle, il ouvre juste une 2e étape explicite — évite qu'un clic accidentel
+// (ou un utilisateur qui n'a pas bien lu) verrouille un pseudo sans l'avoir vraiment voulu.
+function askPseudoConfirmation(word, color, displayText) {
+  const list = document.getElementById('pseudoCandidates');
+  list.innerHTML = '';
+  const question = document.createElement('p');
+  question.className = 'info';
+  question.style.margin = '0 0 .5em';
+  question.textContent = 'Confirmer définitivement « ' + displayText + ' » comme pseudonyme ?';
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Oui, confirmer';
+  confirmBtn.addEventListener('click', () => confirmPseudo(word, color, displayText));
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-link';
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.addEventListener('click', () => showPseudoProposalButton(word, color, displayText));
+  list.appendChild(question);
+  list.appendChild(confirmBtn);
+  list.appendChild(cancelBtn);
 }
 async function confirmPseudo(word, color, displayText) {
   const session_token = localStorage.getItem('session_token');
