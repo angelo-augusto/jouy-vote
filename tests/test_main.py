@@ -1134,7 +1134,7 @@ def test_confirm_pseudo_rejects_second_confirmation():
         conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
 
     main_module.confirm_pseudo(identity_token, "Renard", "bleu")
-    with pytest.raises(ValueError, match="déjà attribué"):
+    with pytest.raises(ValueError, match="déjà un pseudo confirmé"):
         main_module.confirm_pseudo(identity_token, "Hibou", "vert")
 
     with main.db() as conn:
@@ -1161,6 +1161,49 @@ def test_confirm_pseudo_rejects_word_color_pair_already_taken_by_another_identit
         conn.execute("DELETE FROM pseudos WHERE debate_token IN (?, ?)", (
             main_module.compute_debate_token(id_a), main_module.compute_debate_token(id_b),
         ))
+
+
+def test_confirm_pseudo_error_messages_are_unambiguous_between_cases():
+    """Régression bug réel signalé par le développeur (2026-07-25, "Chat gris" via angelobot,
+    corrigé ensuite en confusion de message) : "vous avez déjà un pseudo confirmé" et "ce mot+
+    couleur est pris par quelqu'un d'autre" sont 2 causes très différentes qui partageaient un
+    texte assez proche ("pseudo déjà attribué" / "pseudo déjà pris") pour faire croire, à tort, à
+    un faux positif de disponibilité. Les 2 messages doivent rester clairement distincts."""
+    import main as main_module
+
+    id_a, id_b = "identity-msg-clarity-a", "identity-msg-clarity-b"
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token IN (?, ?)", (
+            main_module.compute_debate_token(id_a), main_module.compute_debate_token(id_b),
+        ))
+
+    main_module.confirm_pseudo(id_a, "Renard", "bleu")
+
+    with pytest.raises(ValueError, match="déjà un pseudo confirmé") as own_pseudo_error:
+        main_module.confirm_pseudo(id_a, "Hibou", "vert")
+
+    with pytest.raises(ValueError, match="pris par quelqu'un d'autre") as taken_by_other_error:
+        main_module.confirm_pseudo(id_b, "Renard", "bleu")
+
+    assert str(own_pseudo_error.value) != str(taken_by_other_error.value)
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token IN (?, ?)", (
+            main_module.compute_debate_token(id_a), main_module.compute_debate_token(id_b),
+        ))
+
+
+def test_tools_description_lists_actual_palette_no_stale_count():
+    """Régression (2026-07-25, via angelobot) : TOOLS_DESCRIPTION disait "parmi les 8" en dur,
+    devenu faux dès l'ajout de "gris" (9e couleur) — pire, le modèle n'avait jamais la liste
+    réelle des couleurs nulle part dans le prompt, seulement un compte. La palette est maintenant
+    injectée dynamiquement depuis PSEUDO_COLORS, donc toujours synchronisée."""
+    import chatbot_actions
+
+    assert "__PALETTE_COULEURS__" not in chatbot_actions.TOOLS_DESCRIPTION
+    for color in chatbot_actions.PSEUDO_COLORS:
+        assert color in chatbot_actions.TOOLS_DESCRIPTION
+    assert "parmi les 8" not in chatbot_actions.TOOLS_DESCRIPTION
 
 
 @pytest.mark.anyio
@@ -1203,7 +1246,7 @@ async def test_chat_v2_injects_onboarding_block_until_pseudo_confirmed(client, l
 
     captured_prompts = []
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
         captured_prompts.append(system_prompt)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -1227,7 +1270,7 @@ async def test_chat_v2_passes_taken_pseudos_in_ctx(client, logged_in_user, monke
 
     captured_ctx = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
         captured_ctx.update(ctx)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -1254,6 +1297,53 @@ def mocked_openrouter_structured(monkeypatch):
 
     monkeypatch.setattr(chatbot_executor, "call_openrouter", fake_call)
     return calls, responses
+
+
+@pytest.mark.anyio
+async def test_run_turn_omits_trace_key_by_default(mocked_openrouter_structured):
+    """Mode debug/traçage (demande développeur 2026-07-25, via angelobot, pour ne plus déboguer à
+    l'aveugle via captures d'écran) : par défaut (trace=False), aucune clé "trace" dans le retour —
+    ne coûte rien et ne change pas la forme de la réponse pour un usage normal."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "Bonjour !"}]}))
+
+    result = chatbot_executor.run_turn("system", [{"role": "user", "content": "salut"}], {})
+    assert "trace" not in result
+
+
+@pytest.mark.anyio
+async def test_run_turn_trace_captures_raw_completion_and_carried_result(mocked_openrouter_structured):
+    """Avec trace=True : une entrée par itération LLM, avec la complétion brute, les actions
+    parsées, et l'état de carried_result en entrée/sortie — exactement ce qui manquait pour
+    diagnostiquer les bugs #7/#8/#9 sans capture d'écran."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [{"action": "propose_pseudo_candidates", "index": 0, "appropriate": True}]
+    }))
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "{{résultat}} ?"}]}))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "un pseudo"}], {"identity_token": "tok-trace"}, trace=True,
+    )
+    assert result["error"] is None
+    assert len(result["trace"]) == 2
+
+    first = result["trace"][0]
+    assert first["iteration"] == 0
+    assert "propose_pseudo_candidates" in first["raw_completion"]
+    assert first["parsed_actions"][0]["action"] == "propose_pseudo_candidates"
+    assert first["carried_result_in"] is None
+    assert first["carried_result_out"]["display"] is not None
+
+    second = result["trace"][1]
+    assert second["carried_result_in"] == first["carried_result_out"]
+    assert second["carried_result_out"] is None
 
 
 def test_list_summaries_action_reads_from_ctx():
@@ -1566,7 +1656,7 @@ async def test_chat_v2_requires_valid_session(client):
 async def test_chat_v2_success(client, logged_in_user, monkeypatch):
     import main as main_module
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
         assert ctx["identity_token"]  # résolu depuis la session, pas None/vide
         return {"replies": ["réponse simulée v2"], "actions_log": [], "error": None}
 
@@ -1577,6 +1667,40 @@ async def test_chat_v2_success(client, logged_in_user, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["replies"] == ["réponse simulée v2"]
+
+
+@pytest.mark.anyio
+async def test_chat_v2_trace_requires_valid_admin_key(client, logged_in_user, monkeypatch):
+    """Mode debug/traçage réservé aux bots internes (demande développeur 2026-07-25) : sans
+    admin_key correct, run_turn est appelé avec trace=False — jamais activé par erreur ou par un
+    citoyen qui devinerait le paramètre."""
+    import main as main_module
+
+    captured = {}
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+        captured["trace"] = trace
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+
+    await client.post(
+        "/chat/v2",
+        json={"session_token": logged_in_user["session_token"], "message": "bonjour"},
+    )
+    assert captured["trace"] is False
+
+    await client.post(
+        "/chat/v2",
+        json={"session_token": logged_in_user["session_token"], "message": "bonjour", "admin_key": "mauvaise-clé"},
+    )
+    assert captured["trace"] is False
+
+    await client.post(
+        "/chat/v2",
+        json={"session_token": logged_in_user["session_token"], "message": "bonjour", "admin_key": "test-admin-key-42"},
+    )
+    assert captured["trace"] is True
 
 
 @pytest.mark.anyio
@@ -1595,7 +1719,7 @@ async def test_chat_v2_passes_saved_summaries_in_ctx(client, logged_in_user, mon
 
     captured_ctx = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
         captured_ctx.update(ctx)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 

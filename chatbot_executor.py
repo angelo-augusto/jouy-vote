@@ -112,22 +112,38 @@ def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     return text.replace("{{résultat}}", value)
 
 
+def _turn_result(replies: list, actions_log: list, error: str | None, trace_log: list | None) -> dict:
+    result = {"replies": replies, "actions_log": actions_log, "error": error}
+    if trace_log is not None:
+        result["trace"] = trace_log
+    return result
+
+
 def run_turn(
     system_prompt: str,
     conversation_messages: list[dict],
     ctx: dict,
     model: str | None = None,
     max_iterations: int = MAX_ITERATIONS,
+    trace: bool = False,
 ) -> dict:
     """Exécute un tour complet (potentiellement plusieurs allers-retours LLM si une action non-
     parole termine un lot). ctx : contexte métier (identity_token, history...) passé tel quel à
     chaque fonction d'action.
 
     Retourne {"replies": [str, ...], "actions_log": [...], "error": None|str}. N'échoue jamais
-    par exception non capturée — une erreur devient "error" dans le retour."""
+    par exception non capturée — une erreur devient "error" dans le retour.
+
+    "trace" (demande développeur 2026-07-25, via angelobot, suite au débogage à l'aveugle des bugs
+    #7/#8/#9 via captures d'écran) : si True, ajoute une clé "trace" à la valeur de retour — liste
+    d'un dict par itération LLM avec la complétion brute (avant parsing), les actions parsées, et
+    l'état de carried_result en entrée/sortie d'itération. Réservé à un usage interne/debug (gate
+    admin côté main.py, jamais exposé par défaut) — coûte un peu de mémoire/sérialisation, donc pas
+    calculé si non demandé."""
     messages = [{"role": "system", "content": system_prompt}] + conversation_messages
     replies: list[str] = []
     actions_log: list[dict] = []
+    trace_log: list[dict] | None = [] if trace else None
     # Bug réel #7 (2026-07-25, cause profonde des bugs #5/#6 : mesuré à ~2/5 même après leurs
     # fixes) : quand un lot se termine par une action non-parole (relance LLM), le résultat de
     # cette action était PERDU au début de l'itération suivante — "previous_result" était
@@ -141,20 +157,27 @@ def run_turn(
     for _iteration in range(max_iterations):
         content, _usage = call_openrouter(messages, response_format=RESPONSE_FORMAT, max_tokens=4096, model=model)
         if content is None:
-            return {"replies": replies, "actions_log": actions_log, "error": "llm_indisponible"}
+            return _turn_result(replies, actions_log, "llm_indisponible", trace_log)
 
         try:
             data = json.loads(content)
             actions = data.get("actions", []) if isinstance(data, dict) else []
         except json.JSONDecodeError:
             log.error("Réponse LLM non-JSON malgré response_format strict : %s", content[:300])
-            return {"replies": replies, "actions_log": actions_log, "error": "json_invalide"}
+            return _turn_result(replies, actions_log, "json_invalide", trace_log)
 
         if not actions:
-            return {"replies": replies, "actions_log": actions_log, "error": "liste_actions_vide"}
+            return _turn_result(replies, actions_log, "liste_actions_vide", trace_log)
 
+        carried_result_in = carried_result
         previous_result: dict | None = carried_result
         carried_result = None
+        iteration_trace = {
+            "iteration": _iteration,
+            "raw_completion": content,
+            "parsed_actions": actions,
+            "carried_result_in": carried_result_in,
+        } if trace else None
         for cmd in actions:
             action = cmd.get("action")
             fn = ACTIONS.get(action)
@@ -203,11 +226,18 @@ def run_turn(
 
         last_action = actions[-1].get("action")
         if last_action == "say_user":
-            return {"replies": replies, "actions_log": actions_log, "error": None}
+            if trace:
+                iteration_trace["carried_result_out"] = None
+                trace_log.append(iteration_trace)
+            return _turn_result(replies, actions_log, None, trace_log)
 
         # Reporté à l'itération suivante (voir "Bug réel #7" plus haut) : le say_user qui clôturera
         # potentiellement le tour prochain doit encore pouvoir substituer/vérifier CE résultat-ci.
         carried_result = previous_result
+
+        if trace:
+            iteration_trace["carried_result_out"] = carried_result
+            trace_log.append(iteration_trace)
 
         # Le lot se termine par une action non-parole : le LLM a besoin du résultat pour
         # continuer à raisonner (sinon il aurait clos par un say_user) — on relance avec ce
@@ -219,4 +249,4 @@ def run_turn(
         })
 
     log.warning("Limite d'itérations (%d) atteinte sans clôture par say_user", max_iterations)
-    return {"replies": replies, "actions_log": actions_log, "error": "max_iterations_atteinte"}
+    return _turn_result(replies, actions_log, "max_iterations_atteinte", trace_log)

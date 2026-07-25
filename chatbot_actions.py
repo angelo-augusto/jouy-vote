@@ -114,7 +114,7 @@ def _pseudo_candidate_token(identity_token: str, index: int) -> str:
 def generate_pseudo_candidates(identity_token: str, n: int) -> list[dict]:
     """N premières propositions déterministes et DISTINCTES d'une séquence stable (même
     identity_token → toujours la même séquence, jamais de tirage aléatoire). Dédoublonnage simple
-    par avancement d'index en cas de collision fortuite (peu probable avec 30×8 combinaisons)."""
+    par avancement d'index en cas de collision fortuite (peu probable avec 28×9 combinaisons)."""
     candidates: list[dict] = []
     seen: set[tuple[str, str]] = set()
     index = 0
@@ -393,8 +393,9 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   un pseudo confirmé (vérifie d'abord avec get_or_assign_pseudo si tu n'es pas sûr).
 - propose_custom_pseudo(word, color, appropriate) : même mécanisme, mais pour un pseudo proposé
   par l'UTILISATEUR lui-même (pas une idée générée) — utilise cette action quand il te suggère un
-  mot et une couleur de son choix. "color" doit être une des couleurs de la palette (si
-  l'utilisateur en propose une autre, dis-lui laquelle choisir parmi les 8). "appropriate"
+  mot et une couleur de son choix. "color" doit être une des couleurs de la palette suivante :
+  __PALETTE_COULEURS__ (si l'utilisateur en propose une autre, dis-lui laquelle choisir parmi
+  cette liste). "appropriate"
   OBLIGATOIRE : ton jugement de contenu sur CE mot+couleur précis (nom réel, connotation
   politique/religieuse/sexuelle, argot, double sens — voir le socle pour le détail des critères),
   à false par défaut si le moindre doute. Si appropriate=false, available=false est renvoyé
@@ -446,6 +447,11 @@ outil que ceux listés ci-dessus : save_summary, delete_summary et toute action 
 sont PAS des outils que tu peux appeler, ils n'existent que comme boutons dans l'interface de
 l'utilisateur.
 """
+
+# Injection de la palette réelle (auto-synchronisée avec PSEUDO_COLORS, plus jamais de nombre en
+# dur du style "parmi les 8" qui devient faux dès qu'on ajoute une couleur — bug réel constaté le
+# jour même où "gris" a été ajouté, cf commentaire sur PSEUDO_COLORS).
+TOOLS_DESCRIPTION = TOOLS_DESCRIPTION.replace("__PALETTE_COULEURS__", ", ".join(PSEUDO_COLORS))
 
 # Bloc de contexte "Nouveau, sans pseudo" — adapté du laïus validé (wiki laius-onboarding,
 # 2026-07-25, "esprit du texte, pas mot pour mot"). Injecté par main.py /chat/v2 tant qu'AUCUN

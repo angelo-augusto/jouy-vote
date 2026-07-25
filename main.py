@@ -346,6 +346,9 @@ class ChatRequest(BaseModel):
     session_token: str
     message: str
     history: list[ChatMessage] = []
+    # Mode debug/traçage (demande développeur 2026-07-25, via angelobot) : réservé aux bots
+    # internes, jamais documenté côté citoyen — nécessite ADMIN_KEY, jamais activé par défaut.
+    admin_key: str | None = None
 
 
 class ChatSummarizeRequest(BaseModel):
@@ -432,7 +435,12 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
     voir init_db) — filet de sécurité contre une race entre 2 confirmations quasi simultanées du
     même pseudo, au-delà de la vérification applicative ci-dessous."""
     if get_existing_pseudo(identity_token) is not None:
-        raise ValueError("pseudo déjà attribué")
+        # Message distinct de "ce pseudo est déjà pris" plus bas (bug réel signalé 2026-07-25,
+        # via angelobot : les 2 cas très différents — "VOUS avez déjà un pseudo confirmé" vs "CE
+        # mot+couleur est pris par quelqu'un d'autre" — partageaient un texte assez proche pour
+        # faire croire à un faux positif de disponibilité alors que le vrai motif est juste
+        # l'absence de rechoix une fois confirmé, cf tâche "rechoix libre si rien publié").
+        raise ValueError("tu as déjà un pseudo confirmé, il n'est pas modifiable pour l'instant")
     word = word.strip()
     color = color.strip().lower()
     if not word:
@@ -447,7 +455,7 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
                 (debate_token, word, color),
             )
         except sqlite3.IntegrityError:
-            raise ValueError("ce pseudo est déjà pris")
+            raise ValueError("ce mot+couleur est déjà pris par quelqu'un d'autre")
     return {"word": word, "color": color}
 
 
@@ -807,7 +815,8 @@ def chat_v2(req: ChatRequest):
         "pseudo": existing_pseudo,
         "taken_pseudos": {(r["word"], r["color"]) for r in taken_rows},
     }
-    result = run_turn(system_prompt, conversation_messages, ctx)
+    trace_requested = bool(req.admin_key) and req.admin_key == ADMIN_KEY
+    result = run_turn(system_prompt, conversation_messages, ctx, trace=trace_requested)
     if result["error"] == "llm_indisponible":
         raise HTTPException(503, "Le chatbot est momentanément indisponible.")
     return result
@@ -822,7 +831,7 @@ def pseudo_confirm(req: PseudoConfirmRequest):
     try:
         return confirm_pseudo(identity_token, req.word, req.color)
     except ValueError as e:
-        status = 409 if ("déjà attribué" in str(e) or "déjà pris" in str(e)) else 400
+        status = 409 if ("déjà un pseudo confirmé" in str(e) or "déjà pris" in str(e)) else 400
         raise HTTPException(status, str(e))
 
 
