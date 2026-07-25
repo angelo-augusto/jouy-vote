@@ -51,11 +51,10 @@ PSEUDO_WORDS = [
     "Roseau", "Aurore", "Cascade", "Bourgeon", "Falaise", "Marée", "Clairière", "Genêt",
     "Corail", "Frimas", "Tilleul", "Brume", "Sittelle", "Ravin",
 ]
-PSEUDO_COLORS = [
-    "bleu", "vert", "rouge", "jaune", "violet", "orange", "indigo", "turquoise",
-    "corail", "ambre", "cuivre", "argenté", "doré", "ivoire", "olive", "ardoise",
-    "carmin", "safran", "lilas", "émeraude",
-]
+# Palette réduite à 8 couleurs simples et universelles (retour développeur 2026-07-25, via
+# angelobot) — les couleurs précédentes (argenté, carmin, ambre...) jugées trop compliquées pour
+# un public général. Table pseudos vide en prod au moment du changement, aucune migration requise.
+PSEUDO_COLORS = ["rouge", "orange", "jaune", "vert", "bleu", "violet", "blanc", "noir"]
 
 
 def derive_pseudo(debate_token: str) -> dict:
@@ -265,7 +264,11 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   propositions). N'appelle JAMAIS cette action si l'utilisateur a déjà un pseudo confirmé (vérifie
   d'abord avec get_or_assign_pseudo si tu n'es pas sûr) — un pseudo confirmé est stable, il ne se
   change pas à volonté ; si on te le redemande, rappelle simplement le pseudo déjà attribué au
-  lieu d'en reproposer de nouveaux. Aucun paramètre.
+  lieu d'en reproposer de nouveaux. IMPORTANT : les propositions sont déjà affichées SÉPARÉMENT
+  sous forme de boutons cliquables dans l'interface — n'énumère JAMAIS toi-même les candidats
+  dans ton say_user (ni en texte, ni via {{résultat}}, qui ne fonctionne de toute façon que pour
+  une valeur simple, pas une liste). Écris seulement une courte phrase d'accroche du type "Voici
+  quelques idées, clique sur celle qui te plaît". Aucun paramètre.
 
 Pour référencer dans un say_user le résultat de l'action juste avant, utilise littéralement le
 texte "{{résultat}}" à l'endroit voulu — il sera remplacé automatiquement par la valeur réelle

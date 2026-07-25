@@ -34,6 +34,10 @@ def build_system_prompt(base_prompt: str, context_block: str = "") -> str:
     return "\n\n".join(parts)
 
 
+def _strip_unresolved_placeholder(text: str) -> str:
+    return text.replace("{{résultat}}", "").replace("  ", " ").strip()
+
+
 def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     """Bug réel #1 trouvé en conditions réelles (2026-07-25, test get_or_assign_pseudo) : un
     résultat à UNE clé (vote_token, summary...) donnait un texte naturel, mais un résultat à
@@ -48,16 +52,31 @@ def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     et l'ancien code renvoyait le texte INCHANGÉ, donc "Ton pseudo est {{résultat}}" littéral
     envoyé tel quel à l'utilisateur. Fix défensif (en plus du renforcement de la consigne dans
     TOOLS_DESCRIPTION) : si le placeholder n'a rien à substituer, on le retire proprement plutôt
-    que de laisser fuiter une syntaxe technique interne vers un citoyen."""
+    que de laisser fuiter une syntaxe technique interne vers un citoyen.
+
+    Bug réel #3 trouvé en conditions réelles (2026-07-25, signalé par Angelo avec capture d'écran)
+    : propose_pseudo_candidates renvoie {"candidates": [...]} — une clé unique dont la VALEUR est
+    une LISTE de dicts, pas un scalaire. Le fix #1 ci-dessus ne filtrait que sur le nombre de clés,
+    pas sur le TYPE de chaque valeur : str() d'une liste de dicts Python produit un repr avec des
+    guillemets simples ("[{'word': 'Falaise', 'color': 'argenté'}, ...]"), affiché tel quel dans le
+    chat. Fix : ne retenir que les valeurs SCALAIRES (str/int/float/bool) pour la jointure — toute
+    valeur composite (liste/dict) est ignorée, et si aucune valeur scalaire ne reste, le
+    placeholder est retiré proprement (même filet que le bug #2) plutôt que de risquer une autre
+    forme de fuite de structure interne."""
     if "{{résultat}}" not in text:
         return text
     if not previous_result:
-        return text.replace("{{résultat}}", "").replace("  ", " ").strip()
+        return _strip_unresolved_placeholder(text)
     if "error" in previous_result:
         value = previous_result["error"]
     else:
-        values = [str(v) for k, v in previous_result.items() if k != "text"]
-        value = " ".join(values) if values else json.dumps(previous_result, ensure_ascii=False)
+        scalar_values = [
+            str(v) for k, v in previous_result.items()
+            if k != "text" and isinstance(v, (str, int, float, bool))
+        ]
+        if not scalar_values:
+            return _strip_unresolved_placeholder(text)
+        value = " ".join(scalar_values)
     return text.replace("{{résultat}}", str(value))
 
 

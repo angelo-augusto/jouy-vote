@@ -1128,6 +1128,32 @@ async def test_run_turn_strips_unresolved_placeholder_instead_of_leaking_it(mock
 
 
 @pytest.mark.anyio
+async def test_run_turn_strips_placeholder_for_list_valued_result(mocked_openrouter_structured):
+    """Régression (bug réel signalé par Angelo avec capture d'écran, 2026-07-25) :
+    propose_pseudo_candidates renvoie {"candidates": [...]} — une clé unique dont la valeur est
+    une LISTE de dicts. str() de cette liste produit un repr Python brut avec des guillemets
+    simples, affiché tel quel dans le chat ("Voici : [{'word': 'Falaise', 'color': ...}]")."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "propose_pseudo_candidates"},
+            {"action": "say_user", "text": "Voici quelques idées : {{résultat}}"},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "propose-moi un pseudo"}], {"identity_token": "tok-abc"}
+    )
+    assert result["error"] is None
+    assert "{{résultat}}" not in result["replies"][0]
+    assert "{" not in result["replies"][0]
+    assert "[" not in result["replies"][0]  # pas de fuite de la liste non plus
+
+
+@pytest.mark.anyio
 async def test_run_turn_relaunches_llm_when_batch_ends_without_say_user(mocked_openrouter_structured):
     import json
     import chatbot_executor
