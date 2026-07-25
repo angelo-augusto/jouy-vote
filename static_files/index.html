@@ -470,9 +470,20 @@ async function sendChatMessage() {
   renderChatMessages();
   input.value = '';
   try {
-    const data = await api('/chat', { session_token, message, history: historyBefore });
-    chatHistory.push({ role: 'assistant', content: data.reply });
-    renderChatMessages();
+    // POC tool-calling (mandat angelobot 2026-07-25) : /chat/v2 renvoie {replies: [...], error}
+    // au lieu d'un seul data.reply — plusieurs say_user possibles dans un même tour, et une
+    // erreur peut arriver avec un HTTP 200 (json_invalide/liste_actions_vide/max_iterations),
+    // pas seulement via une exception réseau comme avec /chat v1.
+    const data = await api('/chat/v2', { session_token, message, history: historyBefore });
+    if (data.replies && data.replies.length > 0) {
+      for (const reply of data.replies) {
+        chatHistory.push({ role: 'assistant', content: reply });
+      }
+      renderChatMessages();
+    }
+    if (data.error) {
+      showMsg('chatMsg', "L'assistant n'a pas pu répondre correctement, réessaie.", 'error');
+    }
   } catch (e) {
     showMsg('chatMsg', e.message, 'error');
   }
