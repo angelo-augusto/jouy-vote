@@ -808,9 +808,10 @@ def test_chatbot_actions_registry_excludes_commit_actions():
     import chatbot_actions
 
     assert set(chatbot_actions.ACTIONS.keys()) == {
-        "say_user", "get_vote_token", "propose_summary", "list_summaries", "get_or_assign_pseudo",
+        "say_user", "get_vote_token", "propose_summary", "list_summaries",
+        "get_or_assign_pseudo", "propose_pseudo_candidates",
     }
-    for forbidden in ("save_summary", "delete_summary", "confirm_publication"):
+    for forbidden in ("save_summary", "delete_summary", "confirm_publication", "confirm_pseudo"):
         assert forbidden not in chatbot_actions.ACTIONS
 
 
@@ -865,9 +866,38 @@ def test_get_or_assign_pseudo_action_errors_without_ctx():
     assert "error" in result
 
 
-def test_ensure_pseudo_creates_once_and_reuses(monkeypatch):
-    """1er appel : insère en DB. 2e appel (même identity_token) : relit la même ligne, ne
-    recalcule/n'insère pas une 2e fois."""
+def test_generate_pseudo_candidates_deterministic_and_distinct():
+    """Même identity_token → toujours les mêmes propositions (pas de tirage aléatoire à chaque
+    appel), et toutes distinctes entre elles au sein d'un même lot."""
+    import chatbot_actions
+
+    a = chatbot_actions.generate_pseudo_candidates("identity-x", n=3)
+    b = chatbot_actions.generate_pseudo_candidates("identity-x", n=3)
+    assert a == b
+    assert len(a) == 3
+    assert len({(c["word"], c["color"]) for c in a}) == 3
+    for c in a:
+        assert c["word"] in chatbot_actions.PSEUDO_WORDS
+        assert c["color"] in chatbot_actions.PSEUDO_COLORS
+
+
+def test_propose_pseudo_candidates_action_reads_identity_from_ctx():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_pseudo_candidates({}, {"identity_token": "identity-x"})
+    assert result["candidates"] == chatbot_actions.generate_pseudo_candidates("identity-x")
+
+
+def test_propose_pseudo_candidates_action_errors_without_identity():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_pseudo_candidates({}, {})
+    assert "error" in result
+
+
+def test_get_existing_pseudo_none_then_set_after_confirm():
+    """Aucune écriture automatique (contrairement à l'ancien ensure_pseudo) : None tant que
+    confirm_pseudo n'a pas été appelé explicitement."""
     import main as main_module
 
     identity_token = "identity-pour-pseudo-test"
@@ -875,9 +905,12 @@ def test_ensure_pseudo_creates_once_and_reuses(monkeypatch):
     with main.db() as conn:
         conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
 
-    first = main_module.ensure_pseudo(identity_token)
-    second = main_module.ensure_pseudo(identity_token)
-    assert first == second
+    assert main_module.get_existing_pseudo(identity_token) is None
+
+    candidate = main_module.generate_pseudo_candidates(identity_token)[0]
+    confirmed = main_module.confirm_pseudo(identity_token, candidate["word"], candidate["color"])
+    assert confirmed == candidate
+    assert main_module.get_existing_pseudo(identity_token) == candidate
 
     with main.db() as conn:
         rows = conn.execute("SELECT * FROM pseudos WHERE debate_token=?", (debate_token,)).fetchall()
@@ -889,29 +922,96 @@ def test_ensure_pseudo_creates_once_and_reuses(monkeypatch):
         conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
 
 
-@pytest.mark.anyio
-async def test_chat_v2_ensures_pseudo_and_reuses_across_calls(client, logged_in_user, monkeypatch):
+def test_confirm_pseudo_rejects_value_outside_candidates():
     import main as main_module
 
-    identity_token = logged_in_user["token"]
+    identity_token = "identity-pour-pseudo-test-2"
     debate_token = main_module.compute_debate_token(identity_token)
     with main.db() as conn:
         conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
 
-    captured = []
+    with pytest.raises(ValueError, match="ne fait pas partie"):
+        main_module.confirm_pseudo(identity_token, "PseudoInventé", "rose-fluo")
+
+
+def test_confirm_pseudo_rejects_second_confirmation():
+    import main as main_module
+
+    identity_token = "identity-pour-pseudo-test-3"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+
+    candidates = main_module.generate_pseudo_candidates(identity_token)
+    main_module.confirm_pseudo(identity_token, candidates[0]["word"], candidates[0]["color"])
+    with pytest.raises(ValueError, match="déjà attribué"):
+        main_module.confirm_pseudo(identity_token, candidates[1]["word"], candidates[1]["color"])
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+
+
+@pytest.mark.anyio
+async def test_pseudo_confirm_endpoint_requires_valid_session(client):
+    resp = await client.post("/pseudo/confirm", json={"session_token": "fake", "word": "Renard", "color": "bleu"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_pseudo_confirm_endpoint_rejects_invalid_candidate(client, logged_in_user):
+    resp = await client.post(
+        "/pseudo/confirm",
+        json={"session_token": logged_in_user["session_token"], "word": "Inventé", "color": "rose-fluo"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_pseudo_confirm_endpoint_succeeds_then_rejects_second_attempt(client, logged_in_user):
+    import main as main_module
+
+    identity_token = logged_in_user["token"]
+    candidates = main_module.generate_pseudo_candidates(identity_token)
+    resp1 = await client.post(
+        "/pseudo/confirm",
+        json={"session_token": logged_in_user["session_token"], "word": candidates[0]["word"], "color": candidates[0]["color"]},
+    )
+    assert resp1.status_code == 200
+    assert resp1.json() == candidates[0]
+
+    resp2 = await client.post(
+        "/pseudo/confirm",
+        json={"session_token": logged_in_user["session_token"], "word": candidates[1]["word"], "color": candidates[1]["color"]},
+    )
+    assert resp2.status_code == 409
+
+
+@pytest.mark.anyio
+async def test_chat_v2_injects_onboarding_block_until_pseudo_confirmed(client, logged_in_user, monkeypatch):
+    """Signal 'Nouveau, sans pseudo' : le bloc onboarding doit apparaître dans le system_prompt
+    tant qu'aucun pseudo n'est confirmé, et disparaître juste après confirmation — sur autant de
+    tours que nécessaire avant, pas seulement le tout premier appel."""
+    import main as main_module
+
+    captured_prompts = []
 
     def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5):
-        captured.append(ctx["pseudo"])
+        captured_prompts.append(system_prompt)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
     monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
-    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "salut"})
-    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "encore"})
 
-    assert captured[0] == captured[1]  # même pseudo aux deux appels, pas régénéré à chaque tour
-    with main.db() as conn:
-        rows = conn.execute("SELECT * FROM pseudos WHERE debate_token=?", (debate_token,)).fetchall()
-    assert len(rows) == 1
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "salut"})
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "encore avant de choisir"})
+    assert "Premier contact" in captured_prompts[0]
+    assert "Premier contact" in captured_prompts[1]  # toujours actif au 2e tour, pas juste le 1er
+
+    identity_token = logged_in_user["token"]
+    candidates = main_module.generate_pseudo_candidates(identity_token)
+    main_module.confirm_pseudo(identity_token, candidates[0]["word"], candidates[0]["color"])
+
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "salut à nouveau"})
+    assert "Premier contact" not in captured_prompts[2]
 
 
 @pytest.fixture
@@ -1004,6 +1104,27 @@ async def test_run_turn_substitutes_multi_field_result_naturally(mocked_openrout
     assert result["error"] is None
     assert result["replies"] == ["Tu es Clairière corail"]
     assert "{" not in result["replies"][0]  # jamais de JSON brut affiché à l'utilisateur
+
+
+@pytest.mark.anyio
+async def test_run_turn_strips_unresolved_placeholder_instead_of_leaking_it(mocked_openrouter_structured):
+    """Régression (bug réel trouvé en conditions réelles le 2026-07-25, tour suivant) : le LLM
+    écrit parfois {{résultat}} sans avoir appelé l'action correspondante dans le même lot (il
+    croit connaître la valeur depuis le contexte) — jamais laisser fuiter la syntaxe technique
+    littérale vers l'utilisateur, même si la cause première (consigne de prompt) doit aussi être
+    renforcée séparément."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [{"action": "say_user", "text": "Ton pseudo est {{résultat}}."}]
+    }))
+
+    result = chatbot_executor.run_turn("system", [{"role": "user", "content": "rappelle mon pseudo"}], {})
+    assert result["error"] is None
+    assert "{{résultat}}" not in result["replies"][0]
+    assert "{" not in result["replies"][0]
 
 
 @pytest.mark.anyio

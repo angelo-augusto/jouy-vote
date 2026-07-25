@@ -35,14 +35,24 @@ def build_system_prompt(base_prompt: str, context_block: str = "") -> str:
 
 
 def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
-    """Bug réel trouvé en conditions réelles (2026-07-25, test get_or_assign_pseudo) : un résultat
-    à UNE clé (vote_token, summary...) donnait un texte naturel, mais un résultat à PLUSIEURS clés
-    (pseudo: {word, color}) tombait dans le fallback JSON brut — "Ton pseudo est :
+    """Bug réel #1 trouvé en conditions réelles (2026-07-25, test get_or_assign_pseudo) : un
+    résultat à UNE clé (vote_token, summary...) donnait un texte naturel, mais un résultat à
+    PLUSIEURS clés (pseudo: {word, color}) tombait dans le fallback JSON brut — "Ton pseudo est :
     {"word": "Clairière", "color": "corail"}" affiché tel quel à un vrai utilisateur. Fix : joindre
     les valeurs par un espace plutôt que sérialiser le dict, ce qui donne "Clairière corail" (et
-    reste correct pour le cas à une seule clé, qui redonne simplement cette valeur seule)."""
-    if "{{résultat}}" not in text or not previous_result:
+    reste correct pour le cas à une seule clé, qui redonne simplement cette valeur seule).
+
+    Bug réel #2 trouvé en conditions réelles (même jour, un tour plus tard) : le LLM a écrit
+    "{{résultat}}" dans un say_user SANS appeler l'action correspondante dans le même lot (il
+    croyait connaître la valeur depuis le reste de la conversation) — previous_result était None,
+    et l'ancien code renvoyait le texte INCHANGÉ, donc "Ton pseudo est {{résultat}}" littéral
+    envoyé tel quel à l'utilisateur. Fix défensif (en plus du renforcement de la consigne dans
+    TOOLS_DESCRIPTION) : si le placeholder n'a rien à substituer, on le retire proprement plutôt
+    que de laisser fuiter une syntaxe technique interne vers un citoyen."""
+    if "{{résultat}}" not in text:
         return text
+    if not previous_result:
+        return text.replace("{{résultat}}", "").replace("  ", " ").strip()
     if "error" in previous_result:
         value = previous_result["error"]
     else:

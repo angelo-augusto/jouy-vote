@@ -16,7 +16,7 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-from chatbot_actions import compute_debate_token, compute_vote_token, derive_pseudo
+from chatbot_actions import ONBOARDING_NEW_USER_CONTEXT_BLOCK, compute_debate_token, compute_vote_token, derive_pseudo
 from chatbot_executor import build_system_prompt, run_turn
 
 mcp = FastMCP("jouyvote-chatbot-executor")
@@ -40,15 +40,20 @@ _TEST_SUMMARIES = [
 
 
 @mcp.tool()
-def run_chat_turn(user_message: str, history_json: str = "[]") -> dict:
+def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool = False) -> dict:
     """Exécute un tour complet de la boucle d'actions du chatbot jouyvote (say_user/
-    get_vote_token/propose_summary/list_summaries/get_or_assign_pseudo) avec une identité de
-    test fixe, et retourne les répliques produites + le détail de chaque action exécutée.
+    get_vote_token/propose_summary/list_summaries/propose_pseudo_candidates/
+    get_or_assign_pseudo) avec une identité de test fixe, et retourne les répliques produites +
+    le détail de chaque action exécutée.
 
     Args:
         user_message: le message envoyé par l'utilisateur de test.
         history_json: historique de conversation précédent, JSON d'une liste de
             {"role": "user"|"assistant", "content": "..."} (vide par défaut).
+        has_pseudo: False (défaut) simule un nouvel utilisateur SANS pseudo confirmé — déclenche
+            le bloc de contexte onboarding (laïus + propose_pseudo_candidates attendu). True
+            simule un utilisateur qui a déjà confirmé un pseudo (pas de bloc onboarding,
+            get_or_assign_pseudo renvoie une vraie valeur).
     """
     import json
 
@@ -57,14 +62,15 @@ def run_chat_turn(user_message: str, history_json: str = "[]") -> dict:
     except json.JSONDecodeError:
         history = []
 
-    system_prompt = build_system_prompt(BASE_PROMPT)
+    context_block = "" if has_pseudo else ONBOARDING_NEW_USER_CONTEXT_BLOCK
+    system_prompt = build_system_prompt(BASE_PROMPT, context_block=context_block)
     conversation_messages = list(history) + [{"role": "user", "content": user_message}]
     test_debate_token = compute_debate_token(_TEST_IDENTITY_TOKEN)
     ctx = {
         "identity_token": _TEST_IDENTITY_TOKEN,
         "history": conversation_messages,
         "summaries": _TEST_SUMMARIES,
-        "pseudo": derive_pseudo(test_debate_token),
+        "pseudo": derive_pseudo(test_debate_token) if has_pseudo else None,
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     result["_test_vote_token"] = compute_vote_token(_TEST_IDENTITY_TOKEN)

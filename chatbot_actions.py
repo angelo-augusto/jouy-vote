@@ -61,11 +61,39 @@ PSEUDO_COLORS = [
 def derive_pseudo(debate_token: str) -> dict:
     """Dérivation déterministe mot+couleur à partir du debate_token — même token, même pseudo,
     toujours, tant que le mécanisme n'est pas régénéré manuellement (fuite, voir wiki). N'appelle
-    jamais la DB : c'est ensure_pseudo() côté main.py qui décide de stocker le résultat."""
+    jamais la DB : c'est main.py qui décide, sur confirmation explicite de l'utilisateur, de
+    stocker le résultat (voir confirm_pseudo)."""
     digest = hashlib.sha256(debate_token.encode()).hexdigest()
     word = PSEUDO_WORDS[int(digest[:8], 16) % len(PSEUDO_WORDS)]
     color = PSEUDO_COLORS[int(digest[8:16], 16) % len(PSEUDO_COLORS)]
     return {"word": word, "color": color}
+
+
+def _pseudo_candidate_token(identity_token: str, index: int) -> str:
+    """Dérivation d'un candidat parmi plusieurs — même pepper que compute_debate_token mais un
+    'sel' différent par index, donc SANS RAPPORT avec le debate_token final qui sera stocké (ce
+    dernier reste compute_debate_token(identity_token), stable, indépendant du candidat choisi —
+    voir confirm_pseudo)."""
+    raw = f"{identity_token}:{JOUY_PSEUDO_PEPPER}:pseudo-candidate:{index}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def generate_pseudo_candidates(identity_token: str, n: int = 3) -> list[dict]:
+    """N propositions déterministes et DISTINCTES (même identity_token → toujours les mêmes N
+    propositions, y compris si redemandées plus tard dans la conversation — pas de tirage
+    aléatoire qui changerait à chaque appel). Dédoublonnage simple par avancement d'index en cas
+    de collision fortuite (peu probable avec 30×20 combinaisons, mais pas coûteux à éviter)."""
+    candidates: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    index = 0
+    while len(candidates) < n and index < n + 10:
+        pseudo = derive_pseudo(_pseudo_candidate_token(identity_token, index))
+        key = (pseudo["word"], pseudo["color"])
+        if key not in seen:
+            seen.add(key)
+            candidates.append(pseudo)
+        index += 1
+    return candidates
 
 
 def say_user(params: dict, ctx: dict) -> dict:
@@ -82,20 +110,28 @@ def get_vote_token(params: dict, ctx: dict) -> dict:
 
 
 def get_or_assign_pseudo(params: dict, ctx: dict) -> dict:
-    """Lecture pure : le pseudo (mot+couleur) est fourni via ctx["pseudo"], déjà garanti exister
-    par l'appelant (main.py appelle ensure_pseudo() — qui écrit en DB si c'est la première fois —
-    AVANT de lancer la boucle LLM). Volontairement PAS de write ici : mandat angelobot 2026-07-25
-    explicite ('lecture seule pour lui, pas de commit direct') — l'attribution elle-même est un
-    mécanisme backend de confiance, jamais une décision discrétionnaire du LLM à chaque tour.
-
-    Portée réduite de cette passe (pas encore construit) : pas de choix collaboratif du pseudo
-    avec l'utilisateur (proposer plusieurs combinaisons, laisser choisir) ni de laïus d'accueil —
-    seulement le mécanisme technique d'attribution déterministe + stockage. Le texte d'onboarding
-    complet viendra brancher ce même ctx["pseudo"] une fois rédigé et validé."""
+    """Lecture pure : le pseudo (mot+couleur) DÉJÀ CONFIRMÉ par l'utilisateur est fourni via
+    ctx["pseudo"] (None si pas encore choisi — voir propose_pseudo_candidates dans ce cas).
+    Aucun write ici, jamais : l'écriture réelle se fait UNIQUEMENT dans confirm_pseudo (main.py),
+    déclenchée par un clic utilisateur explicite sur une des propositions — même barrière que
+    save_summary. Le nom de l'action reste 'get_or_assign_pseudo' (compat historique du mandat),
+    mais son comportement réel est 'get, jamais assign' depuis le passage à l'option (c) : le
+    LLM ne peut plus déclencher d'attribution lui-même, seulement la lire une fois faite."""
     pseudo = ctx.get("pseudo")
     if not pseudo:
-        return {"error": "pseudo non disponible"}
+        return {"error": "pas encore de pseudo confirmé — utilise propose_pseudo_candidates"}
     return dict(pseudo)
+
+
+def propose_pseudo_candidates(params: dict, ctx: dict) -> dict:
+    """Lecture pure (aucun write) : génère 2-3 propositions déterministes de pseudo à partir de
+    l'identity_token. L'utilisateur choisit parmi elles via l'interface (bouton), qui appelle le
+    vrai point d'écriture confirm_pseudo (main.py) — jamais un commit direct depuis cette action,
+    même logique que propose_summary/save_summary."""
+    identity_token = ctx.get("identity_token")
+    if not identity_token:
+        return {"error": "identité manquante dans le contexte"}
+    return {"candidates": generate_pseudo_candidates(identity_token)}
 
 
 def list_summaries(params: dict, ctx: dict) -> dict:
@@ -138,6 +174,7 @@ ACTIONS = {
     "propose_summary": propose_summary,
     "list_summaries": list_summaries,
     "get_or_assign_pseudo": get_or_assign_pseudo,
+    "propose_pseudo_candidates": propose_pseudo_candidates,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -182,6 +219,12 @@ ACTIONS_JSON_SCHEMA = {
                         "required": ["action"],
                         "additionalProperties": False,
                     },
+                    {
+                        "type": "object",
+                        "properties": {"action": {"const": "propose_pseudo_candidates"}},
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    },
                 ]
             },
         }
@@ -211,14 +254,73 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   jamais par toi). Aucun paramètre.
 - list_summaries() : renvoie la liste des résumés PRIVÉS déjà sauvegardés par l'utilisateur
   (titre/date). Aucun paramètre.
-- get_or_assign_pseudo() : renvoie le pseudonyme stable de l'utilisateur (mot + couleur, ex.
-  "Renard bleu"), déjà attribué automatiquement — utilise-le pour reformuler ta réponse à la
-  1re personne du singulier envers l'utilisateur, jamais en 3e personne comme s'il parlait de
-  quelqu'un d'autre. Aucun paramètre.
+- get_or_assign_pseudo() : renvoie le pseudonyme DÉJÀ CONFIRMÉ de l'utilisateur (mot + couleur,
+  ex. "Renard bleu"), s'il en a un. Si aucun pseudo n'est encore confirmé, renvoie une erreur —
+  dans ce cas utilise plutôt propose_pseudo_candidates. Aucun paramètre.
+- propose_pseudo_candidates() : génère 2-3 propositions de pseudo (mot + couleur) parmi
+  lesquelles l'utilisateur va choisir via l'interface — TOUJOURS les mêmes propositions pour un
+  même utilisateur si tu les redemandes plus tard dans la conversation. Tu ne peux PAS choisir ni
+  confirmer à sa place : présente les propositions, laisse l'utilisateur cliquer sur celle qu'il
+  préfère (ou en redemander d'autres plus tard s'il n'aime aucune — même mécanisme, mêmes
+  propositions). N'appelle JAMAIS cette action si l'utilisateur a déjà un pseudo confirmé (vérifie
+  d'abord avec get_or_assign_pseudo si tu n'es pas sûr) — un pseudo confirmé est stable, il ne se
+  change pas à volonté ; si on te le redemande, rappelle simplement le pseudo déjà attribué au
+  lieu d'en reproposer de nouveaux. Aucun paramètre.
 
 Pour référencer dans un say_user le résultat de l'action juste avant, utilise littéralement le
 texte "{{résultat}}" à l'endroit voulu — il sera remplacé automatiquement par la valeur réelle
-avant l'envoi. N'invente jamais d'autre outil que ceux listés ci-dessus : save_summary,
-delete_summary et toute action de publication ne sont PAS des outils que tu peux appeler, ils
-n'existent que comme boutons dans l'interface de l'utilisateur.
+avant l'envoi. RÈGLE STRICTE : n'utilise "{{résultat}}" QUE si l'action correspondante figure
+BIEN dans ce même lot, juste avant ce say_user — jamais pour rappeler une information que tu
+crois déjà connaître depuis le reste de la conversation (ex: un pseudo ou un jeton mentionné plus
+tôt). Si tu veux rappeler une valeur déjà connue, appelle D'ABORD l'action correspondante
+(get_or_assign_pseudo, get_vote_token...) dans CE lot, même si tu penses déjà savoir la réponse —
+un "{{résultat}}" sans action associée dans le même lot n'est JAMAIS remplacé et s'affiche tel
+quel, en clair, à l'utilisateur : ce serait une vraie erreur visible. N'invente jamais d'autre
+outil que ceux listés ci-dessus : save_summary, delete_summary et toute action de publication ne
+sont PAS des outils que tu peux appeler, ils n'existent que comme boutons dans l'interface de
+l'utilisateur.
+"""
+
+# Bloc de contexte "Nouveau, sans pseudo" — adapté du laïus validé (wiki laius-onboarding,
+# 2026-07-25, "esprit du texte, pas mot pour mot"). Injecté par main.py /chat/v2 tant qu'AUCUN
+# pseudo n'est confirmé pour cette identité (voir get_existing_pseudo) — reste actif sur autant
+# de tours que nécessaire, pas seulement le 1er appel : pas d'education_state pour cette passe,
+# donc pas de suivi fin "quel point déjà couvert", juste ce signal binaire simple.
+ONBOARDING_NEW_USER_CONTEXT_BLOCK = """\
+CONTEXTE — Premier contact, aucun pseudo confirmé pour cette personne pour l'instant.
+
+C'est probablement la toute première conversation de cette personne sur jouyvote.fr (ou elle a
+déjà commencé mais n'a pas encore choisi son pseudo). Avant de répondre à sa question de fond,
+engage un vrai accueil, dans cet ordre, sur plusieurs échanges — jamais tout d'un bloc comme un
+cours magistral, pose des questions, laisse-la réagir :
+
+1. Pseudo. Explique qu'un pseudonyme stable (mot + couleur, ex. "Lapin jaune") va lui être
+   attribué, que c'est CE pseudo — et lui seul — qui apparaît dans les débats/opinions/témoignages
+   publiés, jamais son nom réel. Utilise l'action propose_pseudo_candidates pour lui proposer 2-3
+   combinaisons ; laisse-la choisir via l'interface (tu ne peux pas choisir à sa place). Si aucune
+   ne lui plaît, tu peux relancer propose_pseudo_candidates plus tard — les mêmes propositions
+   reviendront, ce n'est pas un problème, explique-le simplement si elle demande pourquoi.
+
+2. Anonymat et conséquences d'un dévoilement. Personne — pas même les administrateurs — n'a accès
+   à l'identité réelle derrière un pseudo dans l'usage normal ; toi-même ne connais jamais son nom,
+   seulement son jeton personnel ou son pseudo. Insiste avec sérieux (sans réciter la charte en
+   entier) : dévoiler sa propre identité en la reliant à son pseudo, ou chercher à deviner/révéler
+   celle d'un autre jovien, est un manquement GRAVE aux règles du site, pas une maladresse — la
+   confiance collective qui permet à chacun de s'exprimer librement en dépend. Tu peux orienter
+   vers la Charte de l'anonymat (https://wiki.jouyvote.fr/doku.php?id=charte-anonymat) si elle veut
+   plus de détails.
+
+3. Les 4 notions, avec des exemples concrets si possible : le VOTE (choix simple sur une question
+   posée), l'OPINION (une position, "je pense que...", qui peut évoluer), le TÉMOIGNAGE (un vécu
+   personnel rapporté factuellement, daté), l'ARGUMENTAIRE (le raisonnement à l'appui d'une opinion
+   à un instant T, qui ne change pas une fois publié).
+
+4. Rôle du chatbot comme passage obligé. Toute publication (opinion, témoignage, argumentaire)
+   passe obligatoirement par une conversation avec toi avant de devenir publique — pas de la
+   censure (tu ne juges jamais le fond), c'est le seul point de contrôle qui protège l'anonymat de
+   tous (repérer un détail qui identifierait la personne malgré elle, faire respecter le cycle
+   brouillon → proposition → validation explicite).
+
+Objectif : qu'elle reparte en ayant VRAIMENT compris ces 4 points, pas juste survolé un pavé.
+Vocabulaire : jamais le mot "token" envers l'utilisateur — dire "jeton personnel" ou "code secret".
 """

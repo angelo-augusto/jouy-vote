@@ -111,6 +111,10 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <h2>💬 Assistant</h2>
   <p class="info">Rien de cet échange n'est conservé, sauf si vous demandez explicitement de sauvegarder un résumé.</p>
   <div id="chatMessages" style="max-height:280px; overflow-y:auto; border:1px solid #eee; border-radius:4px; padding:.6em; margin-bottom:.6em; font-size:.9em;"></div>
+  <div id="pseudoProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
+    <p class="info" style="margin:0 0 .5em;">Choisissez votre pseudonyme (stable dans le temps, jamais votre nom réel) :</p>
+    <div id="pseudoCandidates"></div>
+  </div>
   <div id="chatMsg" class="msg"></div>
   <label>Votre message</label>
   <input type="text" id="chatInput" placeholder="Écrivez votre message…">
@@ -484,6 +488,42 @@ async function sendChatMessage() {
     if (data.error) {
       showMsg('chatMsg', "L'assistant n'a pas pu répondre correctement, réessaie.", 'error');
     }
+    renderPseudoCandidates(data.actions_log);
+  } catch (e) {
+    showMsg('chatMsg', e.message, 'error');
+  }
+}
+// Choix collaboratif du pseudo (mandat angelobot 2026-07-25, option c) : propose_pseudo_candidates
+// est une action LECTURE SEULE côté LLM (jamais d'écriture) — le vrai commit passe uniquement par
+// /pseudo/confirm, déclenché ici par un clic explicite, jamais automatiquement.
+function renderPseudoCandidates(actionsLog) {
+  if (!actionsLog) return;
+  const proposeAction = actionsLog.find(a => a.action === 'propose_pseudo_candidates' && a.result && a.result.candidates);
+  const box = document.getElementById('pseudoProposal');
+  const list = document.getElementById('pseudoCandidates');
+  if (!proposeAction) {
+    box.classList.add('hidden');
+    return;
+  }
+  list.innerHTML = '';
+  for (const candidate of proposeAction.result.candidates) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-primary';
+    btn.style.marginRight = '.5em';
+    btn.style.marginBottom = '.4em';
+    btn.textContent = candidate.word + ' ' + candidate.color;
+    btn.addEventListener('click', () => confirmPseudo(candidate.word, candidate.color));
+    list.appendChild(btn);
+  }
+  box.classList.remove('hidden');
+}
+async function confirmPseudo(word, color) {
+  const session_token = localStorage.getItem('session_token');
+  try {
+    await api('/pseudo/confirm', { session_token, word, color });
+    document.getElementById('pseudoProposal').classList.add('hidden');
+    chatHistory.push({ role: 'assistant', content: 'Pseudo confirmé : ' + word + ' ' + color + '.' });
+    renderChatMessages();
   } catch (e) {
     showMsg('chatMsg', e.message, 'error');
   }

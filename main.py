@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from chatbot_actions import compute_debate_token, derive_pseudo
+from chatbot_actions import ONBOARDING_NEW_USER_CONTEXT_BLOCK, compute_debate_token, generate_pseudo_candidates
 from chatbot_executor import build_system_prompt, run_turn
 
 DB_PATH = os.environ.get("DB_PATH") or os.path.join(os.path.dirname(__file__), "vote.db")
@@ -81,7 +81,11 @@ CHAT_SYSTEM_PROMPT = (
     "de sauvegarder un résumé de notre échange (fonctionnalité distincte qui existe réellement), "
     "précise toujours explicitement qu'il s'agit d'un résumé PRIVÉ, visible et supprimable "
     "uniquement par elle-même, jamais publié ni visible par personne d'autre — ne dis jamais "
-    "juste « j'ai enregistré ton message/témoignage » sans cette précision."
+    "juste « j'ai enregistré ton message/témoignage » sans cette précision. Règle non négociable "
+    "sur l'anonymat : jamais d'accès au nom réel d'un utilisateur, seulement son pseudo ou son "
+    "jeton personnel. Si la conversation porte sur l'anonymat, sur ce qui est permis/interdit, ou "
+    "si tu as besoin d'orienter vers la référence complète, cite la Charte de l'anonymat "
+    "(https://wiki.jouyvote.fr/doku.php?id=charte-anonymat) plutôt que d'improviser les règles."
 )
 
 _keepalive_conn: sqlite3.Connection | None = None
@@ -324,6 +328,12 @@ class ChatSaveSummaryRequest(BaseModel):
     summary: str
 
 
+class PseudoConfirmRequest(BaseModel):
+    session_token: str
+    word: str
+    color: str
+
+
 class ChatSummariesRequest(BaseModel):
     session_token: str
 
@@ -363,23 +373,39 @@ def compute_vote_token(token: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def ensure_pseudo(identity_token: str) -> dict:
-    """Get-or-create : renvoie le pseudo (mot+couleur) déjà attribué, ou en assigne un nouveau et
-    le stocke si c'est la 1re fois. Le seul endroit qui écrit dans la table pseudos — le LLM ne
-    fait jamais que lire ce résultat via ctx["pseudo"] (voir chatbot_actions.get_or_assign_pseudo)."""
+def get_existing_pseudo(identity_token: str) -> dict | None:
+    """Lecture pure, aucun write — None si l'utilisateur n'a pas encore confirmé de pseudo (voir
+    confirm_pseudo pour le seul point d'écriture). Remplace l'ancien ensure_pseudo() qui assignait
+    automatiquement et silencieusement : depuis le passage à l'option (c) — choix collaboratif
+    (mandat angelobot 2026-07-25) — un pseudo n'existe QUE si l'utilisateur en a explicitement
+    confirmé un parmi les propositions."""
     debate_token = compute_debate_token(identity_token)
     with db() as conn:
         row = conn.execute(
             "SELECT word, color FROM pseudos WHERE debate_token=?", (debate_token,)
         ).fetchone()
-        if row:
-            return {"word": row["word"], "color": row["color"]}
-        pseudo = derive_pseudo(debate_token)
+    return {"word": row["word"], "color": row["color"]} if row else None
+
+
+def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
+    """SEUL point d'écriture de la table pseudos, déclenché uniquement par un clic utilisateur
+    explicite sur une des propositions (endpoint /pseudo/confirm) — jamais par le LLM. Revérifie
+    que (word, color) fait bien partie des candidats ACTUELS de cette identité avant d'écrire
+    (défense contre une valeur arbitraire envoyée au endpoint), et refuse si un pseudo existe déjà
+    (pas de re-choix libre : 'stable dans le temps', régénération réservée aux modérateurs en cas
+    de fuite, voir wiki architecture-technique)."""
+    if get_existing_pseudo(identity_token) is not None:
+        raise ValueError("pseudo déjà attribué")
+    candidates = generate_pseudo_candidates(identity_token)
+    if {"word": word, "color": color} not in candidates:
+        raise ValueError("ce pseudo ne fait pas partie des propositions actuelles")
+    debate_token = compute_debate_token(identity_token)
+    with db() as conn:
         conn.execute(
             "INSERT INTO pseudos (debate_token, word, color) VALUES (?, ?, ?)",
-            (debate_token, pseudo["word"], pseudo["color"]),
+            (debate_token, word, color),
         )
-        return pseudo
+    return {"word": word, "color": color}
 
 
 def send_reset_email(to_email: str, reset_token: str) -> bool:
@@ -718,7 +744,11 @@ def chat_v2(req: ChatRequest):
     entièrement différente (liste d'actions typées + response_format json_schema strict, voir
     chatbot_executor.py/chatbot_actions.py)."""
     identity_token = _require_identity(req.session_token)
-    system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT)
+    existing_pseudo = get_existing_pseudo(identity_token)
+    # Bloc actif tant qu'aucun pseudo n'est confirmé — sur autant de tours que nécessaire (pas de
+    # education_state pour cette passe, donc pas de suivi plus fin que ce signal binaire).
+    context_block = "" if existing_pseudo else ONBOARDING_NEW_USER_CONTEXT_BLOCK
+    system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block)
     conversation_messages = [{"role": m.role, "content": m.content} for m in req.history[-20:]]
     conversation_messages.append({"role": "user", "content": req.message})
     with db() as conn:
@@ -730,12 +760,25 @@ def chat_v2(req: ChatRequest):
         "identity_token": identity_token,
         "history": conversation_messages,
         "summaries": [dict(r) for r in summary_rows],
-        "pseudo": ensure_pseudo(identity_token),
+        "pseudo": existing_pseudo,
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     if result["error"] == "llm_indisponible":
         raise HTTPException(503, "Le chatbot est momentanément indisponible.")
     return result
+
+
+@app.post("/pseudo/confirm")
+def pseudo_confirm(req: PseudoConfirmRequest):
+    """SEUL endpoint qui écrit un pseudo — jamais le LLM (voir chatbot_actions.
+    propose_pseudo_candidates/get_or_assign_pseudo, tous deux lecture seule). Appelé uniquement
+    par un clic utilisateur explicite sur une des propositions affichées."""
+    identity_token = _require_identity(req.session_token)
+    try:
+        return confirm_pseudo(identity_token, req.word, req.color)
+    except ValueError as e:
+        status = 409 if "déjà attribué" in str(e) else 400
+        raise HTTPException(status, str(e))
 
 
 @app.post("/chat/summarize")
