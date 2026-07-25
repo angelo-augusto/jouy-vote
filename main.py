@@ -429,18 +429,22 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
     (propose_pseudo_candidates) ou d'une proposition libre de l'utilisateur
     (propose_custom_pseudo) — pas de vérification "appartient à la séquence déterministe", le mot
     lui-même n'est technique-ment pas restreint : (1) couleur dans PSEUDO_COLORS, (2) pas déjà
-    pris. Refuse aussi si un pseudo existe déjà pour cette identité (stable dans le temps,
-    régénération réservée aux modérateurs en cas de fuite, voir wiki architecture-technique).
-    L'INSERT est protégé par la contrainte UNIQUE(word, color) en DB (idx_pseudos_word_color,
-    voir init_db) — filet de sécurité contre une race entre 2 confirmations quasi simultanées du
-    même pseudo, au-delà de la vérification applicative ci-dessous."""
-    if get_existing_pseudo(identity_token) is not None:
-        # Message distinct de "ce pseudo est déjà pris" plus bas (bug réel signalé 2026-07-25,
-        # via angelobot : les 2 cas très différents — "VOUS avez déjà un pseudo confirmé" vs "CE
-        # mot+couleur est pris par quelqu'un d'autre" — partageaient un texte assez proche pour
-        # faire croire à un faux positif de disponibilité alors que le vrai motif est juste
-        # l'absence de rechoix une fois confirmé, cf tâche "rechoix libre si rien publié").
-        raise ValueError("tu as déjà un pseudo confirmé, il n'est pas modifiable pour l'instant")
+    pris par quelqu'un d'autre. L'UPSERT est protégé par la contrainte UNIQUE(word, color) en DB
+    (idx_pseudos_word_color, voir init_db) — filet de sécurité contre une race entre 2
+    confirmations quasi simultanées du même pseudo, au-delà de la vérification applicative
+    ci-dessous.
+
+    Rechoix libre (2026-07-25, demande développeur via angelobot) : reconfirmer REMPLACE le
+    pseudo existant au lieu d'être bloqué — plus de vérification "un pseudo existe déjà pour
+    cette identité". TODO IMPORTANT : la condition prévue par le développeur était "rechoix libre
+    SI RIEN N'A ÉTÉ PUBLIÉ" — au moment de ce changement, aucune table opinions/témoignages/
+    argumentaires n'existe encore (seuls votes, chat_summaries, pseudos existent, et votes est
+    délibérément non-reliable au pseudo pour préserver l'anonymat, voir wiki
+    architecture-technique) donc "rien n'est publiable" est vrai pour tout le monde aujourd'hui —
+    rechoix inconditionnel décidé en connaissance de cause (confirmé par angelobot avant
+    implémentation). LE JOUR OÙ une table de publication liée au pseudo existe, ce rechoix doit
+    être regaté sur "aucune publication associée à ce debate_token", sans quoi changer de pseudo
+    après publication casserait la cohérence des publications déjà attribuées."""
     word = word.strip()
     color = color.strip().lower()
     if not word:
@@ -451,7 +455,9 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
     with db() as conn:
         try:
             conn.execute(
-                "INSERT INTO pseudos (debate_token, word, color) VALUES (?, ?, ?)",
+                "INSERT INTO pseudos (debate_token, word, color) VALUES (?, ?, ?) "
+                "ON CONFLICT(debate_token) DO UPDATE SET "
+                "word=excluded.word, color=excluded.color, assigned_at=CURRENT_TIMESTAMP",
                 (debate_token, word, color),
             )
         except sqlite3.IntegrityError:
@@ -831,7 +837,7 @@ def pseudo_confirm(req: PseudoConfirmRequest):
     try:
         return confirm_pseudo(identity_token, req.word, req.color)
     except ValueError as e:
-        status = 409 if ("déjà un pseudo confirmé" in str(e) or "déjà pris" in str(e)) else 400
+        status = 409 if "déjà pris" in str(e) else 400
         raise HTTPException(status, str(e))
 
 

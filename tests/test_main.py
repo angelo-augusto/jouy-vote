@@ -1125,7 +1125,11 @@ def test_confirm_pseudo_rejects_invalid_color():
         main_module.confirm_pseudo(identity_token, "Renard", "rose-fluo")
 
 
-def test_confirm_pseudo_rejects_second_confirmation():
+def test_confirm_pseudo_allows_free_rechoice_replacing_previous_pseudo():
+    """Rechoix libre (2026-07-25, demande développeur via angelobot) : reconfirmer un pseudo
+    REMPLACE le précédent au lieu d'être bloqué. Décision explicite : aucune table de publication
+    liée au pseudo n'existe encore (voir TODO dans confirm_pseudo), donc "rien n'est publiable"
+    est vrai pour tout le monde aujourd'hui — rechoix inconditionnel assumé, pas un oubli."""
     import main as main_module
 
     identity_token = "identity-pour-pseudo-test-3"
@@ -1134,8 +1138,13 @@ def test_confirm_pseudo_rejects_second_confirmation():
         conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
 
     main_module.confirm_pseudo(identity_token, "Renard", "bleu")
-    with pytest.raises(ValueError, match="déjà un pseudo confirmé"):
-        main_module.confirm_pseudo(identity_token, "Hibou", "vert")
+    result = main_module.confirm_pseudo(identity_token, "Hibou", "vert")
+    assert result == {"word": "Hibou", "color": "vert"}
+    assert main_module.get_existing_pseudo(identity_token) == {"word": "Hibou", "color": "vert"}
+
+    with main.db() as conn:
+        rows = conn.execute("SELECT * FROM pseudos WHERE debate_token=?", (debate_token,)).fetchall()
+        assert len(rows) == 1  # remplacement (UPDATE), pas une 2e ligne
 
     with main.db() as conn:
         conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
@@ -1163,12 +1172,12 @@ def test_confirm_pseudo_rejects_word_color_pair_already_taken_by_another_identit
         ))
 
 
-def test_confirm_pseudo_error_messages_are_unambiguous_between_cases():
-    """Régression bug réel signalé par le développeur (2026-07-25, "Chat gris" via angelobot,
-    corrigé ensuite en confusion de message) : "vous avez déjà un pseudo confirmé" et "ce mot+
-    couleur est pris par quelqu'un d'autre" sont 2 causes très différentes qui partageaient un
-    texte assez proche ("pseudo déjà attribué" / "pseudo déjà pris") pour faire croire, à tort, à
-    un faux positif de disponibilité. Les 2 messages doivent rester clairement distincts."""
+def test_confirm_pseudo_rechoice_to_pair_taken_by_another_identity_still_rejected():
+    """Le rechoix libre (voir test ci-dessus) ne contourne PAS la contrainte d'unicité entre 2
+    identités différentes — seul le blocage "j'ai déjà un pseudo, donc je ne peux plus en changer"
+    a été retiré, pas la règle "ce mot+couleur est pris par quelqu'un d'autre". Message sans
+    ambiguïté (régression bug réel "Chat gris" signalé par le développeur, 2026-07-25 via
+    angelobot, avant que la vraie cause — pas de rechoix libre à l'époque — ne soit identifiée)."""
     import main as main_module
 
     id_a, id_b = "identity-msg-clarity-a", "identity-msg-clarity-b"
@@ -1178,14 +1187,10 @@ def test_confirm_pseudo_error_messages_are_unambiguous_between_cases():
         ))
 
     main_module.confirm_pseudo(id_a, "Renard", "bleu")
+    main_module.confirm_pseudo(id_b, "Hibou", "vert")
 
-    with pytest.raises(ValueError, match="déjà un pseudo confirmé") as own_pseudo_error:
-        main_module.confirm_pseudo(id_a, "Hibou", "vert")
-
-    with pytest.raises(ValueError, match="pris par quelqu'un d'autre") as taken_by_other_error:
+    with pytest.raises(ValueError, match="pris par quelqu'un d'autre"):
         main_module.confirm_pseudo(id_b, "Renard", "bleu")
-
-    assert str(own_pseudo_error.value) != str(taken_by_other_error.value)
 
     with main.db() as conn:
         conn.execute("DELETE FROM pseudos WHERE debate_token IN (?, ?)", (
@@ -1222,7 +1227,9 @@ async def test_pseudo_confirm_endpoint_rejects_invalid_color(client, logged_in_u
 
 
 @pytest.mark.anyio
-async def test_pseudo_confirm_endpoint_succeeds_then_rejects_second_attempt(client, logged_in_user):
+async def test_pseudo_confirm_endpoint_succeeds_then_allows_free_rechoice(client, logged_in_user):
+    """Rechoix libre (2026-07-25) : une 2e confirmation REMPLACE la précédente, ne renvoie plus
+    409 — voir main.confirm_pseudo pour le TODO sur le futur garde-fou "rien publié"."""
     resp1 = await client.post(
         "/pseudo/confirm",
         json={"session_token": logged_in_user["session_token"], "word": "Renard", "color": "bleu"},
@@ -1234,7 +1241,8 @@ async def test_pseudo_confirm_endpoint_succeeds_then_rejects_second_attempt(clie
         "/pseudo/confirm",
         json={"session_token": logged_in_user["session_token"], "word": "Hibou", "color": "vert"},
     )
-    assert resp2.status_code == 409
+    assert resp2.status_code == 200
+    assert resp2.json() == {"word": "Hibou", "color": "vert"}
 
 
 @pytest.mark.anyio
