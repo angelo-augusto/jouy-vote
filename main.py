@@ -19,7 +19,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from chatbot_actions import ONBOARDING_NEW_USER_CONTEXT_BLOCK, PSEUDO_COLORS, compute_debate_token
+from chatbot_actions import (
+    ONBOARDING_NEW_USER_CONTEXT_BLOCK, PSEUDO_COLORS, _agree_pseudo_display, compute_debate_token,
+)
 from chatbot_executor import build_system_prompt, run_turn
 
 DB_PATH = os.environ.get("DB_PATH") or os.path.join(os.path.dirname(__file__), "vote.db")
@@ -786,6 +788,46 @@ def send_admin_message(recipient_identity_token: str, body: str) -> dict:
     return {"message_id": message_id, "recipient_debate_token": recipient_debate_token, "body": body}
 
 
+def get_public_forum_snapshot() -> list[dict]:
+    """Forum, phase 2 (2026-07-25) : lecture PUBLIQUE pour les actions LLM list_threads/get_thread
+    (chatbot_actions.py reste sans accès DB — voir ctx["threads"], même pattern que
+    ctx["summaries"]/ctx["taken_pseudos"]). Uniquement les fils et opinions au statut 'published' —
+    jamais un brouillon (le sien ou celui d'un autre), cohérent avec la règle "jamais de
+    corrélation privé↔privé" déjà tranchée sur le wiki : on ne compare/expose ici que du contenu
+    déjà public, déjà consenti à être vu."""
+    with db() as conn:
+        threads = conn.execute(
+            "SELECT thread_id, title, summary FROM threads WHERE status='published' ORDER BY thread_id"
+        ).fetchall()
+        snapshot = []
+        for t in threads:
+            opinion_rows = conn.execute(
+                """SELECT o.opinion_id, o.body, o.argumentaire, o.superseded_by_opinion_id,
+                          p.word, p.color
+                   FROM opinions o
+                   LEFT JOIN pseudos p ON p.debate_token = o.author_debate_token
+                   WHERE o.thread_id=? AND o.status='published'
+                   ORDER BY o.opinion_id""",
+                (t["thread_id"],),
+            ).fetchall()
+            snapshot.append({
+                "thread_id": t["thread_id"],
+                "title": t["title"],
+                "summary": t["summary"],
+                "opinions": [
+                    {
+                        "opinion_id": o["opinion_id"],
+                        "auteur": _agree_pseudo_display(o["word"], o["color"]) if o["word"] else "auteur inconnu",
+                        "body": o["body"],
+                        "argumentaire": o["argumentaire"],
+                        "superseded_by_opinion_id": o["superseded_by_opinion_id"],
+                    }
+                    for o in opinion_rows
+                ],
+            })
+    return snapshot
+
+
 def send_reset_email(to_email: str, reset_token: str) -> bool:
     """Envoie le lien de réinitialisation par email via l'API Brevo.
 
@@ -1141,6 +1183,10 @@ def chat_v2(req: ChatRequest):
         "summaries": [dict(r) for r in summary_rows],
         "pseudo": existing_pseudo,
         "taken_pseudos": {(r["word"], r["color"]) for r in taken_rows},
+        # Forum phase 2 (2026-07-25) : snapshot des fils/opinions PUBLIÉS pour list_threads/
+        # get_thread — voir get_public_forum_snapshot pour la justification anonymat (jamais un
+        # brouillon, jamais de corrélation privé↔privé).
+        "threads": get_public_forum_snapshot(),
     }
     trace_requested = bool(req.admin_key) and req.admin_key == ADMIN_KEY
     result = run_turn(system_prompt, conversation_messages, ctx, trace=trace_requested)

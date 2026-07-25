@@ -153,6 +153,14 @@ def run_turn(
     # say_user "troué" du 2e appel n'avait plus aucune trace du résultat à substituer. Fix :
     # transporter le résultat en attente ("carried_result") d'une itération à l'autre.
     carried_result: dict | None = None
+    # Bug réel #11 (2026-07-25, trouvé via le mode debug/traçage, dans la FOULÉE du bug #10) :
+    # une fois qu'un pseudo a été cité dans UN say_user (n'importe quelle itération), un say_user
+    # de SUIVI plus tard dans le même tour ("si ça te plaît, clique sur le bouton...") se faisait
+    # remplacer à tort par le seul nom du pseudo — le check bug #6 ("display absent du texte")
+    # s'appliquait à CHAQUE say_user tant que carried_result restait un résultat pseudo, sans
+    # savoir qu'il avait déjà été cité une fois. Fix : mémoriser les display déjà cités ce tour, ne
+    # plus forcer une re-citation dessus.
+    cited_displays: set[str] = set()
 
     for _iteration in range(max_iterations):
         content, _usage = call_openrouter(messages, response_format=RESPONSE_FORMAT, max_tokens=4096, model=model)
@@ -191,16 +199,19 @@ def run_turn(
                 continue
             if action == "say_user":
                 effective_result = previous_result
-                if not effective_result:
+                if not _render_result_value(effective_result):
                     # Bug réel #10 (2026-07-25, trouvé via le mode debug/traçage tout juste
                     # déployé) : le modèle a parfois mis say_user AVANT propose_pseudo_candidates/
                     # propose_custom_pseudo dans le MÊME lot (au lieu d'après) — previous_result
-                    # encore vide à ce stade, donc "{{résultat}}" ne pouvait rien substituer
-                    # ("Que penses-tu de ?"). Ces 2 actions sont lecture pure/déterministes (même
-                    # identity_token+index → même résultat, jamais d'effet de bord) : les exécuter
-                    # ici EN AVANCE pour résoudre ce texte est sans risque — la ré-exécution
-                    # normale à sa place dans la boucle, un peu plus bas, produira le même résultat
-                    # et ira dans actions_log comme d'habitude.
+                    # encore vide (ou, cas plus subtil trouvé ensuite : non-vide mais SANS AUCUNE
+                    # valeur exploitable, ex. le résultat d'un list_threads précédent dans le même
+                    # tour — {"threads": [...]} ne rend rien via _render_result_value) à ce stade,
+                    # donc "{{résultat}}" ne pouvait rien substituer ("Que penses-tu de ?"). Ces 2
+                    # actions sont lecture pure/déterministes (même identity_token+index → même
+                    # résultat, jamais d'effet de bord) : les exécuter ici EN AVANCE pour résoudre
+                    # ce texte est sans risque — la ré-exécution normale à sa place dans la boucle,
+                    # un peu plus bas, produira le même résultat et ira dans actions_log comme
+                    # d'habitude.
                     for next_cmd in actions[cmd_index + 1:]:
                         if next_cmd.get("action") in ("propose_pseudo_candidates", "propose_custom_pseudo"):
                             peek_fn = ACTIONS.get(next_cmd.get("action"))
@@ -224,7 +235,7 @@ def run_turn(
                     # proposé dans l'historique renvoyé au modèle au tour suivant. Sans mémoire de
                     # ce qu'il vient d'offrir, le modèle repart d'index=0 → répétition.
                     text = fallback
-                elif is_pseudo_result and display_value not in text:
+                elif is_pseudo_result and display_value not in text and display_value not in cited_displays:
                     # Bug réel #6 (même jour, mesuré à ~2 tentatives sur 5 malgré une clarification
                     # de prompt) : le LLM ne laisse pas toujours le say_user TOTALEMENT vide — il
                     # écrit parfois du texte autour d'un "trou" ("Que penses-tu de **** ?"), sans
@@ -232,7 +243,15 @@ def run_turn(
                     # Un simple test "texte vide ?" ne détecte pas ce cas. Restreint aux actions
                     # pseudo (display présent) : c'est la seule famille où citer le résultat est
                     # une exigence explicite du prompt, pas une généralisation à toute action.
+                    #
+                    # "and display_value not in cited_displays" (bug réel #11, trouvé juste après
+                    # le #10) : ce check ne doit forcer une citation que la 1re fois — un say_user
+                    # de SUIVI plus tard dans le même tour ("clique sur le bouton si ça te plaît")
+                    # n'a pas besoin de répéter le nom déjà cité une fois, sans quoi son texte
+                    # légitime se fait écraser par le simple nom du pseudo en boucle.
                     text = fallback
+                if is_pseudo_result and display_value in text:
+                    cited_displays.add(display_value)
                 replies.append(text)
                 actions_log.append({"action": action, "text": text})
                 previous_result = None

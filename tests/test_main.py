@@ -810,8 +810,16 @@ def test_chatbot_actions_registry_excludes_commit_actions():
     assert set(chatbot_actions.ACTIONS.keys()) == {
         "say_user", "get_vote_token", "propose_summary", "list_summaries",
         "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
+        "list_threads", "get_thread",
     }
-    for forbidden in ("save_summary", "delete_summary", "confirm_publication", "confirm_pseudo"):
+    for forbidden in (
+        "save_summary", "delete_summary", "confirm_publication", "confirm_pseudo",
+        # Forum (2026-07-25, phase 2 — lecture seule) : aucune action de publication n'existe
+        # encore pour le LLM, voir main.py pour les fonctions d'écriture correspondantes.
+        "create_thread", "publish_thread", "create_opinion", "update_opinion_draft",
+        "publish_opinion", "disavow_opinion", "supersede_opinion", "add_reaction",
+        "publish_reaction", "create_remarque", "publish_remarque", "send_admin_message",
+    ):
         assert forbidden not in chatbot_actions.ACTIONS
 
 
@@ -1515,6 +1523,58 @@ async def test_chat_v2_passes_taken_pseudos_in_ctx(client, logged_in_user, monke
         conn.execute("DELETE FROM pseudos WHERE debate_token=?", (other_debate_token,))
 
 
+def test_get_public_forum_snapshot_excludes_drafts_and_shows_author_pseudo():
+    """Forum phase 2 (2026-07-25) : le snapshot public ne contient QUE des fils/opinions
+    'published' — jamais un brouillon (le sien ou celui d'un autre), cohérent avec la règle
+    'jamais de corrélation privé↔privé' déjà tranchée sur le wiki. L'auteur d'une opinion est
+    affiché sous son pseudo accordé grammaticalement, jamais son identité réelle."""
+    import main as main_module
+
+    author_identity = "identity-forum-snapshot-author"
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(author_identity),))
+    main_module.confirm_pseudo(author_identity, "Clairière", "vert")
+
+    published_thread = main_module.create_thread("Fil publié pour snapshot")
+    main_module.publish_thread(published_thread["thread_id"])
+    draft_thread = main_module.create_thread("Fil resté en brouillon")
+
+    published_opinion = main_module.create_opinion(published_thread["thread_id"], author_identity, "Opinion publiée")
+    main_module.publish_opinion(published_opinion["opinion_id"])
+    draft_opinion = main_module.create_opinion(published_thread["thread_id"], author_identity, "Opinion restée brouillon")
+
+    snapshot = main_module.get_public_forum_snapshot()
+    thread_ids = {t["thread_id"] for t in snapshot}
+    assert published_thread["thread_id"] in thread_ids
+    assert draft_thread["thread_id"] not in thread_ids  # brouillon jamais exposé
+
+    found = next(t for t in snapshot if t["thread_id"] == published_thread["thread_id"])
+    opinion_ids = {o["opinion_id"] for o in found["opinions"]}
+    assert published_opinion["opinion_id"] in opinion_ids
+    assert draft_opinion["opinion_id"] not in opinion_ids  # brouillon jamais exposé
+
+    published_row = next(o for o in found["opinions"] if o["opinion_id"] == published_opinion["opinion_id"])
+    assert published_row["auteur"] == "Clairière verte"  # pseudo accordé, jamais l'identité réelle
+
+
+@pytest.mark.anyio
+async def test_chat_v2_passes_public_threads_snapshot_in_ctx(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    thread = main_module.create_thread("Fil visible depuis chat/v2")
+    main_module.publish_thread(thread["thread_id"])
+
+    captured_ctx = {}
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+        captured_ctx.update(ctx)
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "salut"})
+    assert any(t["thread_id"] == thread["thread_id"] for t in captured_ctx["threads"])
+
+
 @pytest.fixture
 def mocked_openrouter_structured(monkeypatch):
     """Intercepte chatbot_llm.call_openrouter tel qu'importé dans chatbot_executor — capture les
@@ -1591,6 +1651,45 @@ def test_list_summaries_action_defaults_to_empty_list():
     import chatbot_actions
 
     assert chatbot_actions.list_summaries({}, {}) == {"summaries": []}
+
+
+def test_list_threads_action_strips_opinions_from_ctx():
+    """Forum phase 2 (2026-07-25) : list_threads ne renvoie que titre/résumé, jamais les opinions
+    à l'intérieur — évite de charger tout le contenu du forum juste pour une vue d'ensemble."""
+    import chatbot_actions
+
+    fake_threads = [
+        {"thread_id": 1, "title": "Sujet A", "summary": "résumé A", "opinions": [{"opinion_id": 1, "body": "..."}]},
+        {"thread_id": 2, "title": "Sujet B", "summary": None, "opinions": []},
+    ]
+    result = chatbot_actions.list_threads({}, {"threads": fake_threads})
+    assert result["threads"] == [
+        {"thread_id": 1, "title": "Sujet A", "summary": "résumé A"},
+        {"thread_id": 2, "title": "Sujet B", "summary": None},
+    ]
+
+
+def test_list_threads_action_defaults_to_empty_list():
+    import chatbot_actions
+
+    assert chatbot_actions.list_threads({}, {}) == {"threads": []}
+
+
+def test_get_thread_action_returns_full_detail_including_opinions():
+    import chatbot_actions
+
+    fake_threads = [
+        {"thread_id": 1, "title": "Sujet A", "summary": "résumé A", "opinions": [{"opinion_id": 1, "body": "Une opinion"}]},
+    ]
+    result = chatbot_actions.get_thread({"thread_id": 1}, {"threads": fake_threads})
+    assert result == fake_threads[0]
+
+
+def test_get_thread_action_errors_on_unknown_thread_id():
+    import chatbot_actions
+
+    result = chatbot_actions.get_thread({"thread_id": 999}, {"threads": []})
+    assert "error" in result
 
 
 @pytest.mark.anyio
@@ -1877,6 +1976,74 @@ async def test_run_turn_resolves_say_user_placed_before_propose_in_same_batch(mo
     # Le mot+couleur réellement proposé (déterministe pour cette identité) doit apparaître.
     propose_result = [a for a in result["actions_log"] if a["action"] == "propose_pseudo_candidates"][0]["result"]
     assert propose_result["display"] in first_reply
+
+
+@pytest.mark.anyio
+async def test_run_turn_resolves_say_user_when_previous_result_has_no_usable_value(mocked_openrouter_structured):
+    """Régression bug réel #10 (variante trouvée en réel sur jouyvote.fr juste après le 1er fix,
+    2026-07-25) : previous_result n'est pas TOUJOURS vide/None quand le say_user précède le
+    propose_* dans le même lot — il peut être un résultat NON-VIDE mais SANS AUCUNE valeur
+    exploitable (ex. {"threads": [...]} d'un list_threads dans l'itération précédente). La
+    condition initiale du fix bug #10 ("if not previous_result") ne détectait pas ce cas — corrigé
+    en vérifiant que previous_result rend une valeur utilisable (_render_result_value), pas
+    seulement sa vérité booléenne."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    # 1er appel : une action sans rapport (list_threads) qui ne se termine pas par say_user.
+    responses.append(json.dumps({"actions": [{"action": "list_threads"}]}))
+    # 2e appel : previous_result = résultat de list_threads (non-None, mais sans valeur utilisable)
+    # — say_user AVANT propose_pseudo_candidates dans le même lot, comme le bug #10 original.
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "say_user", "text": "Que penses-tu de {{résultat}} ?"},
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+        ]
+    }))
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "Dis-moi ce que tu en penses !"}]}))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "propose"}],
+        {"identity_token": "tok-previous-result-inutilisable", "taken_pseudos": set()},
+    )
+    assert result["error"] is None
+    # list_threads (iteration 0) ne produit pas de say_user — le 1er reply vient de l'itération 1.
+    first_reply = result["replies"][0]
+    assert "{{résultat}}" not in first_reply
+    propose_result = [a for a in result["actions_log"] if a["action"] == "propose_pseudo_candidates"][0]["result"]
+    assert propose_result["display"] in first_reply
+
+
+@pytest.mark.anyio
+async def test_run_turn_does_not_force_repeat_citation_of_already_mentioned_pseudo(mocked_openrouter_structured):
+    """Régression bug réel #11 (2026-07-25, trouvé EN RÉEL sur jouyvote.fr juste après le fix du
+    bug #10, dans le même échange) : une fois qu'un pseudo a été cité dans un say_user, un
+    say_user de SUIVI plus tard dans le même tour ("si ça te plaît, clique sur le bouton...") se
+    faisait remplacer À TORT par le simple nom du pseudo — le check bug #6 ("display absent du
+    texte") se redéclenchait pour CHAQUE say_user suivant tant que carried_result restait un
+    résultat pseudo, sans mémoire qu'il avait déjà été cité une fois."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({"actions": [{"action": "list_threads"}]}))
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "say_user", "text": "Que penses-tu de {{résultat}} ?"},
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+        ]
+    }))
+    follow_up_text = "Si ça te plaît, tu peux cliquer sur le bouton de confirmation qui apparaît à côté."
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": follow_up_text}]}))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "propose"}],
+        {"identity_token": "tok-pas-de-repetition", "taken_pseudos": set()},
+    )
+    assert result["error"] is None
+    # list_threads (iteration 0) ne produit pas de say_user — le suivi est le 2e reply (index 1).
+    assert result["replies"][1] == follow_up_text
 
 
 @pytest.mark.anyio

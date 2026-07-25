@@ -257,6 +257,29 @@ def list_summaries(params: dict, ctx: dict) -> dict:
     return {"summaries": ctx.get("summaries", [])}
 
 
+def list_threads(params: dict, ctx: dict) -> dict:
+    """Forum, phase 2 (2026-07-25) : lecture pure — les fils PUBLIÉS sont fournis via
+    ctx["threads"] (chargés en amont par main.py, même pattern que ctx["summaries"]/
+    ctx["taken_pseudos"]) — ce module reste sans accès DB direct. Ne renvoie que titre/résumé,
+    pas les opinions (voir get_thread pour le détail d'un fil précis) — évite de charger tout le
+    contenu du forum dans chaque réponse alors que le modèle veut juste une vue d'ensemble."""
+    threads = ctx.get("threads", [])
+    return {"threads": [{"thread_id": t["thread_id"], "title": t["title"], "summary": t.get("summary")} for t in threads]}
+
+
+def get_thread(params: dict, ctx: dict) -> dict:
+    """Forum, phase 2 : lecture pure — détail d'un fil précis (opinions PUBLIÉES incluses, avec
+    l'auteur affiché sous son pseudo accordé). Utile pour repérer une opinion déjà proche de celle
+    que l'utilisateur s'apprête à formuler AVANT de la publier (la vraie déduplication automatique
+    par RAG est une phase ultérieure, voir wiki — ceci n'est qu'une lecture manuelle en attendant).
+    "thread_id" obligatoire."""
+    thread_id = params.get("thread_id")
+    thread = next((t for t in ctx.get("threads", []) if t["thread_id"] == thread_id), None)
+    if thread is None:
+        return {"error": "fil introuvable (ou pas encore publié)"}
+    return thread
+
+
 def propose_summary(params: dict, ctx: dict) -> dict:
     """Génère un résumé PRIVÉ proposé (brouillon, jamais sauvegardé ici — save_summary reste un
     endpoint backend/UI séparé, déclenché uniquement par un clic utilisateur explicite)."""
@@ -284,6 +307,10 @@ def propose_summary(params: dict, ctx: dict) -> dict:
 # angelobot) — lecture pure, aucun risque nouveau, referme le seul gap connu du POC initial.
 # get_or_assign_pseudo ajouté ensuite (brique technique pseudo, séquencement pseudo-avant-débats
 # tranché par le développeur) — lecture pure également, même barrière que save_summary/etc.
+# list_threads/get_thread ajoutés en phase 2 du forum (2026-07-25) — lecture pure également,
+# AUCUNE action de publication (create_thread/create_opinion/publish_*/add_reaction/etc., voir
+# main.py) n'est exposée ici : le point de vigilance signalé par la revue Opus reste respecté par
+# construction, ces actions n'existent que côté Python, jamais LLM-callable.
 ACTIONS = {
     "say_user": say_user,
     "get_vote_token": get_vote_token,
@@ -292,6 +319,8 @@ ACTIONS = {
     "get_or_assign_pseudo": get_or_assign_pseudo,
     "propose_pseudo_candidates": propose_pseudo_candidates,
     "propose_custom_pseudo": propose_custom_pseudo,
+    "list_threads": list_threads,
+    "get_thread": get_thread,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -358,6 +387,21 @@ ACTIONS_JSON_SCHEMA = {
                         "required": ["action", "word", "color", "appropriate"],
                         "additionalProperties": False,
                     },
+                    {
+                        "type": "object",
+                        "properties": {"action": {"const": "list_threads"}},
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "get_thread"},
+                            "thread_id": {"type": "integer"},
+                        },
+                        "required": ["action", "thread_id"],
+                        "additionalProperties": False,
+                    },
                 ]
             },
         }
@@ -420,6 +464,15 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   STRUCTURELLEMENT (avant même de vérifier la disponibilité technique) — aucun bouton de
   confirmation ne peut apparaître pour ce pseudo, quel que soit le texte que tu écris à côté :
   ton jugement doit être dans ce paramètre, jamais seulement dans la prose.
+- list_threads() : renvoie la liste des fils de discussion du Forum déjà PUBLIÉS (titre + résumé
+  seulement, pas les opinions à l'intérieur — utilise get_thread pour le détail). Aucun paramètre.
+- get_thread(thread_id) : renvoie le détail complet d'un fil (titre, résumé, et la liste de ses
+  opinions PUBLIÉES avec leur auteur — sous forme de pseudo, jamais d'identité réelle — et leur
+  argumentaire). Utile pour repérer si une opinion très proche de celle que quelqu'un s'apprête à
+  formuler existe déjà, AVANT de la publier — dans ce cas, propose-lui plutôt d'adhérer à
+  l'opinion existante (voir plus bas les réactions) que d'en créer une en double. Ces 2 actions
+  sont des LECTURES SEULES : aucune action de publication (créer un fil, une opinion, réagir...)
+  n'existe encore pour toi à ce stade — n'invente jamais qu'une telle action serait disponible.
 
 IMPORTANT sur ces 2 actions pseudo : même quand "available: true", cela signifie SEULEMENT que la
 proposition est libre et jugée appropriée, PAS qu'elle est attribuée. Rien n'est écrit tant que
