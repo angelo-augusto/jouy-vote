@@ -42,13 +42,16 @@ def compute_debate_token(identity_token: str) -> str:
 
 
 # Mot (objet/être) + couleur — convention du wiki (themes:pseudonyme, architecture-technique).
-# Liste volontairement modeste pour cette passe technique (pas de choix collaboratif avec
-# l'utilisateur pour l'instant, voir docstring de get_or_assign_pseudo) : suffisant à l'échelle
-# de Jouy, affinable plus tard sans changer le mécanisme de dérivation lui-même.
+# Revu le 2026-07-25 (retour développeur, via angelobot) contre les connotations non voulues
+# (politique/religieuse/sexuelle) une fois combinés à n'importe laquelle des 8 couleurs :
+# "Étoile" retiré ("étoile jaune" = symbole historique antisémite) ; "Marée" retiré aussi ("marée
+# noire" = catastrophe pétrolière, ironique vu l'origine écologique de jouyvote — hors des 3
+# catégories citées mais coût nul à éviter). Reste de la liste passé en revue sans autre cas
+# trouvé (pas de "croix"/"croissant" etc.).
 PSEUDO_WORDS = [
-    "Renard", "Hibou", "Chêne", "Lanterne", "Étoile", "Rivière", "Nuage", "Phare",
+    "Renard", "Hibou", "Chêne", "Lanterne", "Rivière", "Nuage", "Phare",
     "Comète", "Sentier", "Écureuil", "Orage", "Prairie", "Faucon", "Ruche", "Glacier",
-    "Roseau", "Aurore", "Cascade", "Bourgeon", "Falaise", "Marée", "Clairière", "Genêt",
+    "Roseau", "Aurore", "Cascade", "Bourgeon", "Falaise", "Clairière", "Genêt",
     "Corail", "Frimas", "Tilleul", "Brume", "Sittelle", "Ravin",
 ]
 # Palette réduite à 8 couleurs simples et universelles (retour développeur 2026-07-25, via
@@ -77,11 +80,10 @@ def _pseudo_candidate_token(identity_token: str, index: int) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def generate_pseudo_candidates(identity_token: str, n: int = 3) -> list[dict]:
-    """N propositions déterministes et DISTINCTES (même identity_token → toujours les mêmes N
-    propositions, y compris si redemandées plus tard dans la conversation — pas de tirage
-    aléatoire qui changerait à chaque appel). Dédoublonnage simple par avancement d'index en cas
-    de collision fortuite (peu probable avec 30×20 combinaisons, mais pas coûteux à éviter)."""
+def generate_pseudo_candidates(identity_token: str, n: int) -> list[dict]:
+    """N premières propositions déterministes et DISTINCTES d'une séquence stable (même
+    identity_token → toujours la même séquence, jamais de tirage aléatoire). Dédoublonnage simple
+    par avancement d'index en cas de collision fortuite (peu probable avec 30×8 combinaisons)."""
     candidates: list[dict] = []
     seen: set[tuple[str, str]] = set()
     index = 0
@@ -93,6 +95,23 @@ def generate_pseudo_candidates(identity_token: str, n: int = 3) -> list[dict]:
             candidates.append(pseudo)
         index += 1
     return candidates
+
+
+def _check_pseudo_availability(word: str, color: str, ctx: dict) -> dict:
+    """Les 2 SEULES règles techniques dures (demande explicite du développeur, 2026-07-25) :
+    couleur dans la palette fixe, et pas déjà pris par quelqu'un d'autre — rien sur le contenu du
+    mot lui-même (bon sens du LLM via le socle, pas une règle technique à construire ici).
+    ctx["taken_pseudos"] : ensemble de (word, color) déjà confirmés, injecté par main.py (requête
+    DB faite en amont, comme ctx["summaries"]) — ce module reste sans accès DB direct."""
+    word = word.strip()
+    color = color.strip().lower()
+    if not word:
+        return {"available": False, "error": "mot manquant"}
+    if color not in PSEUDO_COLORS:
+        return {"available": False, "error": f"couleur non valide, choisis parmi : {', '.join(PSEUDO_COLORS)}"}
+    if (word, color) in ctx.get("taken_pseudos", set()):
+        return {"word": word, "color": color, "available": False, "error": "déjà pris par quelqu'un d'autre"}
+    return {"word": word, "color": color, "available": True}
 
 
 def say_user(params: dict, ctx: dict) -> dict:
@@ -123,14 +142,35 @@ def get_or_assign_pseudo(params: dict, ctx: dict) -> dict:
 
 
 def propose_pseudo_candidates(params: dict, ctx: dict) -> dict:
-    """Lecture pure (aucun write) : génère 2-3 propositions déterministes de pseudo à partir de
-    l'identity_token. L'utilisateur choisit parmi elles via l'interface (bouton), qui appelle le
-    vrai point d'écriture confirm_pseudo (main.py) — jamais un commit direct depuis cette action,
-    même logique que propose_summary/save_summary."""
+    """Lecture pure (aucun write) : renvoie UNE SEULE proposition déterministe à la position
+    "index" (0, 1, 2...) de la séquence propre à cette identité — pas une liste figée. Pour
+    négocier tour après tour ("celle-ci ne te plaît pas ? en voici une autre"), rappelle cette
+    action avec index+1 : la conversation tâtonne naturellement, l'interface affiche un bouton de
+    confirmation pour LA proposition la plus récente, jamais une liste posée d'un coup. Vérifie
+    aussi la disponibilité (voir _check_pseudo_availability) — le vrai commit reste dans
+    confirm_pseudo (main.py), jamais un write direct depuis cette action."""
     identity_token = ctx.get("identity_token")
     if not identity_token:
         return {"error": "identité manquante dans le contexte"}
-    return {"candidates": generate_pseudo_candidates(identity_token)}
+    index = params.get("index", 0)
+    if not isinstance(index, int) or index < 0:
+        index = 0
+    candidates = generate_pseudo_candidates(identity_token, n=index + 1)
+    if index >= len(candidates):
+        return {"error": "plus de nouvelles idées déterministes — propose un pseudo personnalisé avec propose_custom_pseudo"}
+    candidate = candidates[index]
+    return _check_pseudo_availability(candidate["word"], candidate["color"], ctx)
+
+
+def propose_custom_pseudo(params: dict, ctx: dict) -> dict:
+    """Lecture pure (aucun write) : vérifie la disponibilité d'un pseudo proposé par
+    l'UTILISATEUR lui-même (mot + couleur de son choix, pas une idée générée). Mêmes 2 règles
+    dures que propose_pseudo_candidates (couleur valide, pas déjà pris) — le contenu du mot n'est
+    pas techniquement restreint, à ton jugement (nom réel, contenu inapproprié...). Le vrai commit
+    reste dans confirm_pseudo (main.py), jamais un write direct depuis cette action."""
+    word = params.get("word", "")
+    color = params.get("color", "")
+    return _check_pseudo_availability(word, color, ctx)
 
 
 def list_summaries(params: dict, ctx: dict) -> dict:
@@ -174,6 +214,7 @@ ACTIONS = {
     "list_summaries": list_summaries,
     "get_or_assign_pseudo": get_or_assign_pseudo,
     "propose_pseudo_candidates": propose_pseudo_candidates,
+    "propose_custom_pseudo": propose_custom_pseudo,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -220,8 +261,21 @@ ACTIONS_JSON_SCHEMA = {
                     },
                     {
                         "type": "object",
-                        "properties": {"action": {"const": "propose_pseudo_candidates"}},
-                        "required": ["action"],
+                        "properties": {
+                            "action": {"const": "propose_pseudo_candidates"},
+                            "index": {"type": "integer"},
+                        },
+                        "required": ["action", "index"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "propose_custom_pseudo"},
+                            "word": {"type": "string"},
+                            "color": {"type": "string"},
+                        },
+                        "required": ["action", "word", "color"],
                         "additionalProperties": False,
                     },
                 ]
@@ -253,22 +307,41 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   jamais par toi). Aucun paramètre.
 - list_summaries() : renvoie la liste des résumés PRIVÉS déjà sauvegardés par l'utilisateur
   (titre/date). Aucun paramètre.
-- get_or_assign_pseudo() : renvoie le pseudonyme DÉJÀ CONFIRMÉ de l'utilisateur (mot + couleur,
-  ex. "Renard bleu"), s'il en a un. Si aucun pseudo n'est encore confirmé, renvoie une erreur —
-  dans ce cas utilise plutôt propose_pseudo_candidates. Aucun paramètre.
-- propose_pseudo_candidates() : génère 2-3 propositions de pseudo (mot + couleur) parmi
-  lesquelles l'utilisateur va choisir via l'interface — TOUJOURS les mêmes propositions pour un
-  même utilisateur si tu les redemandes plus tard dans la conversation. Tu ne peux PAS choisir ni
-  confirmer à sa place : présente les propositions, laisse l'utilisateur cliquer sur celle qu'il
-  préfère (ou en redemander d'autres plus tard s'il n'aime aucune — même mécanisme, mêmes
-  propositions). N'appelle JAMAIS cette action si l'utilisateur a déjà un pseudo confirmé (vérifie
-  d'abord avec get_or_assign_pseudo si tu n'es pas sûr) — un pseudo confirmé est stable, il ne se
-  change pas à volonté ; si on te le redemande, rappelle simplement le pseudo déjà attribué au
-  lieu d'en reproposer de nouveaux. IMPORTANT : les propositions sont déjà affichées SÉPARÉMENT
-  sous forme de boutons cliquables dans l'interface — n'énumère JAMAIS toi-même les candidats
-  dans ton say_user (ni en texte, ni via {{résultat}}, qui ne fonctionne de toute façon que pour
-  une valeur simple, pas une liste). Écris seulement une courte phrase d'accroche du type "Voici
-  quelques idées, clique sur celle qui te plaît". Aucun paramètre.
+- get_or_assign_pseudo() : renvoie le pseudonyme DÉJÀ CONFIRMÉ de l'utilisateur (mot + couleur),
+  s'il en a un. Si aucun pseudo n'est encore confirmé, renvoie une erreur — dans ce cas utilise
+  plutôt propose_pseudo_candidates. Aucun paramètre.
+- propose_pseudo_candidates(index) : renvoie UNE SEULE proposition déterministe de pseudo (mot +
+  couleur) à la position "index" (commence à 0). PAS une liste figée : tâtonne avec
+  l'utilisateur, une idée à la fois. IMPORTANT : n'énonce JAMAIS un mot+couleur précis dans ton
+  say_user avant d'avoir réellement appelé cette action dans le MÊME lot et lu son résultat — ne
+  te sers d'aucun exemple de cette documentation comme s'il s'agissait d'une vraie proposition, ce
+  ne sont que des illustrations du ton à employer, pas des candidats réels (aucun bouton n'existe
+  pour eux). Si ça ne lui plaît pas ou que le pseudo est déjà pris, rappelle cette action avec
+  index+1 pour une AUTRE idée. TOUJOURS la même séquence pour un même utilisateur (déterministe),
+  donc index=0 redonnera toujours la même 1re idée. Tu ne peux PAS choisir ni confirmer à sa
+  place : présente UNE proposition (issue du résultat réel de l'action), laisse l'utilisateur
+  cliquer sur le bouton qui apparaît pour CETTE proposition précise. N'appelle JAMAIS cette action
+  si l'utilisateur a déjà un pseudo confirmé (vérifie d'abord avec get_or_assign_pseudo si tu
+  n'es pas sûr) — un pseudo confirmé est stable, il ne se change pas à volonté ; si on te le
+  redemande, rappelle simplement le pseudo déjà attribué. Le résultat contient "available"
+  (true/false) — si false, explique pourquoi (déjà pris) et propose l'index suivant, ne l'affiche
+  jamais comme un choix valide.
+- propose_custom_pseudo(word, color) : même vérification de disponibilité, mais pour un pseudo
+  proposé par l'UTILISATEUR lui-même (pas une idée générée) — utilise cette action quand il te
+  suggère un mot et une couleur de son choix. "color" doit être une des 8 couleurs de la palette
+  (si l'utilisateur en propose une autre, dis-lui laquelle choisir parmi les 8). Le mot lui-même
+  n'est pas restreint techniquement — à ton jugement habituel (jamais un nom réel, jamais un
+  contenu inapproprié, et refuse aussi toute connotation politique/religieuse/sexuelle même si la
+  couleur est libre et le mot inoffensif isolément). Même résultat "available" que ci-dessus.
+
+IMPORTANT sur ces 2 actions pseudo : "available: true" signifie SEULEMENT que la proposition est
+LIBRE, PAS qu'elle est attribuée. Rien n'est écrit tant que l'utilisateur n'a pas cliqué sur le
+bouton de confirmation qui apparaît dans l'interface. Ne dis JAMAIS "c'est fait"/"bienvenue,
+Untel Untel !"/"ton pseudo est confirmé" à ce stade — dis simplement que la proposition est
+disponible et invite à cliquer sur le bouton pour valider. N'appelle PAS get_or_assign_pseudo
+juste après avoir proposé un candidat dans le même tour en supposant que ça a marché : tant que
+l'utilisateur n'a pas cliqué, get_or_assign_pseudo renverra logiquement une erreur ("pas encore de
+pseudo confirmé"), et l'utiliser prématurément mènera à une phrase confuse.
 
 Pour référencer dans un say_user le résultat de l'action juste avant, utilise littéralement le
 texte "{{résultat}}" à l'endroit voulu — il sera remplacé automatiquement par la valeur réelle
@@ -297,12 +370,16 @@ déjà commencé mais n'a pas encore choisi son pseudo). Avant de répondre à s
 engage un vrai accueil, dans cet ordre, sur plusieurs échanges — jamais tout d'un bloc comme un
 cours magistral, pose des questions, laisse-la réagir :
 
-1. Pseudo. Explique qu'un pseudonyme stable (mot + couleur, ex. "Lapin jaune") va lui être
-   attribué, que c'est CE pseudo — et lui seul — qui apparaît dans les débats/opinions/témoignages
-   publiés, jamais son nom réel. Utilise l'action propose_pseudo_candidates pour lui proposer 2-3
-   combinaisons ; laisse-la choisir via l'interface (tu ne peux pas choisir à sa place). Si aucune
-   ne lui plaît, tu peux relancer propose_pseudo_candidates plus tard — les mêmes propositions
-   reviendront, ce n'est pas un problème, explique-le simplement si elle demande pourquoi.
+1. Pseudo. Explique qu'un pseudonyme stable (un mot + une couleur) va lui être attribué, que
+   c'est CE pseudo — et lui seul — qui apparaît dans les débats/opinions/témoignages publiés,
+   jamais son nom réel. N'énonce pas d'exemple de mot+couleur précis toi-même à ce stade — la
+   vraie 1re proposition viendra de l'action ci-dessous, pas d'un exemple inventé. Tâtonnez
+   ensemble : propose UNE idée à la fois avec
+   propose_pseudo_candidates(index=0), laisse-la réagir via le bouton qui apparaît pour cette
+   proposition précise. Si elle ne l'aime pas, rappelle avec index+1 pour une autre idée — ou si
+   elle préfère proposer elle-même un mot et une couleur, utilise propose_custom_pseudo à la
+   place. Continuez ainsi sur autant de tours que nécessaire jusqu'à ce qu'une proposition lui
+   plaise.
 
 2. Anonymat et conséquences d'un dévoilement. Personne — pas même les administrateurs — n'a accès
    à l'identité réelle derrière un pseudo dans l'usage normal ; toi-même ne connais jamais son nom,

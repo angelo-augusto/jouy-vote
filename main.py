@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from chatbot_actions import ONBOARDING_NEW_USER_CONTEXT_BLOCK, compute_debate_token, generate_pseudo_candidates
+from chatbot_actions import ONBOARDING_NEW_USER_CONTEXT_BLOCK, PSEUDO_COLORS, compute_debate_token
 from chatbot_executor import build_system_prompt, run_turn
 
 DB_PATH = os.environ.get("DB_PATH") or os.path.join(os.path.dirname(__file__), "vote.db")
@@ -85,7 +85,11 @@ CHAT_SYSTEM_PROMPT = (
     "sur l'anonymat : jamais d'accès au nom réel d'un utilisateur, seulement son pseudo ou son "
     "jeton personnel. Si la conversation porte sur l'anonymat, sur ce qui est permis/interdit, ou "
     "si tu as besoin d'orienter vers la référence complète, cite la Charte de l'anonymat "
-    "(https://wiki.jouyvote.fr/doku.php?id=charte-anonymat) plutôt que d'improviser les règles."
+    "(https://wiki.jouyvote.fr/doku.php?id=charte-anonymat) plutôt que d'improviser les règles. "
+    "Quand une personne propose elle-même un pseudonyme (mot + couleur), refuse poliment toute "
+    "combinaison à connotation politique, religieuse ou sexuelle (au-delà de la seule règle "
+    "technique de disponibilité), et explique pourquoi avant de suggérer une alternative — c'est "
+    "un jugement de ta part, pas une liste de mots interdits à appliquer mécaniquement."
 )
 
 _keepalive_conn: sqlite3.Connection | None = None
@@ -198,6 +202,13 @@ def init_db():
                 color TEXT NOT NULL,
                 assigned_at TEXT DEFAULT CURRENT_TIMESTAMP
             )"""
+        )
+        # Chaque pseudo (mot+couleur) unique tous utilisateurs confondus — ferme un trou latent
+        # qui existait déjà pour les candidats déterministes (rien n'empêchait en théorie 2
+        # personnes différentes de confirmer par coïncidence le même pseudo), et sert de filet de
+        # sécurité contre une race entre 2 confirmations quasi simultanées (voir confirm_pseudo).
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pseudos_word_color ON pseudos(word, color)"
         )
     with db() as conn:
         # Type explicite par colonne (pas juste TEXT pour tout) : ADD COLUMN ne s'applique que
@@ -389,22 +400,35 @@ def get_existing_pseudo(identity_token: str) -> dict | None:
 
 def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
     """SEUL point d'écriture de la table pseudos, déclenché uniquement par un clic utilisateur
-    explicite sur une des propositions (endpoint /pseudo/confirm) — jamais par le LLM. Revérifie
-    que (word, color) fait bien partie des candidats ACTUELS de cette identité avant d'écrire
-    (défense contre une valeur arbitraire envoyée au endpoint), et refuse si un pseudo existe déjà
-    (pas de re-choix libre : 'stable dans le temps', régénération réservée aux modérateurs en cas
-    de fuite, voir wiki architecture-technique)."""
+    explicite (endpoint /pseudo/confirm) — jamais par le LLM.
+
+    Simplifié (2026-07-25, tâtonnement conversationnel plutôt qu'une liste figée de candidats) :
+    2 SEULES règles dures, identiques que le pseudo vienne d'une suggestion générée
+    (propose_pseudo_candidates) ou d'une proposition libre de l'utilisateur
+    (propose_custom_pseudo) — pas de vérification "appartient à la séquence déterministe", le mot
+    lui-même n'est technique-ment pas restreint : (1) couleur dans PSEUDO_COLORS, (2) pas déjà
+    pris. Refuse aussi si un pseudo existe déjà pour cette identité (stable dans le temps,
+    régénération réservée aux modérateurs en cas de fuite, voir wiki architecture-technique).
+    L'INSERT est protégé par la contrainte UNIQUE(word, color) en DB (idx_pseudos_word_color,
+    voir init_db) — filet de sécurité contre une race entre 2 confirmations quasi simultanées du
+    même pseudo, au-delà de la vérification applicative ci-dessous."""
     if get_existing_pseudo(identity_token) is not None:
         raise ValueError("pseudo déjà attribué")
-    candidates = generate_pseudo_candidates(identity_token)
-    if {"word": word, "color": color} not in candidates:
-        raise ValueError("ce pseudo ne fait pas partie des propositions actuelles")
+    word = word.strip()
+    color = color.strip().lower()
+    if not word:
+        raise ValueError("mot manquant")
+    if color not in PSEUDO_COLORS:
+        raise ValueError("couleur non valide")
     debate_token = compute_debate_token(identity_token)
     with db() as conn:
-        conn.execute(
-            "INSERT INTO pseudos (debate_token, word, color) VALUES (?, ?, ?)",
-            (debate_token, word, color),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO pseudos (debate_token, word, color) VALUES (?, ?, ?)",
+                (debate_token, word, color),
+            )
+        except sqlite3.IntegrityError:
+            raise ValueError("ce pseudo est déjà pris")
     return {"word": word, "color": color}
 
 
@@ -756,11 +780,13 @@ def chat_v2(req: ChatRequest):
             "SELECT id, summary, created_at FROM chat_summaries WHERE owner_token=? ORDER BY created_at DESC",
             (identity_token,),
         ).fetchall()
+        taken_rows = conn.execute("SELECT word, color FROM pseudos").fetchall()
     ctx = {
         "identity_token": identity_token,
         "history": conversation_messages,
         "summaries": [dict(r) for r in summary_rows],
         "pseudo": existing_pseudo,
+        "taken_pseudos": {(r["word"], r["color"]) for r in taken_rows},
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     if result["error"] == "llm_indisponible":
@@ -777,7 +803,7 @@ def pseudo_confirm(req: PseudoConfirmRequest):
     try:
         return confirm_pseudo(identity_token, req.word, req.color)
     except ValueError as e:
-        status = 409 if "déjà attribué" in str(e) else 400
+        status = 409 if ("déjà attribué" in str(e) or "déjà pris" in str(e)) else 400
         raise HTTPException(status, str(e))
 
 

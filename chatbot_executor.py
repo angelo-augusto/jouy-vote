@@ -62,7 +62,15 @@ def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     chat. Fix : ne retenir que les valeurs SCALAIRES (str/int/float/bool) pour la jointure — toute
     valeur composite (liste/dict) est ignorée, et si aucune valeur scalaire ne reste, le
     placeholder est retiré proprement (même filet que le bug #2) plutôt que de risquer une autre
-    forme de fuite de structure interne."""
+    forme de fuite de structure interne.
+
+    Bug réel #4 trouvé en conditions réelles (2026-07-25, un tour plus tard encore) :
+    propose_pseudo_candidates renvoie désormais {"word":.., "color":.., "available": True} — le
+    fix #3 incluait les booléens dans la jointure ("bool" faisait partie des types scalaires
+    acceptés), donc "available" s'est retrouvé littéralement collé au texte : "Roseau orange
+    True". Fix : exclure explicitement les booléens ET la clé "available" (champ de statut interne,
+    jamais un mot à afficher) — ne garder que des valeurs de CONTENU réel (mot, couleur, jeton,
+    résumé...)."""
     if "{{résultat}}" not in text:
         return text
     if not previous_result:
@@ -72,7 +80,7 @@ def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     else:
         scalar_values = [
             str(v) for k, v in previous_result.items()
-            if k != "text" and isinstance(v, (str, int, float, bool))
+            if k not in ("text", "available") and isinstance(v, (str, int, float)) and not isinstance(v, bool)
         ]
         if not scalar_values:
             return _strip_unresolved_placeholder(text)

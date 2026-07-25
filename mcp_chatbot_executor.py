@@ -40,11 +40,11 @@ _TEST_SUMMARIES = [
 
 
 @mcp.tool()
-def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool = False) -> dict:
+def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool = False, taken_pseudos_json: str = "[]") -> dict:
     """Exécute un tour complet de la boucle d'actions du chatbot jouyvote (say_user/
     get_vote_token/propose_summary/list_summaries/propose_pseudo_candidates/
-    get_or_assign_pseudo) avec une identité de test fixe, et retourne les répliques produites +
-    le détail de chaque action exécutée.
+    propose_custom_pseudo/get_or_assign_pseudo) avec une identité de test fixe, et retourne les
+    répliques produites + le détail de chaque action exécutée.
 
     Args:
         user_message: le message envoyé par l'utilisateur de test.
@@ -54,6 +54,9 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
             le bloc de contexte onboarding (laïus + propose_pseudo_candidates attendu). True
             simule un utilisateur qui a déjà confirmé un pseudo (pas de bloc onboarding,
             get_or_assign_pseudo renvoie une vraie valeur).
+        taken_pseudos_json: JSON d'une liste de [word, color] déjà "pris" par d'autres identités
+            de test, pour observer le cas "déjà pris" via propose_pseudo_candidates/
+            propose_custom_pseudo (vide par défaut).
     """
     import json
 
@@ -61,6 +64,10 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
         history = json.loads(history_json)
     except json.JSONDecodeError:
         history = []
+    try:
+        taken_pseudos = {tuple(pair) for pair in json.loads(taken_pseudos_json)}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        taken_pseudos = set()
 
     context_block = "" if has_pseudo else ONBOARDING_NEW_USER_CONTEXT_BLOCK
     system_prompt = build_system_prompt(BASE_PROMPT, context_block=context_block)
@@ -71,6 +78,7 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
         "history": conversation_messages,
         "summaries": _TEST_SUMMARIES,
         "pseudo": derive_pseudo(test_debate_token) if has_pseudo else None,
+        "taken_pseudos": taken_pseudos,
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     result["_test_vote_token"] = compute_vote_token(_TEST_IDENTITY_TOKEN)

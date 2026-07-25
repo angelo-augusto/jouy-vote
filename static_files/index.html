@@ -480,8 +480,12 @@ async function sendChatMessage() {
     // pas seulement via une exception réseau comme avec /chat v1.
     const data = await api('/chat/v2', { session_token, message, history: historyBefore });
     if (data.replies && data.replies.length > 0) {
+      // Filtre défensif : un say_user réduit à une chaîne vide (ex: placeholder {{résultat}}
+      // non résolu puis retiré côté serveur) ne doit jamais créer une bulle de chat vide.
       for (const reply of data.replies) {
-        chatHistory.push({ role: 'assistant', content: reply });
+        if (reply && reply.trim() !== '') {
+          chatHistory.push({ role: 'assistant', content: reply });
+        }
       }
       renderChatMessages();
     }
@@ -493,28 +497,32 @@ async function sendChatMessage() {
     showMsg('chatMsg', e.message, 'error');
   }
 }
-// Choix collaboratif du pseudo (mandat angelobot 2026-07-25, option c) : propose_pseudo_candidates
-// est une action LECTURE SEULE côté LLM (jamais d'écriture) — le vrai commit passe uniquement par
-// /pseudo/confirm, déclenché ici par un clic explicite, jamais automatiquement.
+// Choix collaboratif du pseudo (mandat angelobot 2026-07-25, tâtonnement tour après tour) :
+// propose_pseudo_candidates/propose_custom_pseudo sont des actions LECTURE SEULE côté LLM (jamais
+// d'écriture) — le vrai commit passe uniquement par /pseudo/confirm, déclenché ici par un clic
+// explicite. Pas de liste figée : un seul bouton pour LA proposition la plus récente de ce tour.
 function renderPseudoCandidates(actionsLog) {
-  if (!actionsLog) return;
-  const proposeAction = actionsLog.find(a => a.action === 'propose_pseudo_candidates' && a.result && a.result.candidates);
   const box = document.getElementById('pseudoProposal');
   const list = document.getElementById('pseudoCandidates');
+  if (!actionsLog) {
+    box.classList.add('hidden');
+    return;
+  }
+  const proposeAction = [...actionsLog].reverse().find(a =>
+    (a.action === 'propose_pseudo_candidates' || a.action === 'propose_custom_pseudo') &&
+    a.result && a.result.available === true
+  );
   if (!proposeAction) {
     box.classList.add('hidden');
     return;
   }
+  const { word, color } = proposeAction.result;
   list.innerHTML = '';
-  for (const candidate of proposeAction.result.candidates) {
-    const btn = document.createElement('button');
-    btn.className = 'btn-primary';
-    btn.style.marginRight = '.5em';
-    btn.style.marginBottom = '.4em';
-    btn.textContent = candidate.word + ' ' + candidate.color;
-    btn.addEventListener('click', () => confirmPseudo(candidate.word, candidate.color));
-    list.appendChild(btn);
-  }
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.textContent = word + ' ' + color;
+  btn.addEventListener('click', () => confirmPseudo(word, color));
+  list.appendChild(btn);
   box.classList.remove('hidden');
 }
 async function confirmPseudo(word, color) {
