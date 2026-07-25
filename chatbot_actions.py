@@ -49,11 +49,20 @@ def compute_debate_token(identity_token: str) -> str:
 # noire" = catastrophe pétrolière, ironique vu l'origine écologique de jouyvote — hors des 3
 # catégories citées mais coût nul à éviter). Reste de la liste passé en revue sans autre cas
 # trouvé (pas de "croix"/"croissant" etc.).
+#
+# 2e passe le même jour (critère "iconifiable", demande Angelo via angelobot) : "Aurore",
+# "Clairière", "Frimas", "Brume" retirés — trop abstraits/atmosphériques pour un logo simple,
+# par contraste avec de bons exemples comme Renard/Hibou/Chêne/Faucon/Comète/Phare/Écureuil/
+# Corail. Ce critère sert à CURER cette liste (le générateur ne doit pas suggérer lui-même ce qui
+# serait jugé limite si un utilisateur le proposait), PAS une nouvelle règle de rejet dans le
+# jugement "appropriate" — une proposition LIBRE trop abstraite reste acceptée (décision
+# angelobot : pas le même niveau de gravité que politique/religieux/sexuel, disproportionné de
+# bloquer pour ça).
 PSEUDO_WORDS = [
     "Renard", "Hibou", "Chêne", "Lanterne", "Rivière", "Nuage", "Phare",
     "Comète", "Sentier", "Écureuil", "Orage", "Prairie", "Faucon", "Ruche", "Glacier",
-    "Roseau", "Aurore", "Cascade", "Bourgeon", "Falaise", "Clairière", "Genêt",
-    "Corail", "Frimas", "Tilleul", "Brume", "Sittelle", "Ravin",
+    "Roseau", "Cascade", "Bourgeon", "Falaise", "Genêt",
+    "Corail", "Tilleul", "Sittelle", "Ravin",
 ]
 # Palette de couleurs simples et universelles (retour développeur 2026-07-25, via angelobot) —
 # les couleurs précédentes (argenté, carmin, ambre...) jugées trop compliquées pour un public
@@ -114,7 +123,7 @@ def _pseudo_candidate_token(identity_token: str, index: int) -> str:
 def generate_pseudo_candidates(identity_token: str, n: int) -> list[dict]:
     """N premières propositions déterministes et DISTINCTES d'une séquence stable (même
     identity_token → toujours la même séquence, jamais de tirage aléatoire). Dédoublonnage simple
-    par avancement d'index en cas de collision fortuite (peu probable avec 28×9 combinaisons)."""
+    par avancement d'index en cas de collision fortuite (peu probable avec 24×9 combinaisons)."""
     candidates: list[dict] = []
     seen: set[tuple[str, str]] = set()
     index = 0
@@ -191,9 +200,14 @@ def _availability_with_content_gate(word: str, color: str, appropriate: bool, ct
     modèle vient de juger inapproprié, quel que soit le texte qu'il écrit ensuite."""
     if not appropriate:
         w, c = word.strip(), color.strip().lower()
+        # Message générique (2026-07-25) : ne présuppose plus "connotation" comme SEULE raison
+        # possible — depuis l'ajout du critère iconifiable (même mécanique de refus), un
+        # appropriate=false peut aussi venir de là. La vraie raison précise reste dans le texte
+        # libre du modèle (voir socle CHAT_SYSTEM_PROMPT), ce champ n'est qu'un filet de repli si
+        # le say_user est resté vide.
         return {
             "word": w, "color": c, "display": _agree_pseudo_display(w, c),
-            "available": False, "error": "jugé inapproprié (connotation)",
+            "available": False, "error": "jugé inapproprié",
         }
     return _check_pseudo_availability(word, color, ctx)
 

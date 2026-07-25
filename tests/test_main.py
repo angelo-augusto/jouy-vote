@@ -1211,6 +1211,35 @@ def test_tools_description_lists_actual_palette_no_stale_count():
     assert "parmi les 8" not in chatbot_actions.TOOLS_DESCRIPTION
 
 
+def test_pseudo_words_excludes_non_iconifiable_words():
+    """Régression (2026-07-25, critère 'iconifiable' demandé par Angelo via angelobot) : Aurore,
+    Clairière, Frimas, Brume jugés trop abstraits/atmosphériques pour un logo simple — retirés du
+    générateur déterministe (PSEUDO_WORDS) pour cohérence avec le nouveau critère de rejet
+    (voir CHAT_SYSTEM_PROMPT). Restent dans PSEUDO_WORD_GENDER : ce dict sert aussi à accorder
+    correctement un mot LIBREMENT proposé par un utilisateur (propose_custom_pseudo), pas
+    seulement les mots que le système génère lui-même."""
+    import chatbot_actions
+
+    for word in ("Aurore", "Clairière", "Frimas", "Brume"):
+        assert word not in chatbot_actions.PSEUDO_WORDS
+        assert word in chatbot_actions.PSEUDO_WORD_GENDER
+
+
+def test_chat_system_prompt_includes_iconifiable_rejection_criterion():
+    """Régression (2026-07-25) : le critère iconifiable doit être un motif de refus DUR (même
+    mécanique que appropriate=false pour la connotation), pas une simple nuance de ton — avec les
+    exemples de contraste exacts donnés par le développeur."""
+    import main as main_module
+
+    prompt = main_module.CHAT_SYSTEM_PROMPT
+    assert "ICONIFIABLE" in prompt
+    for good_example in ("Renard", "Hibou", "Chêne", "Faucon", "Comète", "Phare", "Écureuil", "Corail"):
+        assert good_example in prompt
+    for bad_example in ("Aurore", "Clairière", "Frimas", "Brume"):
+        assert bad_example in prompt
+    assert "appropriate=false" in prompt
+
+
 @pytest.mark.anyio
 async def test_pseudo_confirm_endpoint_requires_valid_session(client):
     resp = await client.post("/pseudo/confirm", json={"session_token": "fake", "word": "Renard", "color": "bleu"})

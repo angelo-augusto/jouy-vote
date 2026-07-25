@@ -108,7 +108,18 @@ CHAT_SYSTEM_PROMPT = (
     "concret n'est PAS un motif de refus valable, et sur-refuse des pseudos parfaitement anodins. "
     "Si aucune association concrète ne te vient à l'esprit, accepte plutôt que de refuser par "
     "précaution générique non fondée. C'est un jugement de ta part à chaque fois, pas une liste "
-    "de mots interdits à appliquer mécaniquement."
+    "de mots interdits à appliquer mécaniquement. "
+    "Second critère de refus, INDÉPENDANT du premier mais au même niveau d'exigence (2026-07-25, "
+    "demande explicite du développeur) : le mot doit être ICONIFIABLE — représentable par un logo "
+    "simple et concret, pas une notion trop abstraite ou atmosphérique. Bons exemples "
+    "(iconifiables, à ne PAS refuser sur ce critère) : Renard, Hibou, Chêne, Faucon, Comète, "
+    "Phare, Écureuil, Corail — des objets ou êtres qu'on peut dessiner simplement et "
+    "reconnaître d'un coup d'œil. Mauvais exemples (trop abstraits, à refuser) : Aurore, "
+    "Clairière, Frimas, Brume — des notions atmosphériques ou paysagères qu'un logo simple rend "
+    "mal ou de façon trop floue. Applique ce test par contraste à toute proposition LIBRE d'un "
+    "utilisateur (propose_custom_pseudo) — si le mot proposé est plus proche des mauvais exemples "
+    "que des bons, refuse-le (appropriate=false), exactement la même mécanique que pour la "
+    "connotation, pas juste un commentaire dans ta réponse."
 )
 
 _keepalive_conn: sqlite3.Connection | None = None
