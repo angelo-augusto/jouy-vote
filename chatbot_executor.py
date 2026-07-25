@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from chatbot_actions import ACTIONS, RESPONSE_FORMAT, TOOLS_DESCRIPTION
 from chatbot_llm import call_openrouter
@@ -34,8 +35,20 @@ def build_system_prompt(base_prompt: str, context_block: str = "") -> str:
     return "\n\n".join(parts)
 
 
+# Bug réel #8 (2026-07-25, capture développeur : "Que dirais-tu de **** ?" recurrence après le
+# fix #7) : la consigne TOOLS_DESCRIPTION interdit d'entourer "{{résultat}}" de "**"/guillemets,
+# mais un LLM ne respecte pas toujours une consigne — le modèle a quand même écrit
+# "**{{résultat}}**". Avant ce fix, un simple .replace("{{résultat}}", "") laissait les 2 paires de
+# "**" adjacentes, qui se collent visuellement en "****" une fois le mot retiré entre elles. Fix :
+# retirer le wrapping markdown/guillemets EN MÊME TEMPS que le token, pas seulement le token seul.
+_WRAPPED_UNRESOLVED_PLACEHOLDER = re.compile(
+    r'\*\*\{\{résultat\}\}\*\*|«\{\{résultat\}\}»|"\{\{résultat\}\}"|\{\{résultat\}\}'
+)
+
+
 def _strip_unresolved_placeholder(text: str) -> str:
-    return text.replace("{{résultat}}", "").replace("  ", " ").strip()
+    text = _WRAPPED_UNRESOLVED_PLACEHOLDER.sub("", text)
+    return text.replace("  ", " ").strip()
 
 
 def _render_result_value(previous_result: dict | None) -> str:

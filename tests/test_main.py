@@ -863,6 +863,7 @@ def test_agree_pseudo_display_feminine_word_agrees_variable_colors():
     assert chatbot_actions._agree_pseudo_display("Clairière", "violet") == "Clairière violette"
     assert chatbot_actions._agree_pseudo_display("Clairière", "blanc") == "Clairière blanche"
     assert chatbot_actions._agree_pseudo_display("Clairière", "noir") == "Clairière noire"
+    assert chatbot_actions._agree_pseudo_display("Clairière", "gris") == "Clairière grise"
     # Couleurs invariables en genre : inchangées même pour un mot féminin.
     assert chatbot_actions._agree_pseudo_display("Clairière", "rouge") == "Clairière rouge"
     assert chatbot_actions._agree_pseudo_display("Clairière", "orange") == "Clairière orange"
@@ -931,6 +932,11 @@ def test_check_pseudo_availability_valid_and_free():
     assert result["word"] == "Renard"
     assert result["color"] == "bleu"
     assert result["available"] is True
+
+    # "gris" ajouté à la palette le 2026-07-25 (demande développeur, via angelobot).
+    result_gris = chatbot_actions._check_pseudo_availability("Renard", "gris", {"taken_pseudos": set()})
+    assert result_gris["available"] is True
+    assert result_gris["display"] == "Renard gris"
     assert result["display"] == "Renard bleu"
 
 
@@ -986,9 +992,9 @@ def test_propose_custom_pseudo_action_checks_availability():
     import chatbot_actions
 
     result = chatbot_actions.propose_custom_pseudo(
-        {"word": "Loup", "color": "gris", "appropriate": True}, {"taken_pseudos": set()}
+        {"word": "Loup", "color": "rose", "appropriate": True}, {"taken_pseudos": set()}
     )
-    assert result["available"] is False  # "gris" hors palette des 8 couleurs
+    assert result["available"] is False  # "rose" hors palette
     result_ok = chatbot_actions.propose_custom_pseudo(
         {"word": "Loup", "color": "bleu", "appropriate": True}, {"taken_pseudos": set()}
     )
@@ -1023,6 +1029,44 @@ def test_propose_pseudo_candidates_content_gate_blocks_button():
     result = chatbot_actions.propose_pseudo_candidates({"index": 0, "appropriate": False}, ctx)
     assert result["available"] is False
     assert "error" in result
+
+
+@pytest.mark.anyio
+async def test_run_turn_mentioning_past_candidate_without_recall_produces_no_button_action(
+    mocked_openrouter_structured,
+):
+    """Régression bug réel #9 (2026-07-25, capture développeur) : pour 'Fourmi rouge' proposé lors
+    d'un TOUR PRÉCÉDENT (visible dans l'historique de conversation), le say_user du tour suivant a
+    affirmé "tu devrais voir apparaître un bouton" alors qu'aucun bouton n'existait réellement.
+    Le frontend (renderPseudoCandidates) ne cherche un bouton que dans actions_log DE CE TOUR — une
+    simple mention textuelle d'un candidat passé ne peut structurellement pas en faire réapparaître
+    un. Ce test verrouille cette garantie : si le LLM ne rappelle pas propose_pseudo_candidates/
+    propose_custom_pseudo DANS ce tour, actions_log ne contient aucune action avec
+    result["available"] is True, quel que soit le texte du say_user."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "say_user", "text": "Tu devrais voir apparaître un bouton pour Fourmi rouge !"},
+        ]
+    }))
+
+    conversation_messages = [
+        {"role": "user", "content": "Je veux un pseudo animal."},
+        {"role": "assistant", "content": "Que penses-tu de Fourmi rouge ?"},
+        {"role": "user", "content": "Et pour Fourmi rouge, finalement ?"},
+    ]
+    result = chatbot_executor.run_turn("system", conversation_messages, {"identity_token": "tok-fourmi"})
+
+    assert result["error"] is None
+    button_eligible_actions = [
+        a for a in result["actions_log"]
+        if a.get("action") in ("propose_pseudo_candidates", "propose_custom_pseudo")
+        and a.get("result", {}).get("available") is True
+    ]
+    assert button_eligible_actions == []
 
 
 def test_get_existing_pseudo_none_then_set_after_confirm():
@@ -1288,6 +1332,22 @@ def test_substitute_placeholder_prefers_display_field():
         {"word": "Clairière", "color": "vert", "display": "Clairière verte", "available": True},
     )
     assert result == "Que penses-tu de Clairière verte ?"
+
+
+def test_substitute_placeholder_strips_markdown_wrapping_when_unresolved():
+    """Régression bug réel #8 (2026-07-25, capture développeur : "Que dirais-tu de **** ?" revenu
+    après le fix carried_result) : malgré la consigne TOOLS_DESCRIPTION interdisant d'entourer
+    "{{résultat}}" de "**", le LLM l'a quand même fait. Sans previous_result à substituer, un
+    simple retrait du token laissait "**" + "**" adjacents qui collent visuellement en "****". Le
+    wrapping doit être retiré EN MÊME TEMPS que le token, pas seulement le token seul."""
+    import chatbot_executor
+
+    result = chatbot_executor._substitute_placeholder("Que dirais-tu de **{{résultat}}** ?", None)
+    assert "****" not in result
+    assert "**" not in result
+
+    result_quotes = chatbot_executor._substitute_placeholder("Que dirais-tu de «{{résultat}}» ?", None)
+    assert "«»" not in result_quotes
 
 
 @pytest.mark.anyio

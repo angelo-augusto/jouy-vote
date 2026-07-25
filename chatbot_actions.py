@@ -43,8 +43,9 @@ def compute_debate_token(identity_token: str) -> str:
 
 # Mot (objet/être) + couleur — convention du wiki (themes:pseudonyme, architecture-technique).
 # Revu le 2026-07-25 (retour développeur, via angelobot) contre les connotations non voulues
-# (politique/religieuse/sexuelle) une fois combinés à n'importe laquelle des 8 couleurs :
-# "Étoile" retiré ("étoile jaune" = symbole historique antisémite) ; "Marée" retiré aussi ("marée
+# (politique/religieuse/sexuelle) une fois combinés aux 8 couleurs alors en place ("gris" ajouté
+# après coup, pas encore passé par cette même revue mot-par-mot, rien de préoccupant repéré à
+# l'ajout) : "Étoile" retiré ("étoile jaune" = symbole historique antisémite) ; "Marée" retiré aussi ("marée
 # noire" = catastrophe pétrolière, ironique vu l'origine écologique de jouyvote — hors des 3
 # catégories citées mais coût nul à éviter). Reste de la liste passé en revue sans autre cas
 # trouvé (pas de "croix"/"croissant" etc.).
@@ -54,14 +55,15 @@ PSEUDO_WORDS = [
     "Roseau", "Aurore", "Cascade", "Bourgeon", "Falaise", "Clairière", "Genêt",
     "Corail", "Frimas", "Tilleul", "Brume", "Sittelle", "Ravin",
 ]
-# Palette réduite à 8 couleurs simples et universelles (retour développeur 2026-07-25, via
-# angelobot) — les couleurs précédentes (argenté, carmin, ambre...) jugées trop compliquées pour
-# un public général. Table pseudos vide en prod au moment du changement, aucune migration requise.
-PSEUDO_COLORS = ["rouge", "orange", "jaune", "vert", "bleu", "violet", "blanc", "noir"]
+# Palette de couleurs simples et universelles (retour développeur 2026-07-25, via angelobot) —
+# les couleurs précédentes (argenté, carmin, ambre...) jugées trop compliquées pour un public
+# général. "gris" ajouté ensuite (même jour) à la demande du développeur. Table pseudos vide en
+# prod au moment de ces changements, aucune migration requise.
+PSEUDO_COLORS = ["rouge", "orange", "jaune", "vert", "bleu", "violet", "blanc", "noir", "gris"]
 
 # Genre grammatical de chaque mot — pour l'accord de la couleur ("Clairière VERTE", pas "Clairière
-# vert"). Bug réel signalé par le développeur (2026-07-25). Seules 3 des 8 couleurs varient en
-# genre en français (rouge/orange/jaune/violet sont invariables) — voir PSEUDO_COLOR_FEMININE.
+# vert"). Bug réel signalé par le développeur (2026-07-25). 6 couleurs variables en genre en
+# français, 3 invariables (rouge/orange/jaune) — voir PSEUDO_COLOR_FEMININE.
 PSEUDO_WORD_GENDER = {
     "Renard": "m", "Hibou": "m", "Chêne": "m", "Lanterne": "f", "Rivière": "f", "Nuage": "m",
     "Phare": "m", "Comète": "f", "Sentier": "m", "Écureuil": "m", "Orage": "m", "Prairie": "f",
@@ -69,11 +71,12 @@ PSEUDO_WORD_GENDER = {
     "Bourgeon": "m", "Falaise": "f", "Clairière": "f", "Genêt": "m", "Corail": "m", "Frimas": "m",
     "Tilleul": "m", "Brume": "f", "Sittelle": "f", "Ravin": "m",
 }
-# 5 couleurs variables en genre (vert/bleu/violet/blanc/noir), 3 invariables (rouge/orange/jaune)
-# — "bleu" et "violet" initialement oubliés (2 corrections successives d'angelobot/développeur,
-# 2026-07-25), vérifiés avant ce commit.
+# 6 couleurs variables en genre (vert/bleu/violet/blanc/noir/gris), 3 invariables (rouge/orange/
+# jaune) — "bleu" et "violet" initialement oubliés (2 corrections successives d'angelobot/
+# développeur, 2026-07-25), "gris" ajouté avec la palette étendue le même jour.
 PSEUDO_COLOR_FEMININE = {
     "vert": "verte", "bleu": "bleue", "violet": "violette", "blanc": "blanche", "noir": "noire",
+    "gris": "grise",
 }
 
 
@@ -390,7 +393,7 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   un pseudo confirmé (vérifie d'abord avec get_or_assign_pseudo si tu n'es pas sûr).
 - propose_custom_pseudo(word, color, appropriate) : même mécanisme, mais pour un pseudo proposé
   par l'UTILISATEUR lui-même (pas une idée générée) — utilise cette action quand il te suggère un
-  mot et une couleur de son choix. "color" doit être une des 8 couleurs de la palette (si
+  mot et une couleur de son choix. "color" doit être une des couleurs de la palette (si
   l'utilisateur en propose une autre, dis-lui laquelle choisir parmi les 8). "appropriate"
   OBLIGATOIRE : ton jugement de contenu sur CE mot+couleur précis (nom réel, connotation
   politique/religieuse/sexuelle, argot, double sens — voir le socle pour le détail des critères),
@@ -418,6 +421,17 @@ brièvement ("Que penses-tu de {{résultat}} ?") : sans ça, la personne ne sait
 proposé et toi-même perds la trace de ce que tu as déjà offert lors des tours suivants. Écris
 "{{résultat}}" en TEXTE SIMPLE, sans astérisques ni guillemets autour (pas "**{{résultat}}**",
 pas "«{{résultat}}»") — juste le mot littéral au milieu de ta phrase, rien d'autre.
+
+Bug réel signalé par le développeur (2026-07-25) : pour un pseudo "Fourmi rouge" proposé dans un
+TOUR PRÉCÉDENT, un say_user d'un tour suivant a affirmé "tu devrais voir apparaître un bouton" —
+alors qu'aucun bouton n'existait réellement, car le bouton de confirmation ne s'affiche QUE si
+propose_pseudo_candidates/propose_custom_pseudo a été appelée DANS CE MÊME TOUR (son résultat
+"available: true" apparaît dans les actions de CETTE réponse). Mentionner un candidat par son nom
+depuis l'historique de conversation ne fait PAS réapparaître son bouton. RÈGLE STRICTE : n'affirme
+JAMAIS "tu peux/devrais voir un bouton" sans avoir réellement rappelé l'action correspondante dans
+CE lot juste avant. Si l'utilisateur revient sur une proposition d'un tour antérieur ("et pour
+Fourmi rouge, finalement ?"), rappelle D'ABORD l'action (même index, résultat déterministe donc
+identique) pour regénérer un bouton actif, ne te contente jamais de la mention textuelle passée.
 
 Pour référencer dans un say_user le résultat de l'action juste avant, utilise littéralement le
 texte "{{résultat}}" à l'endroit voulu — il sera remplacé automatiquement par la valeur réelle
