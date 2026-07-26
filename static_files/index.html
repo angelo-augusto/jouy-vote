@@ -28,7 +28,6 @@ button { width: 100%; padding: .7em; border: none; border-radius: 4px; font-size
 .nav a { color: #007bff; cursor: pointer; text-decoration: none; }
 .nav a:hover { text-decoration: underline; }
 .nav .spacer { flex: 1; }
-.nav .greeting { color: #666; font-size: .85em; }
 .question-block { border: 1px solid #eee; border-radius: 6px; padding: 1em; margin-bottom: 1em; }
 .question-block h3 { margin: 0 0 .5em; font-size: 1em; }
 details.settings, details.danger-zone { margin-top: .8em; }
@@ -255,6 +254,11 @@ async function api(path, body) {
   return data;
 }
 
+// Barre de nav persistante sur TOUTES les pages : ne doit jamais afficher d'identifiant
+// (ni nom réel, ni pseudo) — un tiers regardant l'écran pourrait sinon lier durablement le
+// pseudo affiché à ce que la personne publie sous ce pseudo (bug AUGUSTO, correction Angelo
+// 2026-07-26). Le pseudo ne s'affiche QUE dans le fil de dialogue chatbot et les zones de
+// publication (forum), jamais ici.
 function renderNav() {
   const nav = document.getElementById('navBar');
   if (!isLoggedIn()) {
@@ -263,7 +267,6 @@ function renderNav() {
       '<a data-link href="/login">Connexion</a>';
     return;
   }
-  const nom = localStorage.getItem('user_nom') || '';
   nav.innerHTML =
     '<a data-link href="/">🏠 Accueil</a>' +
     '<a data-link href="/vote">Voter</a>' +
@@ -271,7 +274,6 @@ function renderNav() {
     '<a data-link href="/parrainer">Parrainer</a>' +
     '<a data-link href="/compte">Mon compte</a>' +
     '<span class="spacer"></span>' +
-    '<span class="greeting">' + nom + '</span>' +
     '<a id="navLogoutLink">Déconnexion</a>';
   document.getElementById('navLogoutLink').addEventListener('click', logout);
 }
