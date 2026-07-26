@@ -1196,6 +1196,61 @@ def submit_admin_intervention_request(identity_token: str, description: str) -> 
     return {"sent": sent}
 
 
+try:
+    from qdrant_client import QdrantClient
+    _QDRANT_AVAILABLE = True
+except ImportError:
+    _QDRANT_AVAILABLE = False
+
+from rag_conseil_municipal.embeddings import embed as _embed_conseil_municipal, is_available as _embeddings_available
+
+# Instance Qdrant DÉDIÉE jouyvote (2026-07-26, RAG conseil municipal) — voir docker-compose.yml
+# pour le point de vigilance sécurité (jamais l'instance partagée du projet RPG, sans
+# authentification, qui exposerait un chemin réseau vers des données sans rapport).
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+CONSEIL_MUNICIPAL_COLLECTION = "conseil_municipal_pv"
+
+_qdrant_client: "QdrantClient | None" = None
+
+
+def _get_qdrant_client() -> "QdrantClient":
+    global _qdrant_client
+    if _qdrant_client is None:
+        _qdrant_client = QdrantClient(url=QDRANT_URL)
+    return _qdrant_client
+
+
+def search_conseil_municipal_pv(query: str, top_k: int = 5) -> list[dict]:
+    """Recherche sémantique (RAG, 2026-07-26) dans les PV de conseil municipal indexés — voir
+    rag_conseil_municipal/ (pipeline d'indexation séparé, tourne dans le conteneur opencode,
+    jamais ici). Ne lève JAMAIS : dégrade en liste vide si Qdrant ou le modèle d'embedding est
+    indisponible — chatbot_actions.search_conseil_municipal traite une liste vide comme "rien
+    trouvé sur ce sujet", jamais comme une erreur qui casserait la conversation."""
+    if not _QDRANT_AVAILABLE or not _embeddings_available():
+        return []
+    try:
+        client = _get_qdrant_client()
+        if not client.collection_exists(CONSEIL_MUNICIPAL_COLLECTION):
+            return []
+        vector = _embed_conseil_municipal(query)
+        results = client.query_points(
+            collection_name=CONSEIL_MUNICIPAL_COLLECTION,
+            query=vector,
+            limit=top_k,
+            with_payload=True,
+        )
+        return [
+            {
+                "text": r.payload.get("text"),
+                "source_url": r.payload.get("source_url"),
+                "meeting_date": r.payload.get("meeting_date"),
+            }
+            for r in results.points
+        ]
+    except Exception:
+        return []
+
+
 def send_referral_invite_email(to_email: str, referrer_nom: str, invite_token: str) -> bool:
     """Envoie le lien d'inscription pré-approuvé au filleul. Le lien EST le déclencheur
     d'inscription (pas une validation a posteriori d'un compte déjà créé) : le filleul clique,
@@ -1568,6 +1623,10 @@ def chat_v2(req: ChatRequest):
         # d'office pour toutes les pages sur chaque tour — voir fetch_wiki_page_raw).
         "wiki_pages_index": WIKI_CITIZEN_PAGES,
         "get_wiki_page_fn": fetch_wiki_page_raw,
+        # RAG conseil municipal (2026-07-26) : recherche sémantique à la demande, jamais fait
+        # d'office (contrairement à ctx["threads"], pas une simple lecture DB — appel réseau vers
+        # Qdrant + calcul d'embedding, voir search_conseil_municipal_pv).
+        "search_conseil_municipal_fn": search_conseil_municipal_pv,
     }
     trace_requested = bool(req.admin_key) and req.admin_key == ADMIN_KEY
     result = run_turn(system_prompt, conversation_messages, ctx, trace=trace_requested)

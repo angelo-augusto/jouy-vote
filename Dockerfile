@@ -6,8 +6,13 @@ FROM node:22-slim
 # ("pip: command not found", pas de python3 du tout dans l'image).
 # openssh-server ajouté à la demande d'Angelo (2026-07-20) : accès portable au conteneur si le
 # Docker déménage un jour sur un autre serveur (pas juste docker exec local).
+# tesseract-ocr + tesseract-ocr-fra ajoutés le 2026-07-26 (RAG conseil municipal) : trouvé en
+# testant en réel que 22 des 25 PV publiés par la mairie sont des scans purs (zéro texte
+# embarqué, uniquement des images par page) — sans OCR, le RAG ne couvrirait que 3 documents sur
+# 25. Binaire système requis par pytesseract (voir rag_conseil_municipal/index.py), pas
+# installable par pip seul.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl git ca-certificates python3 python3-pip python3-venv openssh-server \
+    && apt-get install -y --no-install-recommends curl git ca-certificates python3 python3-pip python3-venv openssh-server tesseract-ocr tesseract-ocr-fra \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
 

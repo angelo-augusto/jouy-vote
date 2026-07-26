@@ -818,6 +818,7 @@ def test_chatbot_actions_registry_excludes_commit_actions():
         "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
         "list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque",
         "report_bug", "request_admin_intervention", "list_wiki_pages", "get_wiki_page",
+        "search_conseil_municipal",
     }
     for forbidden in (
         "save_summary", "delete_summary", "confirm_publication", "confirm_pseudo",
@@ -1735,6 +1736,67 @@ def test_get_wiki_page_action_errors_when_callable_missing():
     assert "error" in result
 
 
+def test_search_conseil_municipal_action_calls_ctx_callable():
+    """RAG conseil municipal (2026-07-26) : même pattern que get_wiki_page — chatbot_actions.py
+    reste sans accès réseau/Qdrant direct, tout passe par un callable fourni dans ctx."""
+    import chatbot_actions
+
+    calls = []
+
+    def fake_fn(query):
+        calls.append(query)
+        return [{"text": "Le conseil a voté...", "source_url": "https://jouy28.com/x.pdf", "meeting_date": "05 juin 2026"}]
+
+    result = chatbot_actions.search_conseil_municipal({"query": "budget voirie"}, {"search_conseil_municipal_fn": fake_fn})
+    assert result == {"results": [{"text": "Le conseil a voté...", "source_url": "https://jouy28.com/x.pdf", "meeting_date": "05 juin 2026"}]}
+    assert calls == ["budget voirie"]
+
+
+def test_search_conseil_municipal_action_handles_empty_results():
+    """Une liste vide doit rester une liste vide (pas une erreur) — c'est le signal "rien trouvé
+    sur ce sujet" que le prompt demande au modèle de communiquer honnêtement."""
+    import chatbot_actions
+
+    result = chatbot_actions.search_conseil_municipal({"query": "sujet jamais évoqué"}, {"search_conseil_municipal_fn": lambda query: []})
+    assert result == {"results": []}
+
+
+def test_search_conseil_municipal_action_errors_when_callable_missing():
+    import chatbot_actions
+
+    result = chatbot_actions.search_conseil_municipal({"query": "budget"}, {})
+    assert "error" in result
+
+
+def test_search_conseil_municipal_action_errors_on_empty_query():
+    import chatbot_actions
+
+    result = chatbot_actions.search_conseil_municipal({"query": ""}, {"search_conseil_municipal_fn": lambda query: []})
+    assert "error" in result
+
+
+def test_search_conseil_municipal_action_survives_exception_from_fn():
+    """Défense en profondeur (même famille que le bug réel #13, chatbot_executor.py) : même si
+    le callable lève (Qdrant down, etc.), l'action ne doit jamais faire planter le tour."""
+    import chatbot_actions
+
+    def failing_fn(query):
+        raise RuntimeError("Qdrant indisponible")
+
+    result = chatbot_actions.search_conseil_municipal({"query": "budget"}, {"search_conseil_municipal_fn": failing_fn})
+    assert "error" in result
+
+
+def test_search_conseil_municipal_pv_degrades_gracefully_without_qdrant():
+    """main.search_conseil_municipal_pv (l'implémentation réelle, réseau/Qdrant) doit renvoyer
+    une liste vide plutôt que lever si Qdrant/le modèle d'embedding est indisponible — le venv de
+    test n'installe volontairement pas qdrant-client/sentence-transformers (dépendances lourdes,
+    réservées au conteneur de prod/opencode), ce qui exerce réellement ce chemin de dégradation."""
+    import main as main_module
+
+    assert main_module.search_conseil_municipal_pv("n'importe quelle question") == []
+
+
 @pytest.mark.anyio
 async def test_chat_v2_passes_wiki_index_and_callable_in_ctx(client, logged_in_user, monkeypatch):
     import main as main_module
@@ -2285,6 +2347,17 @@ def test_tools_description_generalizes_no_promise_without_action_to_forum_drafts
 
     assert "RÈGLE GÉNÉRALISÉE" in chatbot_actions.TOOLS_DESCRIPTION
     assert "jamais un brouillon uniquement" in chatbot_actions.TOOLS_DESCRIPTION.lower()
+
+
+def test_tools_description_documents_search_conseil_municipal_with_citation_rule():
+    """RAG conseil municipal (2026-07-26) : la consigne doit exiger de citer la source précise et
+    d'admettre l'absence de résultat plutôt que d'inventer — jamais répondre "de mémoire" sur ce
+    sujet (le prompt statique interdisait auparavant explicitement cette capacité, remplacé)."""
+    import chatbot_actions
+
+    assert "search_conseil_municipal" in chatbot_actions.TOOLS_DESCRIPTION
+    assert "n'as PAS ENCORE accès" not in chatbot_actions.CHAT_SYSTEM_PROMPT
+    assert "search_conseil_municipal" in chatbot_actions.CHAT_SYSTEM_PROMPT
 
 
 def test_tools_description_disambiguates_summary_vs_opinion_draft():

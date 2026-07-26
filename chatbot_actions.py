@@ -42,9 +42,12 @@ CHAT_SYSTEM_PROMPT = (
     "pour les habitants de Jouy (28). Tu aides les joviens à formuler clairement une opinion ou "
     "une doléance, sans jamais trahir le sens de ce qu'ils veulent dire — tu proposes une "
     "reformulation, tu ne publies jamais rien toi-même, c'est toujours la personne qui décide. "
-    "Pour toute question factuelle sur les décisions ou comptes-rendus du conseil municipal : tu "
-    "n'as PAS ENCORE accès à ces documents dans cette première version du site — dis-le "
-    "clairement plutôt que d'inventer une réponse. Reste bref, concret, et dans le sujet de la "
+    "Pour toute question factuelle sur les décisions ou comptes-rendus du conseil municipal : "
+    "utilise TOUJOURS search_conseil_municipal avant de répondre (voir plus bas), et cite "
+    "précisément la source renvoyée (date de séance, lien du PDF) — ne réponds JAMAIS de mémoire "
+    "ou en devinant sur ce sujet. Si aucun résultat pertinent n'est trouvé, dis-le clairement "
+    "plutôt que d'inventer une réponse : l'index ne couvre que ce que la mairie a publié. Reste "
+    "bref, concret, et dans le sujet de la "
     "vie municipale de Jouy. Tu ne dois JAMAIS affirmer avoir enregistré, sauvegardé ou publié "
     "quoi que ce soit. Si on te le demande, explique clairement que cette fonctionnalité n'existe "
     "pas encore sur le site, sans jamais laisser croire que c'est fait. Si la personne te parle "
@@ -504,6 +507,27 @@ def get_wiki_page(params: dict, ctx: dict) -> dict:
     return {"page_id": page_id, "content": content}
 
 
+def search_conseil_municipal(params: dict, ctx: dict) -> dict:
+    """Lecture seule (2026-07-26, priorité 1 développeur) : recherche par proximité de sens dans
+    les comptes-rendus/PV de conseil municipal indexés (RAG, voir rag_conseil_municipal/). Renvoie
+    les passages les plus pertinents avec leur source (URL du PDF + date de séance si identifiée)
+    — utilise-la pour répondre aux questions factuelles sur les décisions déjà prises par la
+    mairie, TOUJOURS en citant la source précise renvoyée ici, JAMAIS en inventant ou en
+    complétant avec ce que tu crois savoir par ailleurs. Si aucun résultat pertinent n'est
+    renvoyé (liste vide), dis-le honnêtement plutôt que d'improviser une réponse — l'index ne
+    couvre que ce qui a été publié par la mairie, pas l'exhaustivité des décisions municipales."""
+    query = params.get("query", "").strip()
+    if not query:
+        return {"error": "requête vide"}
+    fn = ctx.get("search_conseil_municipal_fn")
+    if fn is None:
+        return {"error": "recherche indisponible pour l'instant"}
+    try:
+        return {"results": fn(query)}
+    except Exception:
+        return {"error": "recherche momentanément indisponible"}
+
+
 def propose_summary(params: dict, ctx: dict) -> dict:
     """Génère un résumé PRIVÉ proposé (brouillon, jamais sauvegardé ici — save_summary reste un
     endpoint backend/UI séparé, déclenché uniquement par un clic utilisateur explicite)."""
@@ -564,6 +588,7 @@ ACTIONS = {
     "request_admin_intervention": request_admin_intervention,
     "list_wiki_pages": list_wiki_pages,
     "get_wiki_page": get_wiki_page,
+    "search_conseil_municipal": search_conseil_municipal,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -721,6 +746,15 @@ ACTIONS_JSON_SCHEMA = {
                             "page_id": {"type": "string"},
                         },
                         "required": ["action", "page_id"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "search_conseil_municipal"},
+                            "query": {"type": "string"},
+                        },
+                        "required": ["action", "query"],
                         "additionalProperties": False,
                     },
                 ]
@@ -887,6 +921,17 @@ qu'un brouillon détaillé mais inventé.
   par ce prompt — le wiki est la référence à jour et publique sur ces sujets. Lecture seule,
   aucun risque : consulte-les librement, sans avoir besoin que l'utilisateur te le demande
   explicitement.
+- search_conseil_municipal(query) : recherche par proximité de sens (pas juste mot-clé) dans les
+  comptes-rendus/PV de conseil municipal indexés — utilise-la pour TOUTE question factuelle sur
+  les décisions déjà prises par la mairie (budget, travaux, délibérations...), à la place du wiki
+  citoyen (qui documente le SITE, pas la vie municipale). Renvoie une liste de passages pertinents,
+  chacun avec "text" (l'extrait), "source_url" (lien direct vers le PDF officiel) et "meeting_date"
+  (date de séance identifiée, ou null si non trouvée dans le document). RÈGLE STRICTE : cite
+  TOUJOURS la source précise (date + lien) dans ta réponse, ne te contente jamais de paraphraser
+  sans l'attribuer — et si la liste est vide ou ne contient rien de pertinent à la question, dis
+  clairement que tu n'as rien trouvé sur ce sujet précis plutôt que de répondre avec ce que tu
+  crois savoir par ailleurs (l'index ne couvre QUE ce qui a été publié par la mairie sur le
+  panneau d'affichage numérique, pas l'exhaustivité de la vie municipale).
 
 IMPORTANT sur ces 2 actions pseudo : même quand "available: true", cela signifie SEULEMENT que la
 proposition est libre et jugée appropriée, PAS qu'elle est attribuée. Rien n'est écrit tant que

@@ -8,9 +8,18 @@ RUN groupadd -g 1002 app && useradd -u 1002 -g 1002 -ms /bin/bash app
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn
+# qdrant-client + sentence-transformers (2026-07-26, RAG conseil municipal) : recherche
+# sémantique au moment du chat fait partie du runtime cœur du chatbot (encoder la question de
+# l'utilisateur, interroger Qdrant), pas de l'outillage de dev que ce Dockerfile évite par
+# ailleurs (voir commentaire en tête de fichier) — décision validée par le développeur. torch
+# CPU-only explicitement (pas la roue GPU par défaut, inutile sans Nvidia et bien plus lourde —
+# piège réel rencontré en développant ce pipeline, a fait planter le disque du Khadas de dev).
+RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn \
+    && pip install --no-cache-dir --break-system-packages torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir --break-system-packages qdrant-client sentence-transformers
 
 COPY main.py chatbot_llm.py chatbot_actions.py chatbot_executor.py .
+COPY rag_conseil_municipal/__init__.py rag_conseil_municipal/embeddings.py ./rag_conseil_municipal/
 COPY static_files ./static_files
 # Répertoire dédié pour la base SQLite, monté en volume pour survivre aux redéploiements —
 # vote.db ne doit JAMAIS vivre dans l'image elle-même (perdu à chaque rebuild sinon).

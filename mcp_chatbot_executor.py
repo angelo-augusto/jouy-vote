@@ -70,12 +70,36 @@ def _mock_request_admin_intervention_fn(description: str) -> dict:
     return {"sent": False, "note": "envoi désactivé en mode test MCP"}
 
 
+# wiki_pages_index/get_wiki_page_fn (2026-07-26) : manquaient depuis l'ajout de la tâche #109,
+# gap trouvé en synchronisant ce ctx pour le RAG conseil municipal — même principe que le fix du
+# bug #111 (mcp_chatbot_executor désynchronisé de la vraie prod), corrigé au passage.
+_TEST_WIKI_PAGES = {"themes:pseudonyme": "Fonctionnement du pseudonyme (mot+couleur) et pourquoi il est stable."}
+
+
+def _mock_get_wiki_page_fn(page_id: str) -> str | None:
+    if page_id not in _TEST_WIKI_PAGES:
+        return None
+    return f"===== Contenu de test pour {page_id} ====="
+
+
+# search_conseil_municipal_fn (2026-07-26, RAG conseil municipal) : résultat de test fixe plutôt
+# qu'un vrai appel réseau/Qdrant — ce serveur MCP simule la boucle d'actions, pas l'infrastructure
+# RAG elle-même (voir rag_conseil_municipal/ pour le vrai pipeline).
+def _mock_search_conseil_municipal_fn(query: str) -> list[dict]:
+    return [{
+        "text": "Le Conseil Municipal a voté la remise à neuf de la signalisation au sol.",
+        "source_url": "https://jouy28.com/wp-content/uploads/sites/159/2026/07/test-pv.pdf",
+        "meeting_date": "05 juin 2026",
+    }]
+
+
 @mcp.tool()
 def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool = False, taken_pseudos_json: str = "[]") -> dict:
     """Exécute un tour complet de la boucle d'actions du chatbot jouyvote (say_user/get_vote_token/
     propose_summary/list_summaries/get_or_assign_pseudo/propose_pseudo_candidates/
     propose_custom_pseudo/list_threads/get_thread/propose_opinion/propose_reaction/
-    propose_remarque/report_bug/request_admin_intervention — TOUJOURS la vraie liste actuelle de
+    propose_remarque/report_bug/request_admin_intervention/list_wiki_pages/get_wiki_page/
+    search_conseil_municipal — TOUJOURS la vraie liste actuelle de
     chatbot_actions.ACTIONS, celle-ci est juste une note pour toi, pas une limite en dur) avec une
     identité de test fixe, et retourne les répliques produites + le détail de chaque action
     exécutée. report_bug/request_admin_intervention sont mockées ici (jamais de vrai envoi email
@@ -117,6 +141,9 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
         "threads": _TEST_THREADS,
         "report_bug_fn": _mock_report_bug_fn,
         "request_admin_intervention_fn": _mock_request_admin_intervention_fn,
+        "wiki_pages_index": _TEST_WIKI_PAGES,
+        "get_wiki_page_fn": _mock_get_wiki_page_fn,
+        "search_conseil_municipal_fn": _mock_search_conseil_municipal_fn,
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     result["_test_vote_token"] = compute_vote_token(_TEST_IDENTITY_TOKEN)
