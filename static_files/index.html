@@ -119,6 +119,14 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
     <p class="info" style="margin:0 0 .5em;">Brouillon d'opinion pour le Forum :</p>
     <div id="opinionCandidate"></div>
   </div>
+  <div id="reactionProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
+    <p class="info" style="margin:0 0 .5em;">Réaction à une opinion du Forum :</p>
+    <div id="reactionCandidate"></div>
+  </div>
+  <div id="remarqueProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
+    <p class="info" style="margin:0 0 .5em;">Remarque pour le Forum :</p>
+    <div id="remarqueCandidate"></div>
+  </div>
   <div id="chatMsg" class="msg"></div>
   <label>Votre message</label>
   <input type="text" id="chatInput" placeholder="Écrivez votre message…">
@@ -498,6 +506,8 @@ async function sendChatMessage() {
     }
     renderPseudoCandidates(data.actions_log);
     renderOpinionProposal(data.actions_log);
+    renderReactionProposal(data.actions_log);
+    renderRemarqueProposal(data.actions_log);
   } catch (e) {
     showMsg('chatMsg', e.message, 'error');
   }
@@ -656,6 +666,152 @@ async function confirmOpinion(opinion) {
     await api('/opinion/confirm', payload);
     document.getElementById('opinionProposal').classList.add('hidden');
     chatHistory.push({ role: 'assistant', content: 'Opinion publiée sur le Forum.' });
+    renderChatMessages();
+  } catch (e) {
+    showMsg('chatMsg', e.message, 'error');
+  }
+}
+// Forum : confirmation de réaction (2026-07-26, même gap que l'opinion, corrigé par prévention
+// avant qu'un signalement identique n'arrive — voir renderOpinionProposal ci-dessus).
+function renderReactionProposal(actionsLog) {
+  const box = document.getElementById('reactionProposal');
+  const list = document.getElementById('reactionCandidate');
+  if (!actionsLog) {
+    box.classList.add('hidden');
+    return;
+  }
+  const proposeAction = [...actionsLog].reverse().find(a =>
+    a.action === 'propose_reaction' && a.result && a.result.available === true
+  );
+  if (!proposeAction) {
+    box.classList.add('hidden');
+    return;
+  }
+  showReactionProposalButton(proposeAction.result);
+  box.classList.remove('hidden');
+}
+const REACTION_STANCE_LABELS = { adherer: 'Adhérer', opposer: "S'opposer", neutre: 'Neutre' };
+function showReactionProposalButton(reaction) {
+  const list = document.getElementById('reactionCandidate');
+  list.innerHTML = '';
+  const desc = document.createElement('p');
+  desc.style.margin = '0 0 .5em';
+  const strongOpinion = document.createElement('strong');
+  strongOpinion.textContent = 'Opinion concernée : ';
+  desc.appendChild(strongOpinion);
+  desc.appendChild(document.createTextNode(reaction.opinion_body || ''));
+  desc.appendChild(document.createElement('br'));
+  const strongStance = document.createElement('strong');
+  strongStance.textContent = 'Ta position : ';
+  desc.appendChild(strongStance);
+  desc.appendChild(document.createTextNode(REACTION_STANCE_LABELS[reaction.stance] || reaction.stance));
+  if (reaction.argumentaire) {
+    desc.appendChild(document.createElement('br'));
+    const strongArg = document.createElement('strong');
+    strongArg.textContent = 'Argumentaire : ';
+    desc.appendChild(strongArg);
+    desc.appendChild(document.createTextNode(reaction.argumentaire));
+  }
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.textContent = 'Confirmer cette réaction';
+  btn.addEventListener('click', () => askReactionConfirmation(reaction));
+  list.appendChild(desc);
+  list.appendChild(btn);
+}
+function askReactionConfirmation(reaction) {
+  const list = document.getElementById('reactionCandidate');
+  list.innerHTML = '';
+  const question = document.createElement('p');
+  question.className = 'info';
+  question.style.margin = '0 0 .5em';
+  question.textContent = 'Confirmer définitivement cette réaction sur le Forum ?';
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Oui, confirmer';
+  confirmBtn.addEventListener('click', () => confirmReaction(reaction));
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-link';
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.addEventListener('click', () => showReactionProposalButton(reaction));
+  list.appendChild(question);
+  list.appendChild(confirmBtn);
+  list.appendChild(cancelBtn);
+}
+async function confirmReaction(reaction) {
+  const session_token = localStorage.getItem('session_token');
+  try {
+    await api('/reaction/confirm', {
+      session_token, opinion_id: reaction.opinion_id, stance: reaction.stance,
+      argumentaire: reaction.argumentaire || null,
+    });
+    document.getElementById('reactionProposal').classList.add('hidden');
+    chatHistory.push({ role: 'assistant', content: 'Réaction confirmée sur le Forum.' });
+    renderChatMessages();
+  } catch (e) {
+    showMsg('chatMsg', e.message, 'error');
+  }
+}
+// Forum : confirmation de remarque (2026-07-26, même gap).
+function renderRemarqueProposal(actionsLog) {
+  const box = document.getElementById('remarqueProposal');
+  const list = document.getElementById('remarqueCandidate');
+  if (!actionsLog) {
+    box.classList.add('hidden');
+    return;
+  }
+  const proposeAction = [...actionsLog].reverse().find(a =>
+    a.action === 'propose_remarque' && a.result && a.result.available === true
+  );
+  if (!proposeAction) {
+    box.classList.add('hidden');
+    return;
+  }
+  showRemarqueProposalButton(proposeAction.result);
+  box.classList.remove('hidden');
+}
+function showRemarqueProposalButton(remarque) {
+  const list = document.getElementById('remarqueCandidate');
+  list.innerHTML = '';
+  const desc = document.createElement('p');
+  desc.style.margin = '0 0 .5em';
+  desc.appendChild(document.createTextNode(remarque.body));
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.textContent = 'Publier cette remarque';
+  btn.addEventListener('click', () => askRemarqueConfirmation(remarque));
+  list.appendChild(desc);
+  list.appendChild(btn);
+}
+function askRemarqueConfirmation(remarque) {
+  const list = document.getElementById('remarqueCandidate');
+  list.innerHTML = '';
+  const question = document.createElement('p');
+  question.className = 'info';
+  question.style.margin = '0 0 .5em';
+  question.textContent = 'Confirmer la publication de cette remarque sur le Forum ?';
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Oui, publier';
+  confirmBtn.addEventListener('click', () => confirmRemarque(remarque));
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-link';
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.addEventListener('click', () => showRemarqueProposalButton(remarque));
+  list.appendChild(question);
+  list.appendChild(confirmBtn);
+  list.appendChild(cancelBtn);
+}
+async function confirmRemarque(remarque) {
+  const session_token = localStorage.getItem('session_token');
+  try {
+    await api('/remarque/confirm', {
+      session_token, thread_id: remarque.thread_id, body: remarque.body,
+      reply_to_remarque_id: remarque.reply_to_remarque_id || null,
+      reply_to_opinion_id: remarque.reply_to_opinion_id || null,
+    });
+    document.getElementById('remarqueProposal').classList.add('hidden');
+    chatHistory.push({ role: 'assistant', content: 'Remarque publiée sur le Forum.' });
     renderChatMessages();
   } catch (e) {
     showMsg('chatMsg', e.message, 'error');
