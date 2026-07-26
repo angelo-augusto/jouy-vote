@@ -1862,7 +1862,10 @@ def results(question_id: int):
 # renvoyer l'appli (index.html), pas un 404 — StaticFiles seul ne sait servir que des fichiers
 # qui existent réellement sur disque. /register et /reset-password ne sont jamais dans le menu
 # (accessibles seulement via un lien reçu par email) mais ont besoin du même traitement.
-_SPA_ROUTES = ["/", "/login", "/vote", "/assistant", "/parrainer", "/compte", "/register", "/reset-password"]
+_SPA_ROUTES = [
+    "/", "/login", "/vote", "/assistant", "/parrainer", "/compte", "/register", "/reset-password",
+    "/forum", "/mon-activite",
+]
 for _route in _SPA_ROUTES:
     app.add_api_route(
         _route,

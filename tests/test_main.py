@@ -2051,6 +2051,17 @@ async def test_forum_snapshot_endpoint_public_no_auth(client):
     assert thread["thread_id"] in thread_ids
 
 
+@pytest.mark.anyio
+async def test_spa_fallback_routes_serve_app_for_forum_and_activite(client):
+    """Régression trouvée en vérifiant en conditions réelles (Playwright) : /forum et
+    /mon-activite avaient été ajoutées au routeur client (ROUTES en JS) mais pas à _SPA_ROUTES
+    côté serveur — une navigation directe ou un rafraîchissement sur ces pages renvoyait un 404
+    au lieu de l'app (StaticFiles seul ne sait servir que des fichiers existants sur disque)."""
+    for path in ("/forum", "/mon-activite"):
+        resp = await client.get(path)
+        assert resp.status_code == 200, f"{path} devrait servir l'app, pas un 404"
+
+
 def test_get_my_activity_counts_only_latest_reaction_per_reactor():
     """Page "Mon activité" (2026-07-26) : le décompte adhérer/opposer/neutre ne compte QUE la
     réaction la plus récente par réacteur (même règle que get_current_reaction) — si quelqu'un
