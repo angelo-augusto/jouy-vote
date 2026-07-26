@@ -102,13 +102,27 @@ def _mock_list_conseil_municipal_fn() -> list[dict]:
     ]
 
 
+# get_conseil_municipal_document_fn (2026-07-26, bug réel #16) : contenu de test fixe pour LE
+# document déjà "identifié", None pour toute autre source_url (simule un document introuvable).
+def _mock_get_conseil_municipal_document_fn(source_url: str) -> dict | None:
+    if source_url != "https://jouy28.com/wp-content/uploads/sites/159/2026/07/test-pv.pdf":
+        return None
+    return {
+        "source_url": source_url,
+        "meeting_date": "05 juin 2026",
+        "text": "Le Conseil Municipal a voté la remise à neuf de la signalisation au sol.",
+        "truncated": False,
+    }
+
+
 @mcp.tool()
 def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool = False, taken_pseudos_json: str = "[]") -> dict:
     """Exécute un tour complet de la boucle d'actions du chatbot jouyvote (say_user/get_vote_token/
     propose_summary/list_summaries/get_or_assign_pseudo/propose_pseudo_candidates/
     propose_custom_pseudo/list_threads/get_thread/propose_opinion/propose_reaction/
     propose_remarque/report_bug/request_admin_intervention/list_wiki_pages/get_wiki_page/
-    search_conseil_municipal/list_conseil_municipal_seances — TOUJOURS la vraie liste actuelle de
+    search_conseil_municipal/list_conseil_municipal_seances/get_conseil_municipal_document —
+    TOUJOURS la vraie liste actuelle de
     chatbot_actions.ACTIONS, celle-ci est juste une note pour toi, pas une limite en dur) avec une
     identité de test fixe, et retourne les répliques produites + le détail de chaque action
     exécutée. report_bug/request_admin_intervention sont mockées ici (jamais de vrai envoi email
@@ -154,6 +168,7 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
         "get_wiki_page_fn": _mock_get_wiki_page_fn,
         "search_conseil_municipal_fn": _mock_search_conseil_municipal_fn,
         "list_conseil_municipal_fn": _mock_list_conseil_municipal_fn,
+        "get_conseil_municipal_document_fn": _mock_get_conseil_municipal_document_fn,
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     result["_test_vote_token"] = compute_vote_token(_TEST_IDENTITY_TOKEN)

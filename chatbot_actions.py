@@ -515,7 +515,19 @@ def search_conseil_municipal(params: dict, ctx: dict) -> dict:
     mairie, TOUJOURS en citant la source précise renvoyée ici, JAMAIS en inventant ou en
     complétant avec ce que tu crois savoir par ailleurs. Si aucun résultat pertinent n'est
     renvoyé (liste vide), dis-le honnêtement plutôt que d'improviser une réponse — l'index ne
-    couvre que ce qui a été publié par la mairie, pas l'exhaustivité des décisions municipales."""
+    couvre que ce qui a été publié par la mairie, pas l'exhaustivité des décisions municipales.
+
+    RÈGLE CRITIQUE (bug réel #16, 2026-07-26, capture développeur : "de quoi ça parlait" sur le
+    conseil du 5 juin a halluciné un maire et des numéros de délibération inventés) : cette
+    recherche est SÉMANTIQUE, pas un accès garanti au bon document — une question vague matche
+    parfois des chunks d'AUTRES dates que celle demandée (la similarité accroche sur des
+    formulations administratives génériques : dates, "PROCES-VERBAL", "CONSEIL MUNICIPAL"). Avant
+    d'affirmer quoi que ce soit, VÉRIFIE que le "meeting_date"/"source_url" de chaque résultat
+    correspond bien à ce qui est demandé — si aucun résultat ne porte clairement sur LE point
+    précis demandé (même si la liste n'est pas vide), dis "je n'ai pas trouvé d'information fiable
+    là-dessus" plutôt que de broder avec les chunks les plus proches trouvés. Pour le contenu
+    COMPLET d'un document déjà identifié (ex: sa source_url citée dans un message précédent),
+    utilise get_conseil_municipal_document à la place — jamais cette recherche sémantique."""
     query = params.get("query", "").strip()
     if not query:
         return {"error": "requête vide"}
@@ -526,6 +538,29 @@ def search_conseil_municipal(params: dict, ctx: dict) -> dict:
         return {"results": fn(query)}
     except Exception:
         return {"error": "recherche momentanément indisponible"}
+
+
+def get_conseil_municipal_document(params: dict, ctx: dict) -> dict:
+    """Lecture seule (2026-07-26, bug réel #16) : contenu COMPLET d'UN document de conseil
+    municipal déjà identifié par son source_url (obtenu via list_conseil_municipal_seances ou une
+    précédente recherche) — AUCUNE recherche sémantique, tous les chunks de CE document précis,
+    fiable par construction puisqu'il n'y a jamais de mélange avec un autre document. Utilise
+    CETTE action — jamais search_conseil_municipal — dès que tu veux le contenu d'un document
+    déjà identifié (typiquement en réponse à un "de quoi ça parlait ?" qui suit une citation de
+    date/lien). Requiert source_url (string, non vide)."""
+    source_url = params.get("source_url", "").strip()
+    if not source_url:
+        return {"error": "source_url vide"}
+    fn = ctx.get("get_conseil_municipal_document_fn")
+    if fn is None:
+        return {"error": "lecture de document indisponible pour l'instant"}
+    try:
+        document = fn(source_url)
+    except Exception:
+        return {"error": "lecture momentanément indisponible"}
+    if document is None:
+        return {"error": "document introuvable dans l'index"}
+    return {"document": document}
 
 
 def list_conseil_municipal_seances(params: dict, ctx: dict) -> dict:
@@ -606,6 +641,7 @@ ACTIONS = {
     "list_wiki_pages": list_wiki_pages,
     "get_wiki_page": get_wiki_page,
     "search_conseil_municipal": search_conseil_municipal,
+    "get_conseil_municipal_document": get_conseil_municipal_document,
     "list_conseil_municipal_seances": list_conseil_municipal_seances,
 }
 
@@ -779,6 +815,15 @@ ACTIONS_JSON_SCHEMA = {
                         "type": "object",
                         "properties": {"action": {"const": "list_conseil_municipal_seances"}},
                         "required": ["action"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "get_conseil_municipal_document"},
+                            "source_url": {"type": "string"},
+                        },
+                        "required": ["action", "source_url"],
                         "additionalProperties": False,
                     },
                 ]
@@ -956,6 +1001,26 @@ qu'un brouillon détaillé mais inventé.
   clairement que tu n'as rien trouvé sur ce sujet précis plutôt que de répondre avec ce que tu
   crois savoir par ailleurs (l'index ne couvre QUE ce qui a été publié par la mairie sur le
   panneau d'affichage numérique, pas l'exhaustivité de la vie municipale).
+
+  RÈGLE CRITIQUE (bug réel #16, 2026-07-26, capture développeur : "de quoi ça parlait" sur le
+  conseil du 5 juin a produit un maire ET des numéros de délibération INVENTÉS) : cette recherche
+  est SÉMANTIQUE, pas garantie de cibler le bon document — une question vague matche parfois des
+  chunks d'AUTRES dates que celle demandée. VÉRIFIE que le "meeting_date"/"source_url" de chaque
+  résultat correspond bien à ce qui est demandé avant d'affirmer quoi que ce soit ; si aucun
+  résultat ne porte clairement sur le point précis demandé (même liste non vide), dis "je n'ai pas
+  trouvé d'information fiable là-dessus" plutôt que de broder avec les chunks les plus proches
+  trouvés — ne mélange JAMAIS du contenu de deux dates différentes dans une même affirmation. Pour
+  le contenu complet d'un document déjà identifié, utilise get_conseil_municipal_document, pas
+  cette recherche.
+- get_conseil_municipal_document(source_url) : contenu COMPLET d'UN document déjà identifié par
+  son "source_url" (obtenu via list_conseil_municipal_seances, une recherche précédente, ou un
+  lien déjà cité dans la conversation) — AUCUNE recherche sémantique, tous les chunks de CE
+  document précis, fiable par construction (jamais de mélange avec un autre document). Renvoie
+  {"document": {"source_url", "meeting_date", "text", "truncated"}} ou une erreur si introuvable.
+  Utilise CETTE action — jamais search_conseil_municipal — dès qu'un document est déjà identifié
+  et que la question porte sur SON contenu (typiquement un "de quoi ça parlait ?" qui suit une
+  citation de date/lien) : c'est le fix direct du bug #16 ci-dessus, pas une alternative parmi
+  d'autres.
 - list_conseil_municipal_seances() : liste des séances indexées triées par date DÉCROISSANTE (la
   plus récente en premier), chacune avec "source_url" et "meeting_date". Aucun paramètre.
 

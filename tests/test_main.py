@@ -818,7 +818,7 @@ def test_chatbot_actions_registry_excludes_commit_actions():
         "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
         "list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque",
         "report_bug", "request_admin_intervention", "list_wiki_pages", "get_wiki_page",
-        "search_conseil_municipal", "list_conseil_municipal_seances",
+        "search_conseil_municipal", "get_conseil_municipal_document", "list_conseil_municipal_seances",
     }
     for forbidden in (
         "save_summary", "delete_summary", "confirm_publication", "confirm_pseudo",
@@ -1881,6 +1881,75 @@ def test_list_conseil_municipal_meetings_degrades_gracefully_without_qdrant():
     import main as main_module
 
     assert main_module.list_conseil_municipal_meetings() == []
+
+
+def test_get_conseil_municipal_document_action_calls_ctx_callable():
+    """Bug réel #16 (2026-07-26) : même pattern que search_conseil_municipal/
+    list_conseil_municipal_seances — délègue intégralement à ctx["get_conseil_municipal_document_fn"]."""
+    import chatbot_actions
+
+    fake_document = {"source_url": "https://jouy28.com/x.pdf", "meeting_date": "05 juin 2026", "text": "...", "truncated": False}
+    calls = []
+
+    def fake_fn(source_url):
+        calls.append(source_url)
+        return fake_document
+
+    result = chatbot_actions.get_conseil_municipal_document(
+        {"source_url": "https://jouy28.com/x.pdf"}, {"get_conseil_municipal_document_fn": fake_fn}
+    )
+    assert result == {"document": fake_document}
+    assert calls == ["https://jouy28.com/x.pdf"]
+
+
+def test_get_conseil_municipal_document_action_errors_on_empty_source_url():
+    import chatbot_actions
+
+    result = chatbot_actions.get_conseil_municipal_document({"source_url": ""}, {"get_conseil_municipal_document_fn": lambda u: None})
+    assert "error" in result
+
+
+def test_get_conseil_municipal_document_action_errors_when_callable_missing():
+    import chatbot_actions
+
+    result = chatbot_actions.get_conseil_municipal_document({"source_url": "https://jouy28.com/x.pdf"}, {})
+    assert "error" in result
+
+
+def test_get_conseil_municipal_document_action_errors_when_document_not_found():
+    import chatbot_actions
+
+    result = chatbot_actions.get_conseil_municipal_document(
+        {"source_url": "https://jouy28.com/inconnu.pdf"}, {"get_conseil_municipal_document_fn": lambda u: None}
+    )
+    assert "error" in result
+
+
+def test_get_conseil_municipal_document_action_survives_exception_from_fn():
+    import chatbot_actions
+
+    def failing_fn(source_url):
+        raise RuntimeError("Qdrant indisponible")
+
+    result = chatbot_actions.get_conseil_municipal_document(
+        {"source_url": "https://jouy28.com/x.pdf"}, {"get_conseil_municipal_document_fn": failing_fn}
+    )
+    assert "error" in result
+
+
+def test_tools_description_documents_get_conseil_municipal_document_and_bug16_rule():
+    import chatbot_actions
+
+    assert "get_conseil_municipal_document" in chatbot_actions.TOOLS_DESCRIPTION
+    assert "bug réel #16" in chatbot_actions.TOOLS_DESCRIPTION
+
+
+def test_get_conseil_municipal_document_pv_degrades_gracefully_without_qdrant():
+    """Même garde-fou que search_conseil_municipal_pv/list_conseil_municipal_meetings : le venv de
+    test n'installe pas qdrant-client volontairement."""
+    import main as main_module
+
+    assert main_module.get_conseil_municipal_document_pv("https://jouy28.com/x.pdf") is None
 
 
 @pytest.mark.anyio

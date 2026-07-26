@@ -1253,6 +1253,47 @@ def search_conseil_municipal_pv(query: str, top_k: int = 5) -> list[dict]:
         return []
 
 
+# Taille max du texte concaténé renvoyé par get_conseil_municipal_document_pv — garde-fou
+# défensif contre un PV anormalement long qui exploserait le contexte du prompt, pas une limite
+# fonctionnelle attendue en usage réel (le plus gros PV connu à ce jour fait ~22k caractères).
+_DOCUMENT_TEXT_MAX_CHARS = 40000
+
+
+def get_conseil_municipal_document_pv(source_url: str) -> dict | None:
+    """Contenu COMPLET d'UN document déjà identifié par son source_url (RAG, 2026-07-26, bug réel
+    #16 : une question vague comme "de quoi ça parlait" fait dériver search_conseil_municipal_pv
+    — la similarité sémantique accroche sur des formulations administratives génériques (dates,
+    "PROCES-VERBAL", "CONSEIL MUNICIPAL") plutôt que sur le contenu, mélange des chunks d'AUTRES
+    documents avec celui demandé, et le modèle invente parfois par-dessus plutôt que d'admettre ne
+    pas avoir de contenu fiable). Ici : aucune recherche sémantique, tous les chunks de CE document
+    précis (scroll filtré par source_url, triés par chunk_index, concaténés) — fiable par
+    construction puisqu'on ne mélange jamais avec un autre document. Ne lève JAMAIS : dégrade en
+    None si Qdrant/embeddings indisponible, document introuvable, ou toute exception."""
+    if not _QDRANT_AVAILABLE:
+        return None
+    try:
+        client = _get_qdrant_client()
+        if not client.collection_exists(CONSEIL_MUNICIPAL_COLLECTION):
+            return None
+        points, offset = client.scroll(
+            collection_name=CONSEIL_MUNICIPAL_COLLECTION,
+            scroll_filter={"must": [{"key": "source_url", "match": {"value": source_url}}]},
+            limit=200,
+            with_payload=True,
+        )
+        if not points:
+            return None
+        points.sort(key=lambda p: p.payload.get("chunk_index", 0))
+        text = "\n\n".join(p.payload.get("text", "") for p in points)
+        truncated = len(text) > _DOCUMENT_TEXT_MAX_CHARS
+        if truncated:
+            text = text[:_DOCUMENT_TEXT_MAX_CHARS]
+        meeting_date = points[0].payload.get("meeting_date")
+        return {"source_url": source_url, "meeting_date": meeting_date, "text": text, "truncated": truncated}
+    except Exception:
+        return None
+
+
 _MOIS_FR = {
     "janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6,
     "juillet": 7, "août": 8, "aout": 8, "septembre": 9, "octobre": 10, "novembre": 11,
@@ -1708,6 +1749,9 @@ def chat_v2(req: ChatRequest):
         # list_conseil_municipal_fn (2026-07-26, bug réel #15) : tri chronologique pur, distinct
         # de la recherche sémantique — voir list_conseil_municipal_meetings.
         "list_conseil_municipal_fn": list_conseil_municipal_meetings,
+        # get_conseil_municipal_document_fn (2026-07-26, bug réel #16) : accès direct et complet à
+        # UN document déjà identifié, sans recherche sémantique — voir get_conseil_municipal_document_pv.
+        "get_conseil_municipal_document_fn": get_conseil_municipal_document_pv,
     }
     trace_requested = bool(req.admin_key) and req.admin_key == ADMIN_KEY
     result = run_turn(system_prompt, conversation_messages, ctx, trace=trace_requested)
