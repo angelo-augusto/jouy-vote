@@ -479,6 +479,31 @@ def request_admin_intervention(params: dict, ctx: dict) -> dict:
         return {"sent": False, "error": str(e)}
 
 
+def list_wiki_pages(params: dict, ctx: dict) -> dict:
+    """Lecture seule (2026-07-26, demande développeur) : renvoie la liste des pages du wiki
+    citoyen disponibles (id + description courte) — utilise get_wiki_page ensuite pour lire le
+    contenu complet d'une page pertinente AVANT de répondre à une question sur le FONCTIONNEMENT
+    DU SITE (anonymat, pseudo, parrainage...), plutôt que de deviner ou de te limiter à ce qui est
+    déjà écrit dans ce prompt statique. Aucun risque : lecture seule, liste fixe et curée côté
+    serveur (voir WIKI_CITIZEN_PAGES dans main.py — tu ne peux pas lire une page hors de cette
+    liste, même en l'inventant)."""
+    return {"pages": ctx.get("wiki_pages_index", {})}
+
+
+def get_wiki_page(params: dict, ctx: dict) -> dict:
+    """Lecture seule : contenu brut (syntaxe DokuWiki, pas du HTML) d'une page précise du wiki
+    citoyen. "page_id" doit être un identifiant renvoyé par list_wiki_pages — une valeur hors de
+    cette liste renvoie une erreur, jamais un contenu inventé."""
+    page_id = params.get("page_id", "")
+    fn = ctx.get("get_wiki_page_fn")
+    if fn is None:
+        return {"error": "lecture du wiki indisponible pour l'instant"}
+    content = fn(page_id)
+    if content is None:
+        return {"error": "page introuvable ou wiki indisponible"}
+    return {"page_id": page_id, "content": content}
+
+
 def propose_summary(params: dict, ctx: dict) -> dict:
     """Génère un résumé PRIVÉ proposé (brouillon, jamais sauvegardé ici — save_summary reste un
     endpoint backend/UI séparé, déclenché uniquement par un clic utilisateur explicite)."""
@@ -518,6 +543,10 @@ def propose_summary(params: dict, ctx: dict) -> dict:
 # développeur : signalement privé, faible enjeu, rate-limité — profil de risque très différent des
 # opinions publiques/permanentes. Toujours pas d'accès DB/réseau direct ICI : l'exécution passe
 # par un callable fourni dans ctx (report_bug_fn/request_admin_intervention_fn, voir main.py).
+# list_wiki_pages/get_wiki_page ajoutés le lendemain matin (2026-07-26) — lecture seule, limitée à
+# une ALLOWLIST de pages citoyennes (voir WIKI_CITIZEN_PAGES dans main.py) : plusieurs pages du
+# même wiki sont des documents internes à l'équipe (prompt système, architecture technique
+# sensible...), jamais destinés à être lus par le chatbot public.
 ACTIONS = {
     "say_user": say_user,
     "get_vote_token": get_vote_token,
@@ -533,6 +562,8 @@ ACTIONS = {
     "propose_remarque": propose_remarque,
     "report_bug": report_bug,
     "request_admin_intervention": request_admin_intervention,
+    "list_wiki_pages": list_wiki_pages,
+    "get_wiki_page": get_wiki_page,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -677,6 +708,21 @@ ACTIONS_JSON_SCHEMA = {
                         "required": ["action", "description"],
                         "additionalProperties": False,
                     },
+                    {
+                        "type": "object",
+                        "properties": {"action": {"const": "list_wiki_pages"}},
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "get_wiki_page"},
+                            "page_id": {"type": "string"},
+                        },
+                        "required": ["action", "page_id"],
+                        "additionalProperties": False,
+                    },
                 ]
             },
         }
@@ -793,6 +839,17 @@ créé(e) sans qu'un bouton de confirmation n'ait été cliqué par l'utilisateu
   jamais à ta propre initiative : uniquement si l'utilisateur en fait clairement la demande.
   Renvoie sent=false + une erreur si trop de demandes ont déjà été envoyées récemment (rate-limit
   anti-abus) — dans ce cas, dis-le honnêtement plutôt que de prétendre que ça a marché.
+- list_wiki_pages() : renvoie la liste des pages du wiki citoyen que tu peux consulter (id +
+  description courte). Aucun paramètre.
+- get_wiki_page(page_id) : renvoie le contenu complet d'une page précise (syntaxe DokuWiki brute,
+  pas du HTML — ignore la syntaxe de mise en forme, ne t'y réfère jamais dans ta réponse, elle
+  n'est là que pour toi). "page_id" doit être un identifiant renvoyé par list_wiki_pages, jamais
+  inventé — une valeur hors de cette liste renvoie une erreur. Utilise ces 2 actions AVANT de
+  répondre à une question sur le FONCTIONNEMENT DU SITE lui-même (pourquoi le pseudo est stable,
+  comment marche l'anonymat, le parrainage, etc.) plutôt que de te limiter à ce que tu sais déjà
+  par ce prompt — le wiki est la référence à jour et publique sur ces sujets. Lecture seule,
+  aucun risque : consulte-les librement, sans avoir besoin que l'utilisateur te le demande
+  explicitement.
 
 IMPORTANT sur ces 2 actions pseudo : même quand "available: true", cela signifie SEULEMENT que la
 proposition est libre et jugée appropriée, PAS qu'elle est attribuée. Rien n'est écrit tant que

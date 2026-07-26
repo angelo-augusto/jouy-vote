@@ -817,7 +817,7 @@ def test_chatbot_actions_registry_excludes_commit_actions():
         "say_user", "get_vote_token", "propose_summary", "list_summaries",
         "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
         "list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque",
-        "report_bug", "request_admin_intervention",
+        "report_bug", "request_admin_intervention", "list_wiki_pages", "get_wiki_page",
     }
     for forbidden in (
         "save_summary", "delete_summary", "confirm_publication", "confirm_pseudo",
@@ -1675,6 +1675,81 @@ async def test_chat_v2_passes_report_bug_and_admin_intervention_callables_in_ctx
     debate_token = main_module.compute_debate_token(identity_token)
     with main.db() as conn:
         conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+
+
+# ===== Accès en lecture au wiki citoyen (2026-07-26, demande développeur) — allowlist, jamais =====
+# ===== d'accès aux pages internes (architecture-technique, prompt système...) =====
+
+
+def test_fetch_wiki_page_raw_rejects_page_outside_allowlist():
+    """Sécurité (2026-07-26) : allowlist explicite, pas un accès à tout le wiki — une page hors
+    de WIKI_CITIZEN_PAGES (ex. le prompt système lui-même, ou l'architecture technique sensible)
+    ne doit jamais être lisible par le chatbot public, même si son id est deviné."""
+    import main as main_module
+
+    assert main_module.fetch_wiki_page_raw("themes:prompt-chatbot") is None
+    assert main_module.fetch_wiki_page_raw("architecture-technique") is None
+    assert main_module.fetch_wiki_page_raw("bugs-jouyvote") is None
+    assert main_module.fetch_wiki_page_raw("page-totalement-inventee") is None
+
+
+def test_list_wiki_pages_action_reads_from_ctx():
+    import chatbot_actions
+
+    fake_index = {"charte-anonymat": "La charte."}
+    result = chatbot_actions.list_wiki_pages({}, {"wiki_pages_index": fake_index})
+    assert result == {"pages": fake_index}
+
+
+def test_list_wiki_pages_action_defaults_to_empty_dict():
+    import chatbot_actions
+
+    assert chatbot_actions.list_wiki_pages({}, {}) == {"pages": {}}
+
+
+def test_get_wiki_page_action_calls_ctx_callable():
+    import chatbot_actions
+
+    calls = []
+
+    def fake_fn(page_id):
+        calls.append(page_id)
+        return "===== Contenu brut de la page ====="
+
+    result = chatbot_actions.get_wiki_page({"page_id": "charte-anonymat"}, {"get_wiki_page_fn": fake_fn})
+    assert result == {"page_id": "charte-anonymat", "content": "===== Contenu brut de la page ====="}
+    assert calls == ["charte-anonymat"]
+
+
+def test_get_wiki_page_action_errors_when_page_not_found():
+    import chatbot_actions
+
+    result = chatbot_actions.get_wiki_page({"page_id": "page-hors-allowlist"}, {"get_wiki_page_fn": lambda page_id: None})
+    assert "error" in result
+
+
+def test_get_wiki_page_action_errors_when_callable_missing():
+    import chatbot_actions
+
+    result = chatbot_actions.get_wiki_page({"page_id": "charte-anonymat"}, {})
+    assert "error" in result
+
+
+@pytest.mark.anyio
+async def test_chat_v2_passes_wiki_index_and_callable_in_ctx(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    captured_ctx = {}
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+        captured_ctx.update(ctx)
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "salut"})
+
+    assert "charte-anonymat" in captured_ctx["wiki_pages_index"]
+    assert callable(captured_ctx["get_wiki_page_fn"])
 
 
 def test_propose_opinion_action_new_thread_valid():

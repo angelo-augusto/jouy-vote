@@ -1150,6 +1150,48 @@ def fetch_wiki_home_content() -> str:
     return fragment.replace('href="/', f'href="{WIKI_PUBLIC_URL}/')
 
 
+# Accès en lecture au wiki citoyen pour le chatbot (2026-07-26, demande développeur, validée par
+# un test réel : le chatbot ne savait pas répondre correctement sur le fonctionnement du SITE
+# lui-même — anonymat, pseudo... — en dehors de ce qui est écrit en dur dans son prompt statique,
+# alors que ce wiki documente déjà tout ça publiquement).
+#
+# ALLOWLIST EXPLICITE plutôt qu'un accès à tout le wiki (nécessité de sécurité, pas un choix
+# produit) : plusieurs pages du même wiki sont des documents INTERNES à l'équipe technique, jamais
+# destinés à un citoyen — architecture-technique (détails d'implémentation de l'anonymat,
+# sensible), bugs-jouyvote, developpement, spec, themes:chatbot-fonctionnalites (journal de bord
+# technique de ce module), themes:prompt-chatbot (le prompt système lui-même — l'exposer casserait
+# sa confidentialité et faciliterait une injection de prompt). Liste par défaut-refus : une
+# nouvelle page ajoutée au wiki plus tard n'est PAS automatiquement exposée, il faut l'ajouter ici
+# explicitement.
+WIKI_CITIZEN_PAGES = {
+    "charte-anonymat": "La charte de l'anonymat — règles complètes sur la protection de l'identité.",
+    "genese": "Origine et philosophie du projet Jouy Vote Citoyen.",
+    "start": "Page d'accueil du wiki citoyen.",
+    "themes:anonymat": "L'anonymat sur jouyvote.fr — principes et garanties.",
+    "themes:chatbot": "Pourquoi un chatbot citoyen, comment il aide à formuler une opinion.",
+    "themes:consensus": "Identification des pôles d'opinion et recherche de consensus.",
+    "themes:pseudonyme": "Fonctionnement du pseudonyme (mot+couleur) et pourquoi il est stable.",
+    "themes:representants": "Les représentants et leur rôle sur la plateforme.",
+    "themes:representation": "Système de parrainage et vérification de résidence.",
+    "themes:ressources": "Ressources informatives disponibles sur le site.",
+}
+
+
+def fetch_wiki_page_raw(page_id: str) -> str | None:
+    """Lecture seule — syntaxe DokuWiki BRUTE (do=export_raw, pas export_xhtml qui rendrait du
+    HTML à nettoyer pour rien : seul le contenu compte pour un LLM, pas le rendu visuel). Limité
+    aux pages de WIKI_CITIZEN_PAGES — retourne None (jamais d'exception) si la page n'est pas dans
+    l'allowlist ou si le wiki est indisponible."""
+    if page_id not in WIKI_CITIZEN_PAGES:
+        return None
+    url = f"{WIKI_INTERNAL_URL}/doku.php?id={page_id}&do=export_raw"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError:
+        return None
+
+
 @app.get("/wiki-home-content")
 def wiki_home_content():
     return {"html": fetch_wiki_home_content()}
@@ -1389,6 +1431,11 @@ def chat_v2(req: ChatRequest):
         # request pour la justification de l'exception "écriture directe par le LLM").
         "report_bug_fn": lambda description: submit_bug_report(identity_token, description),
         "request_admin_intervention_fn": lambda description: submit_admin_intervention_request(identity_token, description),
+        # Accès lecture au wiki citoyen (2026-07-26) : index (donnée statique, pas de coût réseau)
+        # + callable pour la lecture d'une page précise à la demande (network call, jamais fait
+        # d'office pour toutes les pages sur chaque tour — voir fetch_wiki_page_raw).
+        "wiki_pages_index": WIKI_CITIZEN_PAGES,
+        "get_wiki_page_fn": fetch_wiki_page_raw,
     }
     trace_requested = bool(req.admin_key) and req.admin_key == ADMIN_KEY
     result = run_turn(system_prompt, conversation_messages, ctx, trace=trace_requested)
