@@ -2113,6 +2113,35 @@ def test_tools_description_instructs_spontaneous_list_summaries_at_conversation_
     assert "je n'ai rien en cours" in chatbot_actions.TOOLS_DESCRIPTION.lower()
 
 
+def test_tools_description_generalizes_no_promise_without_action_to_forum_drafts():
+    """Régression bug réel #14 (2026-07-26, capture développeur via angelobot) : le modèle a
+    rédigé un brouillon d'opinion complet en prose libre dans un say_user, sans jamais appeler
+    propose_opinion, tout en promettant un bouton de confirmation à venir — la règle "n'affirme
+    jamais qu'un bouton va apparaître sans avoir appelé l'action dans ce même lot" n'était écrite
+    que pour les 2 actions pseudo, jamais généralisée aux actions forum."""
+    import chatbot_actions
+
+    assert "RÈGLE GÉNÉRALISÉE" in chatbot_actions.TOOLS_DESCRIPTION
+    assert "jamais un brouillon uniquement" in chatbot_actions.TOOLS_DESCRIPTION.lower()
+
+
+def test_tools_description_disambiguates_summary_vs_opinion_draft():
+    """Même régression bug #14 : au tour suivant, le modèle a appelé propose_summary (brouillon de
+    résumé PRIVÉ) alors que le contexte demandait un brouillon d'opinion pour le Forum — les 2
+    actions partagent le mot "brouillon" dans leur description sans distinction explicite."""
+    import chatbot_actions
+
+    assert "DÉSAMBIGUÏSATION" in chatbot_actions.TOOLS_DESCRIPTION
+
+
+def test_tools_description_forbids_inventing_details_absent_from_summary():
+    """Même régression bug #14 : le modèle a inventé un nom de rue, un carrefour et un type de
+    panneau absents du résumé privé source, en rédigeant un brouillon d'opinion trop "concret"."""
+    import chatbot_actions
+
+    assert "n'invente JAMAIS un nom de rue" in chatbot_actions.TOOLS_DESCRIPTION
+
+
 def test_list_threads_action_strips_opinions_from_ctx():
     """Forum phase 2 (2026-07-25) : list_threads ne renvoie que titre/résumé, jamais les opinions
     à l'intérieur — évite de charger tout le contenu du forum juste pour une vue d'ensemble."""
