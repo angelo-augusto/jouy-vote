@@ -1852,13 +1852,17 @@ def remarque_confirm(req: RemarqueConfirmRequest):
         raise HTTPException(400, str(e))
 
 
-@app.get("/forum/snapshot")
-def forum_snapshot():
-    """Page "Forum" (2026-07-26, priorité 1 du développeur) : lecture publique, aucune
-    authentification requise — parcourir les fils/opinions/remarques sans passer par le chatbot.
-    GET plutôt que POST (contrairement aux autres lectures de ce fichier qui portent un
-    session_token) : rien à identifier ici, le contenu est déjà public par construction (voir
-    get_forum_page_snapshot)."""
+@app.post("/forum/snapshot")
+def forum_snapshot(req: ActivityMineRequest):
+    """Page "Forum" (2026-07-26, priorité 1 du développeur) : lecture du contenu déjà public par
+    construction (voir get_forum_page_snapshot), MAIS restreinte aux utilisateurs connectés
+    (2026-07-26, demande directe d'Angelo, décision temporaire tant que les tests avec des comptes
+    bidon continuent — objectif : éviter qu'un vrai visiteur public tombe dessus pendant la phase
+    de test, réouverture prévue plus tard une fois la montée en charge stabilisée). POST +
+    session_token (pas GET public), même pattern que /activity/mine — _require_identity ne sert
+    qu'à vérifier la session, le contenu renvoyé est identique pour tout utilisateur connecté
+    (pas de filtre par identité, contrairement à get_my_activity)."""
+    _require_identity(req.session_token)
     return {"threads": get_forum_page_snapshot()}
 
 

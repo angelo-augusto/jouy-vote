@@ -227,7 +227,7 @@ const ROUTES = {
 // "Forum" volontairement ABSENT de cette liste : page publique en lecture (2026-07-26, priorité 1
 // développeur), consultable sans compte — seule "MonActivite" (données propres à l'utilisateur
 // connecté) nécessite une session, comme le reste des pages ci-dessous.
-const AUTH_REQUIRED = ['Vote', 'Assistant', 'Parrainer', 'Compte', 'MonActivite'];
+const AUTH_REQUIRED = ['Vote', 'Assistant', 'Parrainer', 'Compte', 'MonActivite', 'Forum'];
 
 function isLoggedIn() {
   return !!localStorage.getItem('session_token');
@@ -283,7 +283,6 @@ function renderNav() {
   if (!isLoggedIn()) {
     nav.innerHTML =
       '<a data-link href="/">🏠 Accueil</a>' +
-      '<a data-link href="/forum">Forum</a>' +
       '<a data-link href="/login">Connexion</a>';
     return;
   }
@@ -932,11 +931,12 @@ async function loadReferralStatus() {
 }
 // ---------- forum (lecture seule, parcourir sans passer par l'assistant, 2026-07-26) ----------
 async function loadForum() {
+  const session_token = localStorage.getItem('session_token');
   const el = document.getElementById('forumThreadsList');
+  if (!session_token) return;
   el.innerHTML = '<p class="info">Chargement…</p>';
   try {
-    const res = await fetch(API + '/forum/snapshot');
-    const data = await res.json();
+    const data = await api('/forum/snapshot', { session_token });
     el.innerHTML = '';
     if (data.threads.length === 0) {
       el.innerHTML = '<p class="info">Aucun fil de discussion pour le moment.</p>';

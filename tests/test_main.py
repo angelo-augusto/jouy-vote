@@ -2312,16 +2312,24 @@ def test_get_forum_page_snapshot_includes_reactions_on_opinions():
 
 
 @pytest.mark.anyio
-async def test_forum_snapshot_endpoint_public_no_auth(client):
-    """Lecture publique, aucun session_token requis — cohérent avec le fait que le contenu est
-    déjà public par construction (opinions/remarques publiées, visibles en conversation avec le
-    chatbot par n'importe qui)."""
+async def test_forum_snapshot_endpoint_requires_valid_session(client):
+    """Restriction temporaire (2026-07-26, demande directe d'Angelo : le contenu du forum est
+    public par construction, mais réservé aux utilisateurs connectés tant que les tests avec des
+    comptes bidon continuent — éviter qu'un vrai visiteur public tombe dessus pendant la phase de
+    test ; réouverture prévue plus tard). Même pattern que /activity/mine : POST + session_token,
+    401 sans session valide."""
+    resp = await client.post("/forum/snapshot", json={"session_token": "session-invalide"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_forum_snapshot_endpoint_returns_content_when_logged_in(client, logged_in_user):
     import main as main_module
 
     thread = main_module.create_thread("Fil pour endpoint /forum/snapshot")
     main_module.publish_thread(thread["thread_id"])
 
-    resp = await client.get("/forum/snapshot")
+    resp = await client.post("/forum/snapshot", json={"session_token": logged_in_user["session_token"]})
     assert resp.status_code == 200
     thread_ids = {t["thread_id"] for t in resp.json()["threads"]}
     assert thread["thread_id"] in thread_ids
