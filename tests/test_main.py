@@ -1847,6 +1847,18 @@ def test_parse_meeting_date_handles_text_extracted_format():
     assert main_module._parse_meeting_date("05 juin 2026") == date(2026, 6, 5)
 
 
+def test_parse_meeting_date_handles_iso_transcription_format():
+    """Bug réel #15 bis (2026-07-26) : le frontmatter date_seance des transcriptions manuelles
+    (index_transcriptions.py) est stocké tel quel au format ISO "2026-06-05" — sans ce cas, la
+    séance retombait sur date.min et se retrouvait en dernier du tri décroissant alors qu'elle
+    était la plus récente indexée (repéré en vérifiant la vraie réponse /chat/v2 en conditions
+    réelles : la séance du 5 juin apparaissait en fin de liste malgré le tri "décroissant")."""
+    import main as main_module
+    from datetime import date
+
+    assert main_module._parse_meeting_date("2026-06-05") == date(2026, 6, 5)
+
+
 def test_parse_meeting_date_handles_filename_fallback_format():
     """Format de repli produit par _parse_date_label dans index.py : "05/03/2025"."""
     import main as main_module

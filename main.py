@@ -1261,12 +1261,23 @@ _MOIS_FR = {
 
 
 def _parse_meeting_date(date_str: str | None) -> date | None:
-    """Parse les 2 formats produits par rag_conseil_municipal/index.py : "05 juin 2026" (date de
-    séance trouvée dans le texte du PV) ou "05/03/2025" (repli depuis le nom de fichier, voir
-    _parse_date_label). Renvoie None si non parsable — jamais d'exception."""
+    """Parse les 3 formats produits par rag_conseil_municipal/ : "05 juin 2026" (date de séance
+    trouvée dans le texte du PV, index.py), "05/03/2025" (repli depuis le nom de fichier, voir
+    _parse_date_label) ou "2026-06-05" (frontmatter date_seance ISO des transcriptions manuelles,
+    index_transcriptions.py — bug réel #15 bis, 2026-07-26 : ce 3e format n'était pas reconnu,
+    faisait retomber la séance sur date.min et l'envoyait en DERNIÈRE position du tri décroissant
+    alors que c'était justement la plus récente indexée). Renvoie None si non parsable — jamais
+    d'exception."""
     if not date_str:
         return None
     date_str = date_str.strip()
+    match = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})$", date_str)
+    if match:
+        year, month, day = match.groups()
+        try:
+            return date(int(year), int(month), int(day))
+        except ValueError:
+            return None
     match = re.match(r"(\d{1,2})(?:er)?\s+(\S+)\s+(\d{4})", date_str, re.IGNORECASE)
     if match:
         day, month_name, year = match.groups()
