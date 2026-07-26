@@ -2102,6 +2102,17 @@ def test_list_summaries_action_defaults_to_empty_list():
     assert chatbot_actions.list_summaries({}, {}) == {"summaries": []}
 
 
+def test_tools_description_instructs_spontaneous_list_summaries_at_conversation_start():
+    """Régression (2026-07-26, demande développeur) : le modèle n'appelait pas spontanément
+    list_summaries en début de conversation, répondant parfois "je n'ai rien en cours" alors que
+    des résumés pertinents existaient déjà — une nouvelle conversation signifie que LA MÉMOIRE DU
+    MODÈLE est vide, pas que l'utilisateur n'a rien en cours."""
+    import chatbot_actions
+
+    assert "EN DÉBUT DE CONVERSATION" in chatbot_actions.TOOLS_DESCRIPTION
+    assert "je n'ai rien en cours" in chatbot_actions.TOOLS_DESCRIPTION.lower()
+
+
 def test_list_threads_action_strips_opinions_from_ctx():
     """Forum phase 2 (2026-07-25) : list_threads ne renvoie que titre/résumé, jamais les opinions
     à l'intérieur — évite de charger tout le contenu du forum juste pour une vue d'ensemble."""
