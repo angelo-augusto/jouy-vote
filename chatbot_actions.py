@@ -528,6 +528,23 @@ def search_conseil_municipal(params: dict, ctx: dict) -> dict:
         return {"error": "recherche momentanément indisponible"}
 
 
+def list_conseil_municipal_seances(params: dict, ctx: dict) -> dict:
+    """Lecture seule (2026-07-26, bug réel #15) : liste des séances de conseil municipal
+    indexées, triées par date DÉCROISSANTE (la plus récente en premier). Utilise CETTE action —
+    jamais search_conseil_municipal — pour toute question sur la CHRONOLOGIE ou la RÉCENCE ("c'est
+    le dernier conseil ça ?", "combien de séances cette année", "liste les dernières réunions") :
+    search_conseil_municipal trouve du contenu par PERTINENCE SÉMANTIQUE au sujet de la question,
+    jamais par ordre chronologique — les deux notions sont complètement différentes, ne les
+    confonds jamais. Aucun paramètre."""
+    fn = ctx.get("list_conseil_municipal_fn")
+    if fn is None:
+        return {"error": "liste indisponible pour l'instant"}
+    try:
+        return {"meetings": fn()}
+    except Exception:
+        return {"error": "liste momentanément indisponible"}
+
+
 def propose_summary(params: dict, ctx: dict) -> dict:
     """Génère un résumé PRIVÉ proposé (brouillon, jamais sauvegardé ici — save_summary reste un
     endpoint backend/UI séparé, déclenché uniquement par un clic utilisateur explicite)."""
@@ -589,6 +606,7 @@ ACTIONS = {
     "list_wiki_pages": list_wiki_pages,
     "get_wiki_page": get_wiki_page,
     "search_conseil_municipal": search_conseil_municipal,
+    "list_conseil_municipal_seances": list_conseil_municipal_seances,
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -755,6 +773,12 @@ ACTIONS_JSON_SCHEMA = {
                             "query": {"type": "string"},
                         },
                         "required": ["action", "query"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"action": {"const": "list_conseil_municipal_seances"}},
+                        "required": ["action"],
                         "additionalProperties": False,
                     },
                 ]
@@ -932,6 +956,19 @@ qu'un brouillon détaillé mais inventé.
   clairement que tu n'as rien trouvé sur ce sujet précis plutôt que de répondre avec ce que tu
   crois savoir par ailleurs (l'index ne couvre QUE ce qui a été publié par la mairie sur le
   panneau d'affichage numérique, pas l'exhaustivité de la vie municipale).
+- list_conseil_municipal_seances() : liste des séances indexées triées par date DÉCROISSANTE (la
+  plus récente en premier), chacune avec "source_url" et "meeting_date". Aucun paramètre.
+
+  RÈGLE CRITIQUE (bug réel #15, 2026-07-26, capture développeur : "c'est le dernier conseil ça ?"
+  a reçu une réponse fondée sur search_conseil_municipal citant le 7 avril alors que la séance du
+  5 juin, déjà indexée, était plus récente) : search_conseil_municipal trouve du contenu par
+  PERTINENCE SÉMANTIQUE au SUJET de la question, JAMAIS par ordre chronologique — ce sont deux
+  notions complètement différentes, ne les confonds JAMAIS. Pour toute question sur la RÉCENCE ou
+  la CHRONOLOGIE ("c'est le dernier conseil ?", "quelle est la date de la prochaine/dernière
+  séance ?", "combien de conseils cette année ?", "liste les dernières réunions"), utilise
+  TOUJOURS list_conseil_municipal_seances à la place — jamais search_conseil_municipal, même si le
+  message contient aussi un sujet (dans ce cas, appelle les deux actions dans le même lot si
+  besoin : la 1re pour la date, la 2e pour le contenu).
 
 IMPORTANT sur ces 2 actions pseudo : même quand "available: true", cela signifie SEULEMENT que la
 proposition est libre et jugée appropriée, PAS qu'elle est attribuée. Rien n'est écrit tant que

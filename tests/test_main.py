@@ -818,7 +818,7 @@ def test_chatbot_actions_registry_excludes_commit_actions():
         "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
         "list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque",
         "report_bug", "request_admin_intervention", "list_wiki_pages", "get_wiki_page",
-        "search_conseil_municipal",
+        "search_conseil_municipal", "list_conseil_municipal_seances",
     }
     for forbidden in (
         "save_summary", "delete_summary", "confirm_publication", "confirm_pseudo",
@@ -1795,6 +1795,80 @@ def test_search_conseil_municipal_pv_degrades_gracefully_without_qdrant():
     import main as main_module
 
     assert main_module.search_conseil_municipal_pv("n'importe quelle question") == []
+
+
+def test_list_conseil_municipal_seances_action_calls_ctx_callable():
+    """Même pattern que search_conseil_municipal (2026-07-26, bug réel #15) : l'action délègue
+    intégralement à ctx["list_conseil_municipal_fn"], distincte de search_conseil_municipal_fn —
+    ne jamais confondre les deux callables."""
+    import chatbot_actions
+
+    fake_meetings = [
+        {"source_url": "https://jouy28.com/x.pdf", "meeting_date": "05 juin 2026"},
+        {"source_url": "https://jouy28.com/y.pdf", "meeting_date": "07 avril 2026"},
+    ]
+    result = chatbot_actions.list_conseil_municipal_seances({}, {"list_conseil_municipal_fn": lambda: fake_meetings})
+    assert result == {"meetings": fake_meetings}
+
+
+def test_list_conseil_municipal_seances_action_errors_when_callable_missing():
+    import chatbot_actions
+
+    result = chatbot_actions.list_conseil_municipal_seances({}, {})
+    assert "error" in result
+
+
+def test_list_conseil_municipal_seances_action_survives_exception_from_fn():
+    """Même défense en profondeur que search_conseil_municipal (famille du bug réel #13) : ne
+    jamais faire planter le tour si Qdrant est down."""
+    import chatbot_actions
+
+    def failing_fn():
+        raise RuntimeError("Qdrant indisponible")
+
+    result = chatbot_actions.list_conseil_municipal_seances({}, {"list_conseil_municipal_fn": failing_fn})
+    assert "error" in result
+
+
+def test_tools_description_documents_list_conseil_municipal_seances_with_recency_rule():
+    """Le prompt doit expliciter la règle anti-confusion (bug réel #15) : ne jamais utiliser
+    search_conseil_municipal pour une question de récence/chronologie."""
+    import chatbot_actions
+
+    assert "list_conseil_municipal_seances" in chatbot_actions.TOOLS_DESCRIPTION
+    assert "JAMAIS" in chatbot_actions.TOOLS_DESCRIPTION
+
+
+def test_parse_meeting_date_handles_text_extracted_format():
+    """Format produit par _extract_meeting_date dans index.py : "05 juin 2026"."""
+    import main as main_module
+    from datetime import date
+
+    assert main_module._parse_meeting_date("05 juin 2026") == date(2026, 6, 5)
+
+
+def test_parse_meeting_date_handles_filename_fallback_format():
+    """Format de repli produit par _parse_date_label dans index.py : "05/03/2025"."""
+    import main as main_module
+    from datetime import date
+
+    assert main_module._parse_meeting_date("05/03/2025") == date(2025, 3, 5)
+
+
+def test_parse_meeting_date_returns_none_for_unparsable_or_missing():
+    import main as main_module
+
+    assert main_module._parse_meeting_date(None) is None
+    assert main_module._parse_meeting_date("") is None
+    assert main_module._parse_meeting_date("n'importe quoi") is None
+
+
+def test_list_conseil_municipal_meetings_degrades_gracefully_without_qdrant():
+    """Même garde-fou que search_conseil_municipal_pv : le venv de test n'installe pas
+    qdrant-client volontairement, ce qui exerce réellement ce chemin de dégradation."""
+    import main as main_module
+
+    assert main_module.list_conseil_municipal_meetings() == []
 
 
 @pytest.mark.anyio

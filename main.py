@@ -6,11 +6,13 @@ l'anonymat du vote tout en gardant une vérification de résidence déclarative.
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
 import urllib.error
 import urllib.request
+from datetime import date
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -1251,6 +1253,71 @@ def search_conseil_municipal_pv(query: str, top_k: int = 5) -> list[dict]:
         return []
 
 
+_MOIS_FR = {
+    "janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6,
+    "juillet": 7, "août": 8, "aout": 8, "septembre": 9, "octobre": 10, "novembre": 11,
+    "décembre": 12, "decembre": 12,
+}
+
+
+def _parse_meeting_date(date_str: str | None) -> date | None:
+    """Parse les 2 formats produits par rag_conseil_municipal/index.py : "05 juin 2026" (date de
+    séance trouvée dans le texte du PV) ou "05/03/2025" (repli depuis le nom de fichier, voir
+    _parse_date_label). Renvoie None si non parsable — jamais d'exception."""
+    if not date_str:
+        return None
+    date_str = date_str.strip()
+    match = re.match(r"(\d{1,2})(?:er)?\s+(\S+)\s+(\d{4})", date_str, re.IGNORECASE)
+    if match:
+        day, month_name, year = match.groups()
+        month = _MOIS_FR.get(month_name.lower())
+        if month:
+            try:
+                return date(int(year), month, int(day))
+            except ValueError:
+                return None
+    match = re.match(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})", date_str)
+    if match:
+        day, month, year = match.groups()
+        try:
+            return date(int(year), int(month), int(day))
+        except ValueError:
+            return None
+    return None
+
+
+def list_conseil_municipal_meetings() -> list[dict]:
+    """Liste des séances de conseil municipal indexées, triées par date décroissante (RAG,
+    2026-07-26, bug réel #15 trouvé par Angelo : "c'est le dernier conseil ça ?" recevait une
+    réponse fondée sur search_conseil_municipal, qui trouve par PERTINENCE SÉMANTIQUE au sujet, pas
+    par RÉCENCE — deux notions différentes, jamais confondre "le contenu le plus proche de la
+    question" et "la séance la plus récente". Cette fonction ne fait AUCUNE recherche sémantique,
+    juste un tri chronologique — ne lève jamais, dégrade en liste vide."""
+    if not _QDRANT_AVAILABLE:
+        return []
+    try:
+        client = _get_qdrant_client()
+        if not client.collection_exists(CONSEIL_MUNICIPAL_COLLECTION):
+            return []
+        seen: dict[str, dict] = {}
+        offset = None
+        while True:
+            points, offset = client.scroll(
+                collection_name=CONSEIL_MUNICIPAL_COLLECTION, limit=200, offset=offset, with_payload=True
+            )
+            for p in points:
+                url = p.payload.get("source_url")
+                if url and url not in seen:
+                    seen[url] = {"source_url": url, "meeting_date": p.payload.get("meeting_date")}
+            if offset is None:
+                break
+        meetings = list(seen.values())
+        meetings.sort(key=lambda m: _parse_meeting_date(m["meeting_date"]) or date.min, reverse=True)
+        return meetings
+    except Exception:
+        return []
+
+
 def send_referral_invite_email(to_email: str, referrer_nom: str, invite_token: str) -> bool:
     """Envoie le lien d'inscription pré-approuvé au filleul. Le lien EST le déclencheur
     d'inscription (pas une validation a posteriori d'un compte déjà créé) : le filleul clique,
@@ -1627,6 +1694,9 @@ def chat_v2(req: ChatRequest):
         # d'office (contrairement à ctx["threads"], pas une simple lecture DB — appel réseau vers
         # Qdrant + calcul d'embedding, voir search_conseil_municipal_pv).
         "search_conseil_municipal_fn": search_conseil_municipal_pv,
+        # list_conseil_municipal_fn (2026-07-26, bug réel #15) : tri chronologique pur, distinct
+        # de la recherche sémantique — voir list_conseil_municipal_meetings.
+        "list_conseil_municipal_fn": list_conseil_municipal_meetings,
     }
     trace_requested = bool(req.admin_key) and req.admin_key == ADMIN_KEY
     result = run_turn(system_prompt, conversation_messages, ctx, trace=trace_requested)
