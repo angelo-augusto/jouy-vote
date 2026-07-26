@@ -47,13 +47,19 @@ services:
       - JOUY_PSEUDO_PEPPER=${JOUY_PSEUDO_PEPPER}
       - BREVO_API_KEY=${BREVO_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      # Instance Qdrant dédiée jouyvote (voir service "qdrant" ci-dessous), jamais celle partagée
+      # du projet RPG — résolue via le nom de service en DNS interne docker-compose.
+      - QDRANT_URL=http://qdrant:6333
     volumes:
       - /mnt/stockage/jouyvote/data:/data
     # La page d'accueil va chercher le contenu du wiki via le réseau Docker interne
     # (http://wiki:8080) — dégrade proprement si le wiki n'est pas encore prêt, mais autant
-    # attendre qu'il soit démarré avant de démarrer web.
+    # attendre qu'il soit démarré avant de démarrer web. Même logique pour qdrant (RAG conseil
+    # municipal) : dégrade proprement si l'index n'est pas prêt (voir rag_conseil_municipal.py),
+    # mais autant attendre qu'il soit démarré.
     depends_on:
       - wiki
+      - qdrant
     # Lié uniquement à l'interface loopback de l'hôte : le tunnel Cloudflare (cloudflared, hors
     # conteneur) s'y connecte en local, aucune exposition directe au réseau extérieur en dehors
     # du tunnel — c'est lui, pas ce port, qui doit être la seule porte d'entrée publique.
@@ -62,6 +68,26 @@ services:
     security_opt:
       - no-new-privileges:true
     read_only: false  # écriture de la base SQLite dans /data (volume dédié)
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: jouyvote-qdrant
+    # Instance DÉDIÉE et isolée à jouyvote (2026-07-26, RAG des comptes-rendus de conseil
+    # municipal) — jamais l'instance Qdrant partagée du projet RPG (localhost:6333, SANS
+    # authentification, collections angelo_memory/rpg_lore/character_images/object_images) :
+    # jouyvote-web est un conteneur PUBLIC/exposé (voir commentaire plus bas), lui donner un
+    # chemin réseau vers une instance partagée avec des données totalement différentes serait un
+    # risque disproportionné pour économiser un 2e process Qdrant. Point de vigilance soulevé
+    # avant implémentation et validé par le développeur (via angelobot).
+    # Aucun port exposé au host, volontairement : seuls les conteneurs du réseau docker-compose
+    # (web, opencode — pour l'indexation) y accèdent, via le nom de service "qdrant" en DNS
+    # interne. Le pipeline d'indexation (téléchargement/extraction/embedding) tourne dans
+    # opencode, jamais dans le conteneur de prod (voir rag_conseil_municipal/).
+    volumes:
+      - /mnt/stockage/jouyvote/qdrant:/qdrant/storage
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   wiki:
