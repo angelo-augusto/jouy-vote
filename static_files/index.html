@@ -1042,8 +1042,12 @@ function renderMyActivityOpinion(o) {
   const countsP = document.createElement('p');
   countsP.style.fontSize = '.85em';
   countsP.style.color = '#666';
+  // Forme nominale (adhésion/opposition/neutre) plutôt que verbale (adhèrent/s'opposent) :
+  // évite d'avoir à conjuguer correctement au singulier ET au pluriel pour 3 décomptes distincts.
   countsP.textContent =
-    c.adherer + ' adhèrent · ' + c.opposer + " s'opposent · " + c.neutre + ' neutres';
+    c.adherer + ' adhésion' + (c.adherer !== 1 ? 's' : '') + ' · ' +
+    c.opposer + ' opposition' + (c.opposer !== 1 ? 's' : '') + ' · ' +
+    c.neutre + ' neutre' + (c.neutre !== 1 ? 's' : '');
   block.appendChild(countsP);
   o.reactions.forEach(r => block.appendChild(renderMyActivityReaction(r)));
   return block;
