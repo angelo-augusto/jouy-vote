@@ -985,6 +985,19 @@ function renderForumOpinion(o) {
     em.textContent = o.argumentaire;
     div.appendChild(em);
   }
+  // Réactions (2026-07-26, oubli de spec initial corrigé : la page Forum n'affichait aucune
+  // réaction alors que Mon activité les affichait déjà) — même présentation que Mon activité.
+  if (o.reaction_counts) {
+    const c = o.reaction_counts;
+    const countsP = document.createElement('p');
+    countsP.style.cssText = 'margin:.5em 0 0; font-size:.85em; color:#666;';
+    countsP.textContent =
+      c.adherer + ' adhésion' + (c.adherer !== 1 ? 's' : '') + ' · ' +
+      c.opposer + ' opposition' + (c.opposer !== 1 ? 's' : '') + ' · ' +
+      c.neutre + ' neutre' + (c.neutre !== 1 ? 's' : '');
+    div.appendChild(countsP);
+    (o.reactions || []).forEach(r => div.appendChild(renderMyActivityReaction(r)));
+  }
   return div;
 }
 function renderForumRemarque(r) {

@@ -2035,6 +2035,36 @@ def test_get_forum_page_snapshot_includes_remarques_excludes_drafts():
     assert published_row["auteur"] == "Renard orange"
 
 
+def test_get_forum_page_snapshot_includes_reactions_on_opinions():
+    """Régression : oubli de spec initial signalé par Angelo (2026-07-26) — la page Forum
+    n'affichait aucune réaction sur les opinions (contrairement à Mon activité, qui les affichait
+    déjà). Chaque opinion du snapshot Forum doit maintenant porter le même reaction_counts/
+    reactions que get_my_activity (voir _get_opinion_reaction_summary, factorisé entre les 2)."""
+    import main as main_module
+
+    author_identity = "identity-forum-page-reactions-author"
+    reactor_identity = "identity-forum-page-reactions-reactor"
+    with main.db() as conn:
+        conn.execute(
+            "DELETE FROM pseudos WHERE debate_token IN (?, ?)",
+            (main_module.compute_debate_token(author_identity), main_module.compute_debate_token(reactor_identity)),
+        )
+    main_module.confirm_pseudo(reactor_identity, "Sittelle", "jaune")
+
+    thread = main_module.create_thread("Fil pour réactions page Forum")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], author_identity, "Une opinion à réactions")
+    main_module.publish_opinion(opinion["opinion_id"])
+    reaction = main_module.add_reaction(opinion["opinion_id"], reactor_identity, "opposer", "Pas convaincu")
+    main_module.publish_reaction(reaction["reaction_id"])
+
+    snapshot = main_module.get_forum_page_snapshot()
+    found_thread = next(t for t in snapshot if t["thread_id"] == thread["thread_id"])
+    found_opinion = next(o for o in found_thread["opinions"] if o["opinion_id"] == opinion["opinion_id"])
+    assert found_opinion["reaction_counts"] == {"adherer": 0, "opposer": 1, "neutre": 0}
+    assert found_opinion["reactions"] == [{"auteur": "Sittelle jaune", "stance": "opposer", "argumentaire": "Pas convaincu"}]
+
+
 @pytest.mark.anyio
 async def test_forum_snapshot_endpoint_public_no_auth(client):
     """Lecture publique, aucun session_token requis — cohérent avec le fait que le contenu est

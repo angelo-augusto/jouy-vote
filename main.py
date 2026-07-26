@@ -941,6 +941,37 @@ def get_public_forum_snapshot() -> list[dict]:
     return snapshot
 
 
+def _get_opinion_reaction_summary(conn: sqlite3.Connection, opinion_id: int) -> dict:
+    """Décompte adhérer/opposer/neutre + détail attribué par pseudo, pour UNE opinion — factorisé
+    car utilisé à la fois par get_forum_page_snapshot (2026-07-26, correction d'un oubli de spec :
+    la page Forum n'affichait aucune réaction, alors que Mon activité les affichait déjà) et
+    get_my_activity. Même règle que get_current_reaction : seule la réaction la plus RÉCENTE par
+    réacteur compte, jamais un doublon si quelqu'un a changé d'avis."""
+    reaction_rows = conn.execute(
+        """SELECT reactor_debate_token, stance, argumentaire, created_at
+           FROM opinion_reactions
+           WHERE opinion_id=? AND status='published'
+           ORDER BY created_at DESC, reaction_id DESC""",
+        (opinion_id,),
+    ).fetchall()
+    latest_by_reactor: dict[str, sqlite3.Row] = {}
+    for r in reaction_rows:
+        latest_by_reactor.setdefault(r["reactor_debate_token"], r)
+    counts = {"adherer": 0, "opposer": 0, "neutre": 0}
+    reactions = []
+    for reactor_token, r in latest_by_reactor.items():
+        counts[r["stance"]] += 1
+        pseudo_row = conn.execute(
+            "SELECT word, color FROM pseudos WHERE debate_token=?", (reactor_token,)
+        ).fetchone()
+        reactions.append({
+            "auteur": _agree_pseudo_display(pseudo_row["word"], pseudo_row["color"]) if pseudo_row else "auteur inconnu",
+            "stance": r["stance"],
+            "argumentaire": r["argumentaire"],
+        })
+    return {"reaction_counts": counts, "reactions": reactions}
+
+
 def get_forum_page_snapshot() -> list[dict]:
     """Page "Forum" (lecture seule, 2026-07-26, priorité 1 du développeur via angelobot) :
     parcourir les fils/opinions/remarques SANS passer par une conversation avec le chatbot — le
@@ -985,6 +1016,7 @@ def get_forum_page_snapshot() -> list[dict]:
                         "body": o["body"],
                         "argumentaire": o["argumentaire"],
                         "superseded_by_opinion_id": o["superseded_by_opinion_id"],
+                        **_get_opinion_reaction_summary(conn, o["opinion_id"]),
                     }
                     for o in opinion_rows
                 ],
@@ -1005,12 +1037,11 @@ def get_forum_page_snapshot() -> list[dict]:
 def get_my_activity(identity_token: str) -> dict:
     """Page "Mon activité" (lecture seule, 2026-07-26, priorité 1) : les opinions publiées ou
     désavouées de l'utilisateur connecté, chacune avec le décompte des réactions reçues
-    (adhérer/opposer/neutre) et le détail des réactions elles-mêmes. Décompte = même règle que
-    get_current_reaction (seule la réaction la plus RÉCENTE par réacteur compte, jamais un
-    doublon si quelqu'un a changé d'avis). Attribution par pseudo confirmée par le développeur
-    (via angelobot, 2026-07-26) : une réaction avec argumentaire est essentiellement une
-    mini-opinion, même modèle d'identité publique stable que le reste du forum — pas une
-    nouvelle frontière d'anonymat à inventer."""
+    (adhérer/opposer/neutre) et le détail des réactions elles-mêmes (voir
+    _get_opinion_reaction_summary). Attribution par pseudo confirmée par le développeur (via
+    angelobot, 2026-07-26) : une réaction avec argumentaire est essentiellement une mini-opinion,
+    même modèle d'identité publique stable que le reste du forum — pas une nouvelle frontière
+    d'anonymat à inventer."""
     debate_token = compute_debate_token(identity_token)
     with db() as conn:
         opinion_rows = conn.execute(
@@ -1022,31 +1053,8 @@ def get_my_activity(identity_token: str) -> dict:
                ORDER BY o.created_at DESC, o.opinion_id DESC""",
             (debate_token,),
         ).fetchall()
-        opinions = []
-        for o in opinion_rows:
-            reaction_rows = conn.execute(
-                """SELECT reactor_debate_token, stance, argumentaire, created_at
-                   FROM opinion_reactions
-                   WHERE opinion_id=? AND status='published'
-                   ORDER BY created_at DESC, reaction_id DESC""",
-                (o["opinion_id"],),
-            ).fetchall()
-            latest_by_reactor: dict[str, sqlite3.Row] = {}
-            for r in reaction_rows:
-                latest_by_reactor.setdefault(r["reactor_debate_token"], r)
-            counts = {"adherer": 0, "opposer": 0, "neutre": 0}
-            reactions = []
-            for reactor_token, r in latest_by_reactor.items():
-                counts[r["stance"]] += 1
-                pseudo_row = conn.execute(
-                    "SELECT word, color FROM pseudos WHERE debate_token=?", (reactor_token,)
-                ).fetchone()
-                reactions.append({
-                    "auteur": _agree_pseudo_display(pseudo_row["word"], pseudo_row["color"]) if pseudo_row else "auteur inconnu",
-                    "stance": r["stance"],
-                    "argumentaire": r["argumentaire"],
-                })
-            opinions.append({
+        opinions = [
+            {
                 "opinion_id": o["opinion_id"],
                 "thread_id": o["thread_id"],
                 "thread_title": o["thread_title"],
@@ -1054,9 +1062,10 @@ def get_my_activity(identity_token: str) -> dict:
                 "argumentaire": o["argumentaire"],
                 "status": o["status"],
                 "superseded_by_opinion_id": o["superseded_by_opinion_id"],
-                "reaction_counts": counts,
-                "reactions": reactions,
-            })
+                **_get_opinion_reaction_summary(conn, o["opinion_id"]),
+            }
+            for o in opinion_rows
+        ]
     return {"opinions": opinions}
 
 
