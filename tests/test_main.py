@@ -2713,6 +2713,67 @@ async def test_run_turn_forces_error_message_when_say_user_ignores_available_fal
 
 
 @pytest.mark.anyio
+async def test_run_turn_survives_exception_raised_by_action(mocked_openrouter_structured, monkeypatch):
+    """Régression bug réel #13 (2026-07-26, capture développeur : "L'assistant n'a pas pu répondre
+    correctement, réessaie." sur le flux résumé privé + confirmation de sujet) : la docstring de
+    run_turn promet de "n'échoue jamais par exception non capturée", mais aucun try/except
+    n'entourait l'appel direct à une fonction d'action — une exception (ex. get_wiki_page en
+    panne réseau) remontait telle quelle jusqu'à /chat/v2, provoquant un 500 brut côté client au
+    lieu d'un message structuré. Fix : chaque appel passe par _run_action, qui capture toute
+    exception et la transforme en résultat structuré {"available": False, "error": ...}."""
+    import json
+    import chatbot_executor
+
+    def boom(params, ctx):
+        raise RuntimeError("panne réseau simulée")
+
+    monkeypatch.setitem(chatbot_executor.ACTIONS, "list_threads", boom)
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({"actions": [{"action": "list_threads"}]}))
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "Voici les fils : {{résultat}}"}]}))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "quels fils existent ?"}], {},
+    )
+    assert result["error"] is None  # ne plante jamais tout le tour, même sur une exception
+    failed = [a for a in result["actions_log"] if a["action"] == "list_threads"][0]
+    assert failed["result"]["available"] is False
+    assert "problème technique" in failed["result"]["error"]
+    # le say_user suivant reflète l'échec réel, jamais une fausse promesse de succès
+    assert "problème technique" in result["replies"][0]
+
+
+@pytest.mark.anyio
+async def test_run_turn_peek_ahead_survives_exception_raised_by_action(mocked_openrouter_structured, monkeypatch):
+    """Même filet que le test précédent, mais sur le chemin de PEEK-AHEAD du bug #10 (exécution
+    anticipée de propose_pseudo_candidates/propose_custom_pseudo quand say_user les précède dans
+    le même lot) — ce 2e point d'appel avait le même trou avant le fix du bug #13."""
+    import json
+    import chatbot_executor
+
+    def boom(params, ctx):
+        raise RuntimeError("panne simulée")
+
+    monkeypatch.setitem(chatbot_executor.ACTIONS, "propose_pseudo_candidates", boom)
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "say_user", "text": "Que penses-tu de {{résultat}} ?"},
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+        ]
+    }))
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "Ok, notée."}]}))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "propose"}], {"taken_pseudos": set()},
+    )
+    assert result["error"] is None
+    assert "{{résultat}}" not in result["replies"][0]
+
+
+@pytest.mark.anyio
 async def test_run_turn_rejects_unregistered_action_without_executing_it(mocked_openrouter_structured):
     """Même si un JSON malformé/hostile contenait une action de commit, elle est ignorée — le
     dispatch ne connaît que ACTIONS.get(), jamais d'exécution par nom arbitraire."""

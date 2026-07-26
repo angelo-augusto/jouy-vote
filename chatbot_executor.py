@@ -112,6 +112,25 @@ def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     return text.replace("{{résultat}}", value)
 
 
+# Bug réel #13 (2026-07-26, capture développeur : "L'assistant n'a pas pu répondre
+# correctement, réessaie." sur le flux résumé privé + confirmation de sujet) : la docstring de
+# run_turn promet de "n'échoue jamais par exception non capturée", mais aucun try/except
+# n'entourait l'appel à une fonction d'action (fn(cmd, ctx), et son écho au peek-ahead du bug
+# #10) — une exception y remontait telle quelle jusqu'à /chat/v2, donc un 500 brut côté client au
+# lieu d'un message structuré. Pas propre à un scénario précis : toute action avec un effet
+# externe (get_wiki_page, report_bug, request_admin_intervention — réseau/email) peut lever à tout
+# moment. Fix : centraliser l'appel dans _run_action, qui capture toute exception et la transforme
+# en résultat structuré {"available": False, "error": ...} — exploitable tel quel par le mécanisme
+# existant du bug #12 (available=False forcé dans le texte du say_user suivant) au lieu de faire
+# planter tout le tour.
+def _run_action(fn, action: str, cmd: dict, ctx: dict) -> dict:
+    try:
+        return fn(cmd, ctx)
+    except Exception:
+        log.exception("Exception non capturée dans l'action %s", action)
+        return {"available": False, "error": "cette action a rencontré un problème technique, réessaie."}
+
+
 def _turn_result(replies: list, actions_log: list, error: str | None, trace_log: list | None) -> dict:
     result = {"replies": replies, "actions_log": actions_log, "error": error}
     if trace_log is not None:
@@ -213,10 +232,11 @@ def run_turn(
                     # un peu plus bas, produira le même résultat et ira dans actions_log comme
                     # d'habitude.
                     for next_cmd in actions[cmd_index + 1:]:
-                        if next_cmd.get("action") in ("propose_pseudo_candidates", "propose_custom_pseudo"):
-                            peek_fn = ACTIONS.get(next_cmd.get("action"))
+                        next_action = next_cmd.get("action")
+                        if next_action in ("propose_pseudo_candidates", "propose_custom_pseudo"):
+                            peek_fn = ACTIONS.get(next_action)
                             if peek_fn is not None:
-                                effective_result = peek_fn(next_cmd, ctx)
+                                effective_result = _run_action(peek_fn, next_action, next_cmd, ctx)
                             break
                 text = _substitute_placeholder(cmd.get("text", ""), effective_result)
                 fallback = _render_result_value(effective_result) if effective_result else ""
@@ -270,7 +290,7 @@ def run_turn(
                 actions_log.append({"action": action, "text": text})
                 previous_result = None
             else:
-                result = fn(cmd, ctx)
+                result = _run_action(fn, action, cmd, ctx)
                 actions_log.append({"action": action, "result": result})
                 previous_result = result
 
