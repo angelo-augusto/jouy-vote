@@ -13,6 +13,7 @@ puisque c'est justement la boucle interne (pas le choix d'action) qu'on veut pou
 from __future__ import annotations
 
 import os
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -152,6 +153,11 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
         taken_pseudos = set()
 
     context_block = "" if has_pseudo else ONBOARDING_NEW_USER_CONTEXT_BLOCK
+    # Date du jour (2026-07-26) : dupliqué ici plutôt qu'importé de main.current_date_block() —
+    # importer main.py chargerait ses effets de bord au niveau module (ex: ADMIN_KEY qui lève si
+    # absent), justement ce que ce serveur MCP évite volontairement (voir docstring du fichier).
+    _test_date_block = f"Nous sommes le {time.strftime('%Y-%m-%d')}."
+    context_block = f"{_test_date_block}\n\n{context_block}".strip() if context_block else _test_date_block
     system_prompt = build_system_prompt(BASE_PROMPT, context_block=context_block)
     conversation_messages = list(history) + [{"role": "user", "content": user_message}]
     test_debate_token = compute_debate_token(_TEST_IDENTITY_TOKEN)

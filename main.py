@@ -12,7 +12,8 @@ import sqlite3
 import time
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -1699,6 +1700,24 @@ def chat(req: ChatRequest):
     return {"reply": reply}
 
 
+_JOURS_NOMS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+_MOIS_NOMS = [
+    "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+]
+
+
+def current_date_block() -> str:
+    """Bloc de contexte "date du jour" (2026-07-26, manque trouvé par Angelo en réel : "tu sais
+    quel jour on est ?" -> "je n'ai pas accès à l'heure actuelle"). Toujours injecté dans le
+    system prompt de /chat/v2, jamais laissé au modèle à déduire. Heure de Paris (pas UTC brut,
+    l'utilisateur est en France) — fonction pure, testable indépendamment de la requête HTTP."""
+    now = datetime.now(ZoneInfo("Europe/Paris"))
+    jour_semaine = _JOURS_NOMS[now.weekday()]
+    mois = _MOIS_NOMS[now.month - 1]
+    return f"Nous sommes le {jour_semaine} {now.day} {mois} {now.year} ({now.strftime('%Y-%m-%d')})."
+
+
 @app.post("/chat/v2")
 def chat_v2(req: ChatRequest):
     """POC tool-calling (mandat angelobot 2026-07-25, voir wiki.jouyvote.fr/themes:prompt-chatbot).
@@ -1712,6 +1731,11 @@ def chat_v2(req: ChatRequest):
     # Bloc actif tant qu'aucun pseudo n'est confirmé — sur autant de tours que nécessaire (pas de
     # education_state pour cette passe, donc pas de suivi plus fin que ce signal binaire).
     context_block = "" if existing_pseudo else ONBOARDING_NEW_USER_CONTEXT_BLOCK
+    # Date du jour (2026-07-26, manque trouvé par Angelo en réel : "tu sais quel jour on est ?" ->
+    # "je n'ai pas accès à l'heure actuelle") — toujours injectée, indépendamment de l'onboarding,
+    # utile aussi pour raisonner sur list_conseil_municipal_seances ("y a-t-il eu un conseil
+    # depuis juin ?").
+    context_block = f"{current_date_block()}\n\n{context_block}".strip() if context_block else current_date_block()
     system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block)
     conversation_messages = [{"role": m.role, "content": m.content} for m in req.history[-20:]]
     conversation_messages.append({"role": "user", "content": req.message})

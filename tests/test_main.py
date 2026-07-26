@@ -1952,6 +1952,35 @@ def test_get_conseil_municipal_document_pv_degrades_gracefully_without_qdrant():
     assert main_module.get_conseil_municipal_document_pv("https://jouy28.com/x.pdf") is None
 
 
+def test_current_date_block_contains_iso_date():
+    """Manque trouvé par Angelo en réel (2026-07-26) : "tu sais quel jour on est ?" ->
+    "je n'ai pas accès à l'heure actuelle". Fonction pure, testable sans requête HTTP — vérifie
+    juste la présence du format ISO exploitable, pas la formulation exacte en français."""
+    import main as main_module
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    block = main_module.current_date_block()
+    today_iso = datetime.now(ZoneInfo("Europe/Paris")).strftime("%Y-%m-%d")
+    assert today_iso in block
+
+
+@pytest.mark.anyio
+async def test_chat_v2_injects_current_date_in_system_prompt(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    captured = {}
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+        captured["system_prompt"] = system_prompt
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "quel jour sommes-nous ?"})
+
+    assert main_module.current_date_block() in captured["system_prompt"]
+
+
 @pytest.mark.anyio
 async def test_chat_v2_passes_wiki_index_and_callable_in_ctx(client, logged_in_user, monkeypatch):
     import main as main_module
