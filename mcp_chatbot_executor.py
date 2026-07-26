@@ -16,18 +16,19 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-from chatbot_actions import ONBOARDING_NEW_USER_CONTEXT_BLOCK, compute_debate_token, compute_vote_token, derive_pseudo
+from chatbot_actions import (
+    CHAT_SYSTEM_PROMPT, ONBOARDING_NEW_USER_CONTEXT_BLOCK, compute_debate_token, compute_vote_token,
+    derive_pseudo,
+)
 from chatbot_executor import build_system_prompt, run_turn
 
 mcp = FastMCP("jouyvote-chatbot-executor")
 
-BASE_PROMPT = (
-    "Tu es l'assistant citoyen de Jouy Vote Citoyen, un outil de démocratie participative locale "
-    "pour les habitants de Jouy (28). Tu aides les joviens à formuler clairement une opinion ou "
-    "une doléance, sans jamais trahir le sens de ce qu'ils veulent dire. Tu ne dois JAMAIS "
-    "affirmer avoir enregistré, sauvegardé ou publié quoi que ce soit sans que ce soit réellement "
-    "arrivé. Reste bref, concret, et dans le sujet de la vie municipale de Jouy."
-)
+# Réutilise LE MÊME socle que la vraie prod (main.py) — plus de copie dupliquée à la main (2026-07-26,
+# root cause d'un comportement observé différent de la prod pendant un test angelobot : l'ancienne
+# copie n'avait jamais été mise à jour avec les règles anonymat/modération/iconifiable ajoutées la
+# veille à CHAT_SYSTEM_PROMPT). Toujours importer, jamais recopier une constante de prompt.
+BASE_PROMPT = CHAT_SYSTEM_PROMPT
 
 # Identité de test fixe (pas de vraie base de données ici) : le POC MCP sert à observer le
 # comportement de la boucle d'actions, pas à rejouer de vraies données citoyennes.
@@ -37,14 +38,48 @@ _TEST_IDENTITY_TOKEN = "test-identity-token-mcp-debug"
 _TEST_SUMMARIES = [
     {"id": 1, "summary": "J'ai signalé un trottoir dangereux rue de la Mairie.", "created_at": "2026-07-20T10:00:00"},
 ]
+# Fils de test fixes (2026-07-26, ajouté avec le fix de désynchronisation ci-dessus) — sans cette
+# clé, list_threads/get_thread/propose_opinion voyaient toujours ctx["threads"]==[] et le modèle
+# concluait à tort qu'aucun forum n'existait, révélant un comportement différent de la vraie prod.
+_TEST_THREADS = [
+    {
+        "thread_id": 1,
+        "title": "Faut-il plus de pistes cyclables à Jouy ?",
+        "summary": None,
+        "opinions": [
+            {
+                "opinion_id": 1, "auteur": "Renard bleu",
+                "body": "Il faut plus de pistes cyclables, la route principale est dangereuse à vélo.",
+                "argumentaire": None, "superseded_by_opinion_id": None,
+            },
+        ],
+    },
+]
+
+
+def _mock_report_bug_fn(description: str) -> dict:
+    """JAMAIS de vrai envoi email pendant un test MCP (2026-07-26) — évite de spammer
+    ADMIN_BUG_EMAIL à chaque essai d'angelobot. Juste une trace locale."""
+    print(f"[MCP TEST — jamais envoyé] report_bug: {description}")
+    return {"sent": False, "note": "envoi désactivé en mode test MCP"}
+
+
+def _mock_request_admin_intervention_fn(description: str) -> dict:
+    """Même garde-fou que _mock_report_bug_fn."""
+    print(f"[MCP TEST — jamais envoyé] request_admin_intervention: {description}")
+    return {"sent": False, "note": "envoi désactivé en mode test MCP"}
 
 
 @mcp.tool()
 def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool = False, taken_pseudos_json: str = "[]") -> dict:
-    """Exécute un tour complet de la boucle d'actions du chatbot jouyvote (say_user/
-    get_vote_token/propose_summary/list_summaries/propose_pseudo_candidates/
-    propose_custom_pseudo/get_or_assign_pseudo) avec une identité de test fixe, et retourne les
-    répliques produites + le détail de chaque action exécutée.
+    """Exécute un tour complet de la boucle d'actions du chatbot jouyvote (say_user/get_vote_token/
+    propose_summary/list_summaries/get_or_assign_pseudo/propose_pseudo_candidates/
+    propose_custom_pseudo/list_threads/get_thread/propose_opinion/propose_reaction/
+    propose_remarque/report_bug/request_admin_intervention — TOUJOURS la vraie liste actuelle de
+    chatbot_actions.ACTIONS, celle-ci est juste une note pour toi, pas une limite en dur) avec une
+    identité de test fixe, et retourne les répliques produites + le détail de chaque action
+    exécutée. report_bug/request_admin_intervention sont mockées ici (jamais de vrai envoi email
+    pendant un test, voir _mock_report_bug_fn).
 
     Args:
         user_message: le message envoyé par l'utilisateur de test.
@@ -79,6 +114,9 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
         "summaries": _TEST_SUMMARIES,
         "pseudo": derive_pseudo(test_debate_token) if has_pseudo else None,
         "taken_pseudos": taken_pseudos,
+        "threads": _TEST_THREADS,
+        "report_bug_fn": _mock_report_bug_fn,
+        "request_admin_intervention_fn": _mock_request_admin_intervention_fn,
     }
     result = run_turn(system_prompt, conversation_messages, ctx)
     result["_test_vote_token"] = compute_vote_token(_TEST_IDENTITY_TOKEN)

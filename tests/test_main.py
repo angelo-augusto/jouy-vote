@@ -1737,6 +1737,45 @@ async def test_opinion_confirm_endpoint_rejects_both_thread_id_and_new_thread_ti
     assert resp.status_code == 400
 
 
+def test_mcp_chatbot_executor_shares_same_system_prompt_as_prod():
+    """Régression (2026-07-26, signalé par angelobot) : mcp_chatbot_executor.py (outil de test
+    utilisé par angelobot) avait son propre BASE_PROMPT dupliqué à la main, jamais mis à jour avec
+    les règles anonymat/modération/iconifiable ajoutées la veille — comportement de test différent
+    de la vraie prod sans que personne ne s'en aperçoive avant qu'angelobot ne le remarque. Fix :
+    import partagé (chatbot_actions.CHAT_SYSTEM_PROMPT), plus de copie possible. Ce test verrouille
+    l'IDENTITÉ (pas juste la ressemblance) pour qu'une future dérive soit détectée immédiatement."""
+    import chatbot_actions
+    import main as main_module
+    import mcp_chatbot_executor
+
+    assert mcp_chatbot_executor.BASE_PROMPT is chatbot_actions.CHAT_SYSTEM_PROMPT
+    assert main_module.CHAT_SYSTEM_PROMPT is chatbot_actions.CHAT_SYSTEM_PROMPT
+
+
+def test_mcp_chatbot_executor_ctx_includes_forum_threads_fixture():
+    """Régression connexe (2026-07-26) : ctx ne contenait pas la clé "threads" du tout — list_threads/
+    get_thread/propose_opinion voyaient toujours une liste vide dans les tests d'angelobot, un
+    comportement structurellement différent de la vraie prod (qui a toujours un snapshot réel, même
+    vide) plutôt qu'une clé absente."""
+    import mcp_chatbot_executor
+
+    assert isinstance(mcp_chatbot_executor._TEST_THREADS, list)
+    assert len(mcp_chatbot_executor._TEST_THREADS) > 0
+    assert "thread_id" in mcp_chatbot_executor._TEST_THREADS[0]
+
+
+def test_mcp_chatbot_executor_report_bug_never_sends_real_email():
+    """Régression connexe (2026-07-26) : les callables report_bug_fn/request_admin_intervention_fn
+    du mode test MCP ne doivent JAMAIS déclencher un vrai envoi Brevo, pour ne pas spammer
+    ADMIN_BUG_EMAIL à chaque essai d'angelobot."""
+    import mcp_chatbot_executor
+
+    result = mcp_chatbot_executor._mock_report_bug_fn("test")
+    assert result["sent"] is False
+    result2 = mcp_chatbot_executor._mock_request_admin_intervention_fn("test")
+    assert result2["sent"] is False
+
+
 def test_tools_description_lists_actual_palette_no_stale_count():
     """Régression (2026-07-25, via angelobot) : TOOLS_DESCRIPTION disait "parmi les 8" en dur,
     devenu faux dès l'ajout de "gris" (9e couleur) — pire, le modèle n'avait jamais la liste
