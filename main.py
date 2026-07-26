@@ -489,6 +489,10 @@ class RemarqueConfirmRequest(BaseModel):
     reply_to_opinion_id: int | None = None
 
 
+class ActivityMineRequest(BaseModel):
+    session_token: str
+
+
 class ChatSummariesRequest(BaseModel):
     session_token: str
 
@@ -935,6 +939,125 @@ def get_public_forum_snapshot() -> list[dict]:
                 ],
             })
     return snapshot
+
+
+def get_forum_page_snapshot() -> list[dict]:
+    """Page "Forum" (lecture seule, 2026-07-26, priorité 1 du développeur via angelobot) :
+    parcourir les fils/opinions/remarques SANS passer par une conversation avec le chatbot — le
+    chatbot reste le SEUL moyen de PUBLIER, cette fonction ne fait que lire ce qui existe déjà.
+    Volontairement SÉPARÉE de get_public_forum_snapshot (qui alimente ctx["threads"] pour
+    list_threads/get_thread côté LLM) plutôt que de l'étendre : le ctx du chatbot reste allégé par
+    conception (pas de remarques, jamais eu besoin d'y toucher), alors que cette page humaine
+    affiche la vue complète. Même filtre status='published' partout — jamais un brouillon, le
+    sien ou celui d'un autre."""
+    with db() as conn:
+        threads = conn.execute(
+            "SELECT thread_id, title, summary FROM threads WHERE status='published' ORDER BY thread_id"
+        ).fetchall()
+        snapshot = []
+        for t in threads:
+            opinion_rows = conn.execute(
+                """SELECT o.opinion_id, o.body, o.argumentaire, o.superseded_by_opinion_id,
+                          p.word, p.color
+                   FROM opinions o
+                   LEFT JOIN pseudos p ON p.debate_token = o.author_debate_token
+                   WHERE o.thread_id=? AND o.status='published'
+                   ORDER BY o.opinion_id""",
+                (t["thread_id"],),
+            ).fetchall()
+            remarque_rows = conn.execute(
+                """SELECT r.remarque_id, r.body, r.reply_to_remarque_id, r.reply_to_opinion_id,
+                          p.word, p.color
+                   FROM thread_remarques r
+                   LEFT JOIN pseudos p ON p.debate_token = r.author_debate_token
+                   WHERE r.thread_id=? AND r.status='published'
+                   ORDER BY r.remarque_id""",
+                (t["thread_id"],),
+            ).fetchall()
+            snapshot.append({
+                "thread_id": t["thread_id"],
+                "title": t["title"],
+                "summary": t["summary"],
+                "opinions": [
+                    {
+                        "opinion_id": o["opinion_id"],
+                        "auteur": _agree_pseudo_display(o["word"], o["color"]) if o["word"] else "auteur inconnu",
+                        "body": o["body"],
+                        "argumentaire": o["argumentaire"],
+                        "superseded_by_opinion_id": o["superseded_by_opinion_id"],
+                    }
+                    for o in opinion_rows
+                ],
+                "remarques": [
+                    {
+                        "remarque_id": r["remarque_id"],
+                        "auteur": _agree_pseudo_display(r["word"], r["color"]) if r["word"] else "auteur inconnu",
+                        "body": r["body"],
+                        "reply_to_remarque_id": r["reply_to_remarque_id"],
+                        "reply_to_opinion_id": r["reply_to_opinion_id"],
+                    }
+                    for r in remarque_rows
+                ],
+            })
+    return snapshot
+
+
+def get_my_activity(identity_token: str) -> dict:
+    """Page "Mon activité" (lecture seule, 2026-07-26, priorité 1) : les opinions publiées ou
+    désavouées de l'utilisateur connecté, chacune avec le décompte des réactions reçues
+    (adhérer/opposer/neutre) et le détail des réactions elles-mêmes. Décompte = même règle que
+    get_current_reaction (seule la réaction la plus RÉCENTE par réacteur compte, jamais un
+    doublon si quelqu'un a changé d'avis). Attribution par pseudo confirmée par le développeur
+    (via angelobot, 2026-07-26) : une réaction avec argumentaire est essentiellement une
+    mini-opinion, même modèle d'identité publique stable que le reste du forum — pas une
+    nouvelle frontière d'anonymat à inventer."""
+    debate_token = compute_debate_token(identity_token)
+    with db() as conn:
+        opinion_rows = conn.execute(
+            """SELECT o.opinion_id, o.thread_id, o.body, o.argumentaire, o.status,
+                      o.superseded_by_opinion_id, o.created_at, t.title AS thread_title
+               FROM opinions o
+               JOIN threads t ON t.thread_id = o.thread_id
+               WHERE o.author_debate_token=? AND o.status IN ('published', 'disavowed')
+               ORDER BY o.created_at DESC, o.opinion_id DESC""",
+            (debate_token,),
+        ).fetchall()
+        opinions = []
+        for o in opinion_rows:
+            reaction_rows = conn.execute(
+                """SELECT reactor_debate_token, stance, argumentaire, created_at
+                   FROM opinion_reactions
+                   WHERE opinion_id=? AND status='published'
+                   ORDER BY created_at DESC, reaction_id DESC""",
+                (o["opinion_id"],),
+            ).fetchall()
+            latest_by_reactor: dict[str, sqlite3.Row] = {}
+            for r in reaction_rows:
+                latest_by_reactor.setdefault(r["reactor_debate_token"], r)
+            counts = {"adherer": 0, "opposer": 0, "neutre": 0}
+            reactions = []
+            for reactor_token, r in latest_by_reactor.items():
+                counts[r["stance"]] += 1
+                pseudo_row = conn.execute(
+                    "SELECT word, color FROM pseudos WHERE debate_token=?", (reactor_token,)
+                ).fetchone()
+                reactions.append({
+                    "auteur": _agree_pseudo_display(pseudo_row["word"], pseudo_row["color"]) if pseudo_row else "auteur inconnu",
+                    "stance": r["stance"],
+                    "argumentaire": r["argumentaire"],
+                })
+            opinions.append({
+                "opinion_id": o["opinion_id"],
+                "thread_id": o["thread_id"],
+                "thread_title": o["thread_title"],
+                "body": o["body"],
+                "argumentaire": o["argumentaire"],
+                "status": o["status"],
+                "superseded_by_opinion_id": o["superseded_by_opinion_id"],
+                "reaction_counts": counts,
+                "reactions": reactions,
+            })
+    return {"opinions": opinions}
 
 
 def send_reset_email(to_email: str, reset_token: str) -> bool:
@@ -1510,6 +1633,25 @@ def remarque_confirm(req: RemarqueConfirmRequest):
         return publish_remarque(remarque["remarque_id"])
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/forum/snapshot")
+def forum_snapshot():
+    """Page "Forum" (2026-07-26, priorité 1 du développeur) : lecture publique, aucune
+    authentification requise — parcourir les fils/opinions/remarques sans passer par le chatbot.
+    GET plutôt que POST (contrairement aux autres lectures de ce fichier qui portent un
+    session_token) : rien à identifier ici, le contenu est déjà public par construction (voir
+    get_forum_page_snapshot)."""
+    return {"threads": get_forum_page_snapshot()}
+
+
+@app.post("/activity/mine")
+def activity_mine(req: ActivityMineRequest):
+    """Page "Mon activité" (2026-07-26, priorité 1) : lecture authentifiée, réservée à
+    l'utilisateur connecté sur SES propres opinions (voir get_my_activity — filtre déjà sur son
+    propre debate_token, jamais un paramètre arbitraire côté client)."""
+    identity_token = _require_identity(req.session_token)
+    return get_my_activity(identity_token)
 
 
 @app.post("/chat/summarize")

@@ -2006,6 +2006,127 @@ def test_get_public_forum_snapshot_excludes_drafts_and_shows_author_pseudo():
     assert published_row["auteur"] == "Clairière verte"  # pseudo accordé, jamais l'identité réelle
 
 
+def test_get_forum_page_snapshot_includes_remarques_excludes_drafts():
+    """Page "Forum" (2026-07-26) : contrairement à get_public_forum_snapshot (ctx du chatbot,
+    volontairement allégé), la page humaine inclut aussi les remarques publiées de chaque fil,
+    avec le même filtre 'jamais un brouillon' et la même attribution par pseudo que les
+    opinions."""
+    import main as main_module
+
+    author_identity = "identity-forum-page-author"
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(author_identity),))
+    main_module.confirm_pseudo(author_identity, "Renard", "orange")
+
+    thread = main_module.create_thread("Fil pour page Forum")
+    main_module.publish_thread(thread["thread_id"])
+
+    published_remarque = main_module.create_remarque(thread["thread_id"], author_identity, "Une remarque publiée")
+    main_module.publish_remarque(published_remarque["remarque_id"])
+    draft_remarque = main_module.create_remarque(thread["thread_id"], author_identity, "Une remarque restée brouillon")
+
+    snapshot = main_module.get_forum_page_snapshot()
+    found = next(t for t in snapshot if t["thread_id"] == thread["thread_id"])
+    remarque_ids = {r["remarque_id"] for r in found["remarques"]}
+    assert published_remarque["remarque_id"] in remarque_ids
+    assert draft_remarque["remarque_id"] not in remarque_ids  # brouillon jamais exposé
+
+    published_row = next(r for r in found["remarques"] if r["remarque_id"] == published_remarque["remarque_id"])
+    assert published_row["auteur"] == "Renard orange"
+
+
+@pytest.mark.anyio
+async def test_forum_snapshot_endpoint_public_no_auth(client):
+    """Lecture publique, aucun session_token requis — cohérent avec le fait que le contenu est
+    déjà public par construction (opinions/remarques publiées, visibles en conversation avec le
+    chatbot par n'importe qui)."""
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour endpoint /forum/snapshot")
+    main_module.publish_thread(thread["thread_id"])
+
+    resp = await client.get("/forum/snapshot")
+    assert resp.status_code == 200
+    thread_ids = {t["thread_id"] for t in resp.json()["threads"]}
+    assert thread["thread_id"] in thread_ids
+
+
+def test_get_my_activity_counts_only_latest_reaction_per_reactor():
+    """Page "Mon activité" (2026-07-26) : le décompte adhérer/opposer/neutre ne compte QUE la
+    réaction la plus récente par réacteur (même règle que get_current_reaction) — si quelqu'un
+    change d'avis (opposer puis adherer), une seule réaction doit compter au final, jamais les
+    deux. Attribution par pseudo confirmée par le développeur (2026-07-26, via angelobot)."""
+    import main as main_module
+
+    author_identity = "identity-activity-author"
+    reactor_identity = "identity-activity-reactor-flipflop"
+    with main.db() as conn:
+        conn.execute(
+            "DELETE FROM pseudos WHERE debate_token IN (?, ?)",
+            (main_module.compute_debate_token(author_identity), main_module.compute_debate_token(reactor_identity)),
+        )
+    main_module.confirm_pseudo(reactor_identity, "Hibou", "bleu")
+
+    thread = main_module.create_thread("Fil pour Mon activité")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], author_identity, "Mon opinion", "Mon argumentaire")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    r1 = main_module.add_reaction(opinion["opinion_id"], reactor_identity, "opposer", "D'abord contre")
+    main_module.publish_reaction(r1["reaction_id"])
+    r2 = main_module.add_reaction(opinion["opinion_id"], reactor_identity, "adherer", "Finalement pour")
+    main_module.publish_reaction(r2["reaction_id"])
+
+    activity = main_module.get_my_activity(author_identity)
+    found = next(o for o in activity["opinions"] if o["opinion_id"] == opinion["opinion_id"])
+    assert found["reaction_counts"] == {"adherer": 1, "opposer": 0, "neutre": 0}
+    assert len(found["reactions"]) == 1
+    assert found["reactions"][0]["auteur"] == "Hibou bleu"
+    assert found["reactions"][0]["argumentaire"] == "Finalement pour"
+
+
+def test_get_my_activity_excludes_other_users_opinions():
+    """Page "Mon activité" ne renvoie que les opinions de l'utilisateur connecté, jamais celles
+    d'un autre — filtrées sur son propre debate_token, jamais un paramètre arbitraire."""
+    import main as main_module
+
+    me = "identity-activity-me"
+    someone_else = "identity-activity-someone-else"
+
+    thread = main_module.create_thread("Fil pour exclusion Mon activité")
+    main_module.publish_thread(thread["thread_id"])
+    my_opinion = main_module.create_opinion(thread["thread_id"], me, "Mon avis à moi")
+    main_module.publish_opinion(my_opinion["opinion_id"])
+    other_opinion = main_module.create_opinion(thread["thread_id"], someone_else, "L'avis de quelqu'un d'autre")
+    main_module.publish_opinion(other_opinion["opinion_id"])
+
+    activity = main_module.get_my_activity(me)
+    opinion_ids = {o["opinion_id"] for o in activity["opinions"]}
+    assert my_opinion["opinion_id"] in opinion_ids
+    assert other_opinion["opinion_id"] not in opinion_ids
+
+
+@pytest.mark.anyio
+async def test_activity_mine_endpoint_requires_valid_session(client):
+    resp = await client.post("/activity/mine", json={"session_token": "session-invalide"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_activity_mine_endpoint_returns_own_opinions(client, logged_in_user):
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour endpoint /activity/mine")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], logged_in_user["token"], "Mon opinion via endpoint")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    resp = await client.post("/activity/mine", json={"session_token": logged_in_user["session_token"]})
+    assert resp.status_code == 200
+    opinion_ids = {o["opinion_id"] for o in resp.json()["opinions"]}
+    assert opinion["opinion_id"] in opinion_ids
+
+
 @pytest.mark.anyio
 async def test_chat_v2_passes_public_threads_snapshot_in_ctx(client, logged_in_user, monkeypatch):
     import main as main_module

@@ -156,6 +156,20 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <div id="referralInvitesList"></div>
 </div>
 
+<div class="card hidden" id="pageForum">
+  <h2>💬 Forum</h2>
+  <p class="info">Parcourez les fils de discussion sans passer par l'assistant — pour publier une opinion, une réaction ou une remarque, la conversation avec l'assistant reste le seul chemin.</p>
+  <div id="forumMsg" class="msg"></div>
+  <div id="forumThreadsList"><p class="info">Chargement…</p></div>
+</div>
+
+<div class="card hidden" id="pageMonActivite">
+  <h2>📋 Mon activité</h2>
+  <p class="info">Tout ce que vous avez publié sur le Forum, et comment les autres joviens y ont réagi.</p>
+  <div id="activiteMsg" class="msg"></div>
+  <div id="activiteList"><p class="info">Chargement…</p></div>
+</div>
+
 <div class="card hidden" id="pageCompte">
   <h2>Mon compte</h2>
   <div id="compteMsg" class="msg"></div>
@@ -207,8 +221,13 @@ const ROUTES = {
   '/assistant': 'Assistant',
   '/parrainer': 'Parrainer',
   '/compte': 'Compte',
+  '/forum': 'Forum',
+  '/mon-activite': 'MonActivite',
 };
-const AUTH_REQUIRED = ['Vote', 'Assistant', 'Parrainer', 'Compte'];
+// "Forum" volontairement ABSENT de cette liste : page publique en lecture (2026-07-26, priorité 1
+// développeur), consultable sans compte — seule "MonActivite" (données propres à l'utilisateur
+// connecté) nécessite une session, comme le reste des pages ci-dessous.
+const AUTH_REQUIRED = ['Vote', 'Assistant', 'Parrainer', 'Compte', 'MonActivite'];
 
 function isLoggedIn() {
   return !!localStorage.getItem('session_token');
@@ -264,13 +283,16 @@ function renderNav() {
   if (!isLoggedIn()) {
     nav.innerHTML =
       '<a data-link href="/">🏠 Accueil</a>' +
+      '<a data-link href="/forum">Forum</a>' +
       '<a data-link href="/login">Connexion</a>';
     return;
   }
   nav.innerHTML =
     '<a data-link href="/">🏠 Accueil</a>' +
     '<a data-link href="/vote">Voter</a>' +
+    '<a data-link href="/forum">Forum</a>' +
     '<a data-link href="/assistant">Assistant</a>' +
+    '<a data-link href="/mon-activite">Mon activité</a>' +
     '<a data-link href="/parrainer">Parrainer</a>' +
     '<a data-link href="/compte">Mon compte</a>' +
     '<span class="spacer"></span>' +
@@ -298,6 +320,8 @@ function render() {
   else if (pageName === 'Vote') loadVoteQuestions();
   else if (pageName === 'Assistant') { loadChatSummaries(); renderChatMessages(); }
   else if (pageName === 'Parrainer') loadReferralStatus();
+  else if (pageName === 'Forum') loadForum();
+  else if (pageName === 'MonActivite') loadMyActivity();
   else if (pageName === 'Compte') {
     document.getElementById('compteNom').textContent = localStorage.getItem('user_nom');
     document.getElementById('compteEmail').textContent = localStorage.getItem('user_email');
@@ -906,6 +930,134 @@ async function loadReferralStatus() {
     document.getElementById('referralQuota').textContent = 'Impossible de charger le statut.';
   }
 }
+// ---------- forum (lecture seule, parcourir sans passer par l'assistant, 2026-07-26) ----------
+async function loadForum() {
+  const el = document.getElementById('forumThreadsList');
+  el.innerHTML = '<p class="info">Chargement…</p>';
+  try {
+    const res = await fetch(API + '/forum/snapshot');
+    const data = await res.json();
+    el.innerHTML = '';
+    if (data.threads.length === 0) {
+      el.innerHTML = '<p class="info">Aucun fil de discussion pour le moment.</p>';
+      return;
+    }
+    data.threads.forEach(t => el.appendChild(renderForumThread(t)));
+  } catch (e) {
+    el.innerHTML = '<p class="info">Impossible de charger le Forum.</p>';
+  }
+}
+function renderForumThread(thread) {
+  // textContent/createTextNode (jamais innerHTML) pour titre/résumé/opinions/remarques : du
+  // texte libre venant de citoyens (via l'assistant), jamais du HTML de confiance.
+  const block = document.createElement('div');
+  block.className = 'question-block';
+  const h3 = document.createElement('h3');
+  h3.textContent = thread.title;
+  block.appendChild(h3);
+  if (thread.summary) {
+    const p = document.createElement('p');
+    p.className = 'info';
+    p.textContent = thread.summary;
+    block.appendChild(p);
+  }
+  thread.opinions.forEach(o => block.appendChild(renderForumOpinion(o)));
+  thread.remarques.forEach(r => block.appendChild(renderForumRemarque(r)));
+  if (thread.opinions.length === 0 && thread.remarques.length === 0) {
+    const p = document.createElement('p');
+    p.className = 'info';
+    p.textContent = "Aucune opinion ni remarque publiée sur ce fil pour l'instant.";
+    block.appendChild(p);
+  }
+  return block;
+}
+function renderForumOpinion(o) {
+  const div = document.createElement('div');
+  div.style.cssText = 'margin:.6em 0; padding:.6em; background:#f8f9fa; border-radius:4px; font-size:.9em;';
+  const strong = document.createElement('strong');
+  strong.textContent = o.auteur + (o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '');
+  div.appendChild(strong);
+  div.appendChild(document.createElement('br'));
+  div.appendChild(document.createTextNode(o.body));
+  if (o.argumentaire) {
+    div.appendChild(document.createElement('br'));
+    const em = document.createElement('em');
+    em.textContent = o.argumentaire;
+    div.appendChild(em);
+  }
+  return div;
+}
+function renderForumRemarque(r) {
+  const div = document.createElement('div');
+  div.style.cssText = 'margin:.4em 0 .4em 1.2em; padding:.4em .6em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
+  const strong = document.createElement('strong');
+  strong.textContent = r.auteur + ' : ';
+  div.appendChild(strong);
+  div.appendChild(document.createTextNode(r.body));
+  return div;
+}
+
+// ---------- mon activité (lecture seule, 2026-07-26) ----------
+async function loadMyActivity() {
+  const session_token = localStorage.getItem('session_token');
+  const el = document.getElementById('activiteList');
+  if (!session_token) return;
+  el.innerHTML = '<p class="info">Chargement…</p>';
+  try {
+    const data = await api('/activity/mine', { session_token });
+    el.innerHTML = '';
+    if (data.opinions.length === 0) {
+      el.innerHTML = "<p class=\"info\">Vous n'avez encore rien publié sur le Forum.</p>";
+      return;
+    }
+    data.opinions.forEach(o => el.appendChild(renderMyActivityOpinion(o)));
+  } catch (e) {
+    el.innerHTML = '<p class="info">Impossible de charger votre activité.</p>';
+  }
+}
+function renderMyActivityOpinion(o) {
+  const block = document.createElement('div');
+  block.className = 'question-block';
+  const h3 = document.createElement('h3');
+  h3.textContent = o.thread_title;
+  block.appendChild(h3);
+  const body = document.createElement('p');
+  body.appendChild(document.createTextNode(o.body));
+  block.appendChild(body);
+  if (o.argumentaire) {
+    const arg = document.createElement('p');
+    arg.className = 'info';
+    const em = document.createElement('em');
+    em.textContent = o.argumentaire;
+    arg.appendChild(em);
+    block.appendChild(arg);
+  }
+  if (o.status === 'disavowed') {
+    const disavowed = document.createElement('p');
+    disavowed.className = 'info';
+    disavowed.textContent = 'Vous avez désavoué cette opinion.';
+    block.appendChild(disavowed);
+  }
+  const c = o.reaction_counts;
+  const countsP = document.createElement('p');
+  countsP.style.fontSize = '.85em';
+  countsP.style.color = '#666';
+  countsP.textContent =
+    c.adherer + ' adhèrent · ' + c.opposer + " s'opposent · " + c.neutre + ' neutres';
+  block.appendChild(countsP);
+  o.reactions.forEach(r => block.appendChild(renderMyActivityReaction(r)));
+  return block;
+}
+function renderMyActivityReaction(r) {
+  const div = document.createElement('div');
+  div.style.cssText = 'margin:.4em 0 .4em 1.2em; padding:.4em .6em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
+  const strong = document.createElement('strong');
+  strong.textContent = r.auteur + ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ';
+  div.appendChild(strong);
+  div.appendChild(document.createTextNode(r.argumentaire || '(sans argumentaire)'));
+  return div;
+}
+
 async function sendReferralInvite() {
   const invitee_email = document.getElementById('referralEmail').value;
   const confirms_residency_and_age = document.getElementById('referralConfirm').checked;
