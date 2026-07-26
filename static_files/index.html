@@ -115,6 +115,10 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
     <p class="info" style="margin:0 0 .5em;">Choisissez votre pseudonyme (jamais votre nom réel) :</p>
     <div id="pseudoCandidates"></div>
   </div>
+  <div id="opinionProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
+    <p class="info" style="margin:0 0 .5em;">Brouillon d'opinion pour le Forum :</p>
+    <div id="opinionCandidate"></div>
+  </div>
   <div id="chatMsg" class="msg"></div>
   <label>Votre message</label>
   <input type="text" id="chatInput" placeholder="Écrivez votre message…">
@@ -493,6 +497,7 @@ async function sendChatMessage() {
       showMsg('chatMsg', "L'assistant n'a pas pu répondre correctement, réessaie.", 'error');
     }
     renderPseudoCandidates(data.actions_log);
+    renderOpinionProposal(data.actions_log);
   } catch (e) {
     showMsg('chatMsg', e.message, 'error');
   }
@@ -559,6 +564,98 @@ async function confirmPseudo(word, color, displayText) {
     await api('/pseudo/confirm', { session_token, word, color });
     document.getElementById('pseudoProposal').classList.add('hidden');
     chatHistory.push({ role: 'assistant', content: 'Pseudo confirmé : ' + (displayText || (word + ' ' + color)) + '.' });
+    renderChatMessages();
+  } catch (e) {
+    showMsg('chatMsg', e.message, 'error');
+  }
+}
+// Forum : confirmation d'opinion (2026-07-26, bug réel signalé par le développeur — le backend
+// propose_opinion/opinion/confirm existait depuis la veille au soir, mais AUCUN code ne rendait
+// jamais de bouton : la phase frontend du plan forum n'avait jamais été construite, alors que le
+// modèle affirmait déjà "clique sur le bouton" en se fiant au texte du prompt). Même principe que
+// le pseudo : propose_opinion est une action LECTURE SEULE côté LLM, le vrai commit passe
+// uniquement par /opinion/confirm, déclenché ici par un clic explicite — avec double confirmation
+// (une opinion est publique et permanente, comme le pseudo).
+function renderOpinionProposal(actionsLog) {
+  const box = document.getElementById('opinionProposal');
+  const list = document.getElementById('opinionCandidate');
+  if (!actionsLog) {
+    box.classList.add('hidden');
+    return;
+  }
+  const proposeAction = [...actionsLog].reverse().find(a =>
+    a.action === 'propose_opinion' && a.result && a.result.available === true
+  );
+  if (!proposeAction) {
+    box.classList.add('hidden');
+    return;
+  }
+  showOpinionProposalButton(proposeAction.result);
+  box.classList.remove('hidden');
+}
+function showOpinionProposalButton(opinion) {
+  const list = document.getElementById('opinionCandidate');
+  list.innerHTML = '';
+  const title = opinion.thread_title || opinion.new_thread_title;
+  const desc = document.createElement('p');
+  desc.style.margin = '0 0 .5em';
+  // textContent (jamais innerHTML) pour tout ce qui vient du modèle/de l'utilisateur — le titre/
+  // corps/argumentaire d'une opinion sont du texte libre, jamais du HTML de confiance.
+  const strongFil = document.createElement('strong');
+  strongFil.textContent = 'Fil : ';
+  desc.appendChild(strongFil);
+  desc.appendChild(document.createTextNode(title + (opinion.new_thread_title ? ' (nouveau)' : '')));
+  desc.appendChild(document.createElement('br'));
+  const strongOpinion = document.createElement('strong');
+  strongOpinion.textContent = 'Opinion : ';
+  desc.appendChild(strongOpinion);
+  desc.appendChild(document.createTextNode(opinion.body));
+  if (opinion.argumentaire) {
+    desc.appendChild(document.createElement('br'));
+    const strongArg = document.createElement('strong');
+    strongArg.textContent = 'Argumentaire : ';
+    desc.appendChild(strongArg);
+    desc.appendChild(document.createTextNode(opinion.argumentaire));
+  }
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.textContent = 'Publier cette opinion';
+  btn.addEventListener('click', () => askOpinionConfirmation(opinion));
+  list.appendChild(desc);
+  list.appendChild(btn);
+}
+function askOpinionConfirmation(opinion) {
+  const list = document.getElementById('opinionCandidate');
+  list.innerHTML = '';
+  const question = document.createElement('p');
+  question.className = 'info';
+  question.style.margin = '0 0 .5em';
+  question.textContent = 'Confirmer définitivement la publication de cette opinion sur le Forum ?';
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Oui, publier';
+  confirmBtn.addEventListener('click', () => confirmOpinion(opinion));
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-link';
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.addEventListener('click', () => showOpinionProposalButton(opinion));
+  list.appendChild(question);
+  list.appendChild(confirmBtn);
+  list.appendChild(cancelBtn);
+}
+async function confirmOpinion(opinion) {
+  const session_token = localStorage.getItem('session_token');
+  const payload = { session_token, body: opinion.body, argumentaire: opinion.argumentaire || null };
+  if (opinion.new_thread_title) {
+    payload.new_thread_title = opinion.new_thread_title;
+    payload.new_thread_summary = opinion.new_thread_summary || null;
+  } else {
+    payload.thread_id = opinion.thread_id;
+  }
+  try {
+    await api('/opinion/confirm', payload);
+    document.getElementById('opinionProposal').classList.add('hidden');
+    chatHistory.push({ role: 'assistant', content: 'Opinion publiée sur le Forum.' });
     renderChatMessages();
   } catch (e) {
     showMsg('chatMsg', e.message, 'error');
