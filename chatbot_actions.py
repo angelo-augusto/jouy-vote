@@ -135,6 +135,24 @@ PSEUDO_WORDS = [
 # prod au moment de ces changements, aucune migration requise.
 PSEUDO_COLORS = ["rouge", "orange", "jaune", "vert", "bleu", "violet", "blanc", "noir", "gris"]
 
+# Catégories fixes du forum (2026-07-27, décision développeur via angelobot, design posé le
+# 27/07 et confirmé le 29/07) — liste fermée, jamais générée à la volée par le LLM : clé stable
+# (ascii, utilisée telle quelle en DB et comme filtre d'onglet) → libellé affiché. Assignée
+# automatiquement par le chatbot à la création d'un fil (voir propose_opinion/new_thread_category
+# ci-dessous) ; le frontend (static_files/index.html) duplique ces libellés pour les onglets —
+# toute nouvelle catégorie doit être ajoutée aux deux endroits.
+FORUM_CATEGORIES = {
+    "voirie": "Voirie",
+    "ecole": "École",
+    "urbanisme": "Urbanisme",
+    "culture": "Culture",
+    "social": "Social",
+    "activites": "Activités",
+    "environnement": "Environnement",
+    "securite": "Sécurité",
+    "finances": "Finances",
+}
+
 # Genre grammatical de chaque mot — pour l'accord de la couleur ("Clairière VERTE", pas "Clairière
 # vert"). Bug réel signalé par le développeur (2026-07-25). 6 couleurs variables en genre en
 # français, 3 invariables (rouge/orange/jaune) — voir PSEUDO_COLOR_FEMININE.
@@ -355,13 +373,20 @@ def propose_opinion(params: dict, ctx: dict) -> dict:
     - thread_id : rattache l'opinion à un fil EXISTANT et déjà publié (trouvé via list_threads/
       get_thread). Chemin à privilégier — TOUJOURS vérifier d'abord qu'aucun fil existant ne
       convient déjà (objectif : limiter le nombre de fils, pas en créer un pour chaque nuance).
-    - new_thread_title (+ new_thread_summary optionnel) : propose un NOUVEAU fil, créé dans le
-      même geste que cette opinion SEULEMENT si l'utilisateur confirme — jamais de création
-      spéculative avant. N'utilise ce chemin QUE si tu as vérifié via list_threads qu'aucun fil
-      existant ne correspond vraiment au sujet."""
+    - new_thread_title (+ new_thread_summary optionnel, + new_thread_category OBLIGATOIRE) :
+      propose un NOUVEAU fil, créé dans le même geste que cette opinion SEULEMENT si l'utilisateur
+      confirme — jamais de création spéculative avant. N'utilise ce chemin QUE si tu as vérifié
+      via list_threads qu'aucun fil existant ne correspond vraiment au sujet.
+
+    new_thread_category (2026-07-29, catégorisation automatique décidée par le développeur) :
+    l'une des clés de FORUM_CATEGORIES ci-dessus (voirie/ecole/urbanisme/culture/social/
+    activites/environnement/securite/finances) — TON jugement sur le thème dominant du fil, pas
+    une question posée à l'utilisateur. Choisis la catégorie la plus proche même en cas de doute
+    (mieux vaut une catégorie approximative qu'un fil non classé)."""
     thread_id = params.get("thread_id")
     new_thread_title = params.get("new_thread_title")
     new_thread_summary = params.get("new_thread_summary")
+    new_thread_category = params.get("new_thread_category")
     body = params.get("body", "")
     argumentaire = params.get("argumentaire")
 
@@ -374,6 +399,11 @@ def propose_opinion(params: dict, ctx: dict) -> dict:
         title = new_thread_title.strip()
         if not title:
             return {"available": False, "error": "titre de fil manquant"}
+        if new_thread_category not in FORUM_CATEGORIES:
+            return {
+                "available": False,
+                "error": f"new_thread_category manquante ou invalide, doit être l'une de : {', '.join(FORUM_CATEGORIES)}",
+            }
         existing = next((t for t in ctx.get("threads", []) if t["title"] == title), None)
         if existing is not None:
             return {
@@ -382,6 +412,7 @@ def propose_opinion(params: dict, ctx: dict) -> dict:
             }
         return {
             "new_thread_title": title, "new_thread_summary": new_thread_summary,
+            "new_thread_category": new_thread_category,
             "body": body, "argumentaire": argumentaire, "available": True,
         }
 
@@ -737,12 +768,16 @@ ACTIONS_JSON_SCHEMA = {
                             "thread_id": {"type": ["integer", "null"]},
                             "new_thread_title": {"type": ["string", "null"]},
                             "new_thread_summary": {"type": ["string", "null"]},
+                            # Catégorie fixe (2026-07-29) — OBLIGATOIRE si new_thread_title est
+                            # renseigné, ignorée sinon (voir validation Python dans propose_opinion,
+                            # même raison que ci-dessus pour rester nullable plutôt qu'absente).
+                            "new_thread_category": {"type": ["string", "null"]},
                             "body": {"type": "string"},
                             "argumentaire": {"type": ["string", "null"]},
                         },
                         "required": [
                             "action", "thread_id", "new_thread_title", "new_thread_summary",
-                            "body", "argumentaire",
+                            "new_thread_category", "body", "argumentaire",
                         ],
                         "additionalProperties": False,
                     },
@@ -901,21 +936,28 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   argumentaire). Utile pour repérer si une opinion très proche de celle que quelqu'un s'apprête à
   formuler existe déjà, AVANT de la publier — dans ce cas, propose-lui plutôt d'adhérer à
   l'opinion existante (voir plus bas les réactions) que d'en créer une en double.
-- propose_opinion(thread_id OU new_thread_title+new_thread_summary, body, argumentaire) : brouillon
-  d'opinion. 2 chemins EXCLUSIFS (mets l'autre à null) :
+- propose_opinion(thread_id OU new_thread_title+new_thread_summary+new_thread_category, body,
+  argumentaire) : brouillon d'opinion. 2 chemins EXCLUSIFS (mets l'autre à null) :
     - thread_id : rattache l'opinion à un fil EXISTANT et déjà publié — utilise d'abord
       list_threads/get_thread pour trouver le bon thread_id. TOUJOURS le chemin à privilégier.
-    - new_thread_title (+ new_thread_summary optionnel) : propose un NOUVEAU fil, créé dans le
-      MÊME geste que cette opinion si l'utilisateur confirme (2026-07-25, création couplée —
-      jamais de fil créé "à part" avant qu'une opinion ne l'alimente). N'utilise CE chemin QUE si
-      tu as vérifié via list_threads qu'aucun fil existant ne correspond vraiment au sujet —
-      l'objectif reste de limiter le nombre de fils, pas d'en créer un pour chaque nuance.
+    - new_thread_title (+ new_thread_summary optionnel, + new_thread_category OBLIGATOIRE) :
+      propose un NOUVEAU fil, créé dans le MÊME geste que cette opinion si l'utilisateur confirme
+      (2026-07-25, création couplée — jamais de fil créé "à part" avant qu'une opinion ne
+      l'alimente). N'utilise CE chemin QUE si tu as vérifié via list_threads qu'aucun fil existant
+      ne correspond vraiment au sujet — l'objectif reste de limiter le nombre de fils, pas d'en
+      créer un pour chaque nuance.
+  new_thread_category (2026-07-29, catégorisation automatique) : l'une de ces 9 clés fixes —
+  voirie, ecole, urbanisme, culture, social, activites, environnement, securite, finances. C'est
+  TON jugement sur le thème dominant du fil (jamais une question posée à l'utilisateur) — choisis
+  la catégorie la plus proche même en cas de doute, ne laisse jamais ce champ vide/incohérent
+  quand tu crées un nouveau fil.
   "body" = la position ("je pense que..."), "argumentaire" = le raisonnement à l'appui ("parce
   que..."), optionnel. Renvoie available=false si le fil n'existe pas/n'est pas publié, si "body"
-  est vide, ou si un fil au titre EXACTEMENT identique à new_thread_title existe déjà (dans ce cas
-  utilise plutôt son thread_id, indiqué dans l'erreur). Comme pour le pseudo : available=true
-  signifie SEULEMENT que le brouillon est valide, PAS qu'il est publié — rien n'est écrit tant que
-  l'utilisateur n'a pas cliqué sur le bouton de confirmation.
+  est vide, si new_thread_category est manquante/invalide pour un nouveau fil, ou si un fil au
+  titre EXACTEMENT identique à new_thread_title existe déjà (dans ce cas utilise plutôt son
+  thread_id, indiqué dans l'erreur). Comme pour le pseudo : available=true signifie SEULEMENT que
+  le brouillon est valide, PAS qu'il est publié — rien n'est écrit tant que l'utilisateur n'a pas
+  cliqué sur le bouton de confirmation.
 - propose_reaction(opinion_id, stance, argumentaire) : brouillon de réaction à une opinion
   EXISTANTE et publiée (trouvée via get_thread). "stance" doit être "adherer", "opposer" ou
   "neutre" — ce 3e état est une VRAIE réaction (l'utilisateur a lu et reste neutre), jamais à

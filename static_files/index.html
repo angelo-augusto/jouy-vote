@@ -160,6 +160,7 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <h2>💬 Forum</h2>
   <p class="info">Parcourez les fils de discussion sans passer par l'assistant — pour publier une opinion, une réaction ou une remarque, la conversation avec l'assistant reste le seul chemin.</p>
   <div id="forumMsg" class="msg"></div>
+  <div id="forumCategoryTabs" style="display:flex; flex-wrap:wrap; gap:.4em; margin-bottom:.8em;"></div>
   <div id="forumThreadsList"><p class="info">Chargement…</p></div>
 </div>
 
@@ -930,45 +931,107 @@ async function loadReferralStatus() {
   }
 }
 // ---------- forum (lecture seule, parcourir sans passer par l'assistant, 2026-07-26) ----------
+// Catégories fixes (2026-07-29) — DOIT rester synchronisé avec chatbot_actions.FORUM_CATEGORIES
+// (backend), voir le commentaire là-bas : toute nouvelle catégorie s'ajoute aux deux endroits.
+const FORUM_CATEGORY_LABELS = {
+  voirie: 'Voirie', ecole: 'École', urbanisme: 'Urbanisme', culture: 'Culture', social: 'Social',
+  activites: 'Activités', environnement: 'Environnement', securite: 'Sécurité', finances: 'Finances',
+};
+let forumThreadsCache = [];
+let forumCurrentCategory = 'all';
 async function loadForum() {
   const session_token = localStorage.getItem('session_token');
   const el = document.getElementById('forumThreadsList');
   if (!session_token) return;
   el.innerHTML = '<p class="info">Chargement…</p>';
+  forumCurrentCategory = 'all';
   try {
     const data = await api('/forum/snapshot', { session_token });
-    el.innerHTML = '';
-    if (data.threads.length === 0) {
-      el.innerHTML = '<p class="info">Aucun fil de discussion pour le moment.</p>';
-      return;
-    }
-    data.threads.forEach(t => el.appendChild(renderForumThread(t)));
+    forumThreadsCache = data.threads;
+    renderForumCategoryTabs();
+    renderForumThreadsList();
   } catch (e) {
     el.innerHTML = '<p class="info">Impossible de charger le Forum.</p>';
   }
+}
+function renderForumCategoryTabs() {
+  const tabsEl = document.getElementById('forumCategoryTabs');
+  tabsEl.innerHTML = '';
+  const present = new Set(forumThreadsCache.map(t => t.category).filter(Boolean));
+  const tabs = [['all', 'Tous']].concat(
+    Object.entries(FORUM_CATEGORY_LABELS).filter(([key]) => present.has(key))
+  );
+  tabs.forEach(([key, label]) => {
+    const btn = document.createElement('button');
+    btn.textContent = label;
+    btn.className = key === forumCurrentCategory ? 'btn-primary' : '';
+    btn.style.cssText = 'font-size:.85em; padding:.3em .7em;';
+    btn.onclick = () => { forumCurrentCategory = key; renderForumCategoryTabs(); renderForumThreadsList(); };
+    tabsEl.appendChild(btn);
+  });
+}
+function renderForumThreadsList() {
+  const el = document.getElementById('forumThreadsList');
+  el.innerHTML = '';
+  const threads = forumCurrentCategory === 'all'
+    ? forumThreadsCache
+    : forumThreadsCache.filter(t => t.category === forumCurrentCategory);
+  if (threads.length === 0) {
+    el.innerHTML = '<p class="info">Aucun fil de discussion pour le moment.</p>';
+    return;
+  }
+  threads.forEach(t => el.appendChild(renderForumThread(t)));
 }
 function renderForumThread(thread) {
   // textContent/createTextNode (jamais innerHTML) pour titre/résumé/opinions/remarques : du
   // texte libre venant de citoyens (via l'assistant), jamais du HTML de confiance.
   const block = document.createElement('div');
   block.className = 'question-block';
+
+  // Replié par défaut (2026-07-29) : seuls titre+résumé sont visibles avant clic — juste du
+  // frontend, aucune donnée en moins n'est chargée (le contenu complet est déjà dans le DOM,
+  // simplement masqué), pour garder le clic instantané sans 2e appel réseau.
+  const header = document.createElement('div');
+  header.style.cssText = 'cursor:pointer;';
   const h3 = document.createElement('h3');
-  h3.textContent = thread.title;
-  block.appendChild(h3);
+  h3.style.cssText = 'display:flex; align-items:center; gap:.4em;';
+  const toggleIcon = document.createElement('span');
+  toggleIcon.textContent = '▸';
+  toggleIcon.style.cssText = 'font-size:.8em; color:#888;';
+  h3.appendChild(toggleIcon);
+  h3.appendChild(document.createTextNode(thread.title));
+  header.appendChild(h3);
+  if (thread.category && FORUM_CATEGORY_LABELS[thread.category]) {
+    const badge = document.createElement('span');
+    badge.textContent = FORUM_CATEGORY_LABELS[thread.category];
+    badge.style.cssText = 'display:inline-block; font-size:.75em; color:#666; background:#eee; border-radius:3px; padding:.1em .5em; margin-bottom:.4em;';
+    header.appendChild(badge);
+  }
   if (thread.summary) {
     const p = document.createElement('p');
     p.className = 'info';
     p.textContent = thread.summary;
-    block.appendChild(p);
+    header.appendChild(p);
   }
-  thread.opinions.forEach(o => block.appendChild(renderForumOpinion(o)));
-  thread.remarques.forEach(r => block.appendChild(renderForumRemarque(r)));
+  block.appendChild(header);
+
+  const content = document.createElement('div');
+  content.style.display = 'none';
+  header.onclick = () => {
+    const expanded = content.style.display !== 'none';
+    content.style.display = expanded ? 'none' : '';
+    toggleIcon.textContent = expanded ? '▸' : '▾';
+  };
+
+  thread.opinions.forEach(o => content.appendChild(renderForumOpinion(o)));
+  thread.remarques.forEach(r => content.appendChild(renderForumRemarque(r)));
   if (thread.opinions.length === 0 && thread.remarques.length === 0) {
     const p = document.createElement('p');
     p.className = 'info';
     p.textContent = "Aucune opinion ni remarque publiée sur ce fil pour l'instant.";
-    block.appendChild(p);
+    content.appendChild(p);
   }
+  block.appendChild(content);
   return block;
 }
 function renderForumOpinion(o) {
@@ -998,6 +1061,7 @@ function renderForumOpinion(o) {
     div.appendChild(countsP);
     (o.reactions || []).forEach(r => div.appendChild(renderMyActivityReaction(r)));
   }
+  div.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }));
   return div;
 }
 function renderForumRemarque(r) {
@@ -1007,7 +1071,236 @@ function renderForumRemarque(r) {
   strong.textContent = r.auteur + ' : ';
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.body));
+  div.appendChild(buildInlineReactWidget({ type: 'remarque', id: r.remarque_id }));
   return div;
+}
+
+// ---------- chat inline scopé "Réagir" (2026-07-29, bouton à côté de chaque opinion/remarque) ----------
+// Réutilise le MÊME chatHistory global que l'assistant (pas de 2e mémoire) : chaque échange est
+// juste tagué avec contextRef pour permettre un filtrage d'AFFICHAGE différent selon la page
+// (voir renderInlineMessages ci-dessous vs renderChatMessages, qui reste non filtrée). L'historique
+// COMPLET (pas seulement les échanges de ce contexte) est toujours envoyé au backend (continuité de
+// mémoire du modèle) — context_opinion_id/context_remarque_id ne servent qu'à lui rappeler DE QUOI
+// il s'agit précisément, pour que l'utilisateur n'ait pas à le réexpliquer.
+function contextRefEquals(a, b) {
+  return !!a && !!b && a.type === b.type && a.id === b.id;
+}
+function buildInlineReactWidget(contextRef) {
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'margin-top:.4em;';
+  const toggleBtn = document.createElement('button');
+  toggleBtn.textContent = '💬 Réagir';
+  toggleBtn.className = 'btn-link';
+  toggleBtn.style.cssText = 'font-size:.85em; padding:.1em 0;';
+  const panel = document.createElement('div');
+  panel.style.cssText = 'display:none; margin-top:.4em; padding:.5em; background:#fff; border:1px solid #ddd; border-radius:4px;';
+  const messagesEl = document.createElement('div');
+  messagesEl.style.cssText = 'max-height:180px; overflow-y:auto; font-size:.85em; margin-bottom:.4em;';
+  const proposalEl = document.createElement('div');
+  const inputRow = document.createElement('div');
+  inputRow.style.cssText = 'display:flex; gap:.4em;';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Réagir à cet élément…';
+  input.style.cssText = 'flex:1;';
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'btn-primary';
+  sendBtn.textContent = 'Envoyer';
+  inputRow.appendChild(input);
+  inputRow.appendChild(sendBtn);
+  panel.appendChild(messagesEl);
+  panel.appendChild(proposalEl);
+  panel.appendChild(inputRow);
+
+  function renderInlineMessages() {
+    messagesEl.innerHTML = chatHistory
+      .filter(m => contextRefEquals(m.contextRef, contextRef))
+      .map(m =>
+        '<p style="margin:.3em 0;"><strong>' + (m.role === 'user' ? 'Vous' : 'Assistant') + ' :</strong> ' +
+        m.content.replace(/</g, '&lt;') + '</p>'
+      ).join('');
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  async function sendInlineMessage() {
+    const message = input.value.trim();
+    if (!message) return;
+    const session_token = localStorage.getItem('session_token');
+    const historyBefore = chatHistory.slice();
+    chatHistory.push({ role: 'user', content: message, contextRef });
+    renderInlineMessages();
+    input.value = '';
+    const payload = { session_token, message, history: historyBefore };
+    if (contextRef.type === 'opinion') payload.context_opinion_id = contextRef.id;
+    if (contextRef.type === 'remarque') payload.context_remarque_id = contextRef.id;
+    try {
+      const data = await api('/chat/v2', payload);
+      if (data.replies) {
+        for (const reply of data.replies) {
+          if (reply && reply.trim() !== '') chatHistory.push({ role: 'assistant', content: reply, contextRef });
+        }
+      }
+      renderInlineMessages();
+      renderInlineProposal(data.actions_log);
+    } catch (e) {
+      proposalEl.textContent = e.message;
+    }
+  }
+
+  function renderInlineProposal(actionsLog) {
+    proposalEl.innerHTML = '';
+    if (!actionsLog) return;
+    const find = (name) => [...actionsLog].reverse().find(a => a.action === name && a.result && a.result.available === true);
+    const opinion = find('propose_opinion');
+    if (opinion) return buildInlineOpinionConfirm(proposalEl, opinion.result, contextRef, renderInlineMessages);
+    const reaction = find('propose_reaction');
+    if (reaction) return buildInlineReactionConfirm(proposalEl, reaction.result, contextRef, renderInlineMessages);
+    const remarque = find('propose_remarque');
+    if (remarque) return buildInlineRemarqueConfirm(proposalEl, remarque.result, contextRef, renderInlineMessages);
+  }
+
+  sendBtn.addEventListener('click', sendInlineMessage);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') sendInlineMessage(); });
+  toggleBtn.addEventListener('click', () => {
+    const shown = panel.style.display !== 'none';
+    panel.style.display = shown ? 'none' : '';
+    if (!shown) renderInlineMessages();
+  });
+  wrap.appendChild(toggleBtn);
+  wrap.appendChild(panel);
+  return wrap;
+}
+// Double confirmation (même exigence que /assistant, voir askOpinionConfirmation et consorts) :
+// un 1er clic ouvre juste une question de confirmation, jamais l'écriture directe — une opinion/
+// réaction/remarque publiée est publique et permanente.
+function buildInlineOpinionConfirm(box, opinion, contextRef, onPublished) {
+  box.innerHTML = '';
+  const desc = document.createElement('p');
+  desc.style.cssText = 'margin:0 0 .4em; font-size:.85em;';
+  const title = opinion.thread_title || opinion.new_thread_title;
+  desc.appendChild(document.createTextNode((opinion.new_thread_title ? 'Nouveau fil : ' : 'Fil : ') + title));
+  desc.appendChild(document.createElement('br'));
+  desc.appendChild(document.createTextNode('Opinion : ' + opinion.body));
+  if (opinion.argumentaire) {
+    desc.appendChild(document.createElement('br'));
+    desc.appendChild(document.createTextNode('Argumentaire : ' + opinion.argumentaire));
+  }
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Publier cette opinion';
+  confirmBtn.onclick = () => buildInlineDoubleCheck(
+    box, desc, 'Confirmer définitivement la publication de cette opinion sur le Forum ?',
+    async () => {
+      const session_token = localStorage.getItem('session_token');
+      const payload = { session_token, body: opinion.body, argumentaire: opinion.argumentaire || null };
+      if (opinion.new_thread_title) {
+        payload.new_thread_title = opinion.new_thread_title;
+        payload.new_thread_summary = opinion.new_thread_summary || null;
+        payload.new_thread_category = opinion.new_thread_category || null;
+      } else {
+        payload.thread_id = opinion.thread_id;
+      }
+      await api('/opinion/confirm', payload);
+      box.innerHTML = '';
+      chatHistory.push({ role: 'assistant', content: 'Opinion publiée sur le Forum.', contextRef });
+      onPublished();
+    },
+  );
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-link';
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.onclick = () => { box.innerHTML = ''; };
+  box.appendChild(desc);
+  box.appendChild(confirmBtn);
+  box.appendChild(cancelBtn);
+}
+function buildInlineReactionConfirm(box, reaction, contextRef, onPublished) {
+  box.innerHTML = '';
+  const desc = document.createElement('p');
+  desc.style.cssText = 'margin:0 0 .4em; font-size:.85em;';
+  desc.appendChild(document.createTextNode('Position : ' + (REACTION_STANCE_LABELS[reaction.stance] || reaction.stance)));
+  if (reaction.argumentaire) {
+    desc.appendChild(document.createElement('br'));
+    desc.appendChild(document.createTextNode('Argumentaire : ' + reaction.argumentaire));
+  }
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Confirmer cette réaction';
+  confirmBtn.onclick = () => buildInlineDoubleCheck(
+    box, desc, 'Confirmer définitivement cette réaction sur le Forum ?',
+    async () => {
+      const session_token = localStorage.getItem('session_token');
+      await api('/reaction/confirm', {
+        session_token, opinion_id: reaction.opinion_id, stance: reaction.stance,
+        argumentaire: reaction.argumentaire || null,
+      });
+      box.innerHTML = '';
+      chatHistory.push({ role: 'assistant', content: 'Réaction confirmée sur le Forum.', contextRef });
+      onPublished();
+    },
+  );
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-link';
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.onclick = () => { box.innerHTML = ''; };
+  box.appendChild(desc);
+  box.appendChild(confirmBtn);
+  box.appendChild(cancelBtn);
+}
+function buildInlineRemarqueConfirm(box, remarque, contextRef, onPublished) {
+  box.innerHTML = '';
+  const desc = document.createElement('p');
+  desc.style.cssText = 'margin:0 0 .4em; font-size:.85em;';
+  desc.appendChild(document.createTextNode(remarque.body));
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Publier cette remarque';
+  confirmBtn.onclick = () => buildInlineDoubleCheck(
+    box, desc, 'Confirmer la publication de cette remarque sur le Forum ?',
+    async () => {
+      const session_token = localStorage.getItem('session_token');
+      await api('/remarque/confirm', {
+        session_token, thread_id: remarque.thread_id, body: remarque.body,
+        reply_to_remarque_id: remarque.reply_to_remarque_id || null,
+        reply_to_opinion_id: remarque.reply_to_opinion_id || null,
+      });
+      box.innerHTML = '';
+      chatHistory.push({ role: 'assistant', content: 'Remarque publiée sur le Forum.', contextRef });
+      onPublished();
+    },
+  );
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-link';
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.onclick = () => { box.innerHTML = ''; };
+  box.appendChild(desc);
+  box.appendChild(confirmBtn);
+  box.appendChild(cancelBtn);
+}
+function buildInlineDoubleCheck(box, descNode, questionText, onConfirm) {
+  box.innerHTML = '';
+  box.appendChild(descNode);
+  const q = document.createElement('p');
+  q.className = 'info';
+  q.style.margin = '.4em 0';
+  q.textContent = questionText;
+  const yes = document.createElement('button');
+  yes.className = 'btn-primary';
+  yes.textContent = 'Oui, confirmer';
+  yes.onclick = async () => {
+    try {
+      await onConfirm();
+    } catch (e) {
+      box.textContent = e.message;
+    }
+  };
+  const no = document.createElement('button');
+  no.className = 'btn-link';
+  no.textContent = 'Annuler';
+  no.onclick = () => { box.innerHTML = ''; };
+  box.appendChild(q);
+  box.appendChild(yes);
+  box.appendChild(no);
 }
 
 // ---------- mon activité (lecture seule, 2026-07-26) ----------
@@ -1063,6 +1356,7 @@ function renderMyActivityOpinion(o) {
     c.neutre + ' neutre' + (c.neutre !== 1 ? 's' : '');
   block.appendChild(countsP);
   o.reactions.forEach(r => block.appendChild(renderMyActivityReaction(r)));
+  block.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }));
   return block;
 }
 function renderMyActivityReaction(r) {

@@ -23,8 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from chatbot_actions import (
-    CHAT_SYSTEM_PROMPT, ONBOARDING_NEW_USER_CONTEXT_BLOCK, PSEUDO_COLORS, _agree_pseudo_display,
-    compute_debate_token,
+    CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, ONBOARDING_NEW_USER_CONTEXT_BLOCK, PSEUDO_COLORS,
+    _agree_pseudo_display, compute_debate_token,
 )
 from chatbot_executor import build_system_prompt, run_turn
 
@@ -219,6 +219,17 @@ def init_db():
             )"""
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status)")
+        # Catégories fixes (2026-07-29) — ADD COLUMN idempotent, même pattern que la boucle
+        # column_types plus bas : CREATE TABLE IF NOT EXISTS ne touche pas une table déjà
+        # existante en prod, donc cette colonne doit être ajoutée séparément à chaque démarrage.
+        # Pas de CHECK ici (ALTER TABLE ADD COLUMN ne supporte pas les contraintes en SQLite) —
+        # la validité de la valeur est garantie en amont par propose_opinion/FORUM_CATEGORIES,
+        # jamais par la DB elle-même.
+        try:
+            conn.execute("ALTER TABLE threads ADD COLUMN category TEXT")
+        except sqlite3.OperationalError:
+            pass
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_threads_category ON threads(category)")
         # Filet anti-race (2026-07-25, création de fil couplée au 1er post d'opinion, demande
         # développeur) : titre unique tous fils confondus — si 2 personnes proposent quasi
         # simultanément un fil au titre EXACTEMENT identique, la 2e INSERT échoue proprement
@@ -448,6 +459,14 @@ class ChatRequest(BaseModel):
     # Mode debug/traçage (demande développeur 2026-07-25, via angelobot) : réservé aux bots
     # internes, jamais documenté côté citoyen — nécessite ADMIN_KEY, jamais activé par défaut.
     admin_key: str | None = None
+    # Chat inline scopé (2026-07-29, bouton "Réagir" sur Forum/Mon activité) : mutuellement
+    # exclusifs, voir _element_context_block. L'historique envoyé (req.history) reste TOUJOURS le
+    # même que d'habitude (aucune fragmentation côté serveur — le filtrage par élément est une
+    # pure question d'affichage frontend, voir static_files/index.html) ; ces 2 champs ne servent
+    # QU'à injecter dans le prompt le contenu de l'élément visé, pour que l'utilisateur n'ait pas
+    # à le réexpliquer.
+    context_opinion_id: int | None = None
+    context_remarque_id: int | None = None
 
 
 class ChatSummarizeRequest(BaseModel):
@@ -473,6 +492,7 @@ class OpinionConfirmRequest(BaseModel):
     thread_id: int | None = None
     new_thread_title: str | None = None
     new_thread_summary: str | None = None
+    new_thread_category: str | None = None
     body: str
     argumentaire: str | None = None
 
@@ -605,17 +625,26 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
 # doit appeler *_publish ci-dessous.
 
 
-def create_thread(title: str, summary: str | None = None, creator_identity_token: str | None = None) -> dict:
+def create_thread(
+    title: str, summary: str | None = None, creator_identity_token: str | None = None,
+    category: str | None = None,
+) -> dict:
     """Un fil peut être créé par le chatbot seul (regroupement thématique automatique, voir wiki)
-    — creator_debate_token reste NULL dans ce cas plutôt que de forcer une attribution factice."""
+    — creator_debate_token reste NULL dans ce cas plutôt que de forcer une attribution factice.
+
+    category (2026-07-29) : ignorée silencieusement si absente de FORUM_CATEGORIES plutôt que de
+    faire échouer la création du fil — la catégorisation reste secondaire au contenu lui-même
+    (même philosophie de tolérance que le reste des validations LLM-facing de ce module)."""
     creator_debate_token = compute_debate_token(creator_identity_token) if creator_identity_token else None
+    if category not in FORUM_CATEGORIES:
+        category = None
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO threads (title, summary, creator_debate_token) VALUES (?, ?, ?)",
-            (title, summary, creator_debate_token),
+            "INSERT INTO threads (title, summary, creator_debate_token, category) VALUES (?, ?, ?, ?)",
+            (title, summary, creator_debate_token, category),
         )
         thread_id = cur.lastrowid
-    return {"thread_id": thread_id, "title": title, "summary": summary, "status": "draft"}
+    return {"thread_id": thread_id, "title": title, "summary": summary, "status": "draft", "category": category}
 
 
 def publish_thread(thread_id: int) -> dict:
@@ -648,7 +677,7 @@ def delete_thread_if_empty(thread_id: int) -> dict:
 
 def create_thread_with_opinion(
     title: str, author_identity_token: str, body: str,
-    argumentaire: str | None = None, summary: str | None = None,
+    argumentaire: str | None = None, summary: str | None = None, category: str | None = None,
 ) -> dict:
     """Création de fil COUPLÉE au 1er post d'opinion (2026-07-25, décision développeur, en
     réponse directe à la question posée plus tôt sur le wiki) : pas de création spéculative d'un
@@ -666,12 +695,14 @@ def create_thread_with_opinion(
     title = title.strip()
     if not title:
         raise ValueError("titre de fil manquant")
+    if category not in FORUM_CATEGORIES:
+        category = None
     with db() as conn:
         try:
             cur = conn.execute(
-                "INSERT INTO threads (title, summary, status, published_at) "
-                "VALUES (?, ?, 'published', CURRENT_TIMESTAMP)",
-                (title, summary),
+                "INSERT INTO threads (title, summary, status, published_at, category) "
+                "VALUES (?, ?, 'published', CURRENT_TIMESTAMP, ?)",
+                (title, summary, category),
             )
             thread_id = cur.lastrowid
         except sqlite3.IntegrityError:
@@ -983,10 +1014,14 @@ def get_forum_page_snapshot() -> list[dict]:
     list_threads/get_thread côté LLM) plutôt que de l'étendre : le ctx du chatbot reste allégé par
     conception (pas de remarques, jamais eu besoin d'y toucher), alors que cette page humaine
     affiche la vue complète. Même filtre status='published' partout — jamais un brouillon, le
-    sien ou celui d'un autre."""
+    sien ou celui d'un autre.
+
+    "category" (2026-07-29) : la clé fixe assignée à la création du fil (voir FORUM_CATEGORIES),
+    ou None pour un fil créé avant l'existence des catégories — le frontend (/forum) affiche ces
+    fils dans l'onglet "Tous" uniquement, jamais dans un onglet catégorie précis."""
     with db() as conn:
         threads = conn.execute(
-            "SELECT thread_id, title, summary FROM threads WHERE status='published' ORDER BY thread_id"
+            "SELECT thread_id, title, summary, category FROM threads WHERE status='published' ORDER BY thread_id"
         ).fetchall()
         snapshot = []
         for t in threads:
@@ -1012,6 +1047,7 @@ def get_forum_page_snapshot() -> list[dict]:
                 "thread_id": t["thread_id"],
                 "title": t["title"],
                 "summary": t["summary"],
+                "category": t["category"],
                 "opinions": [
                     {
                         "opinion_id": o["opinion_id"],
@@ -1707,6 +1743,48 @@ _MOIS_NOMS = [
 ]
 
 
+def _element_context_block(context_opinion_id: int | None, context_remarque_id: int | None) -> str:
+    """Chat inline scopé (2026-07-29, bouton "Réagir" sur Forum/Mon activité) : décrit l'opinion
+    ou la remarque précise sur laquelle l'utilisateur vient de cliquer "Réagir", pour qu'il n'ait
+    jamais à la réexpliquer lui-même. Dégrade en chaîne vide si l'id est absent, invalide ou pointe
+    vers un contenu non publié — un contexte manquant ne doit jamais faire échouer la conversation,
+    juste priver le modèle de ce rappel (il peut toujours demander lui-même si besoin)."""
+    if context_opinion_id is not None and context_remarque_id is not None:
+        return ""
+    with db() as conn:
+        if context_opinion_id is not None:
+            row = conn.execute(
+                """SELECT o.body, o.argumentaire, t.title AS thread_title
+                   FROM opinions o JOIN threads t ON t.thread_id = o.thread_id
+                   WHERE o.opinion_id=? AND o.status='published'""",
+                (context_opinion_id,),
+            ).fetchone()
+            if row is None:
+                return ""
+            block = (
+                f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de cette "
+                f"opinion précise du fil \"{row['thread_title']}\" : \"{row['body']}\""
+            )
+            if row["argumentaire"]:
+                block += f" (argumentaire : \"{row['argumentaire']}\")"
+            return block + ". Concentre-toi sur CET élément précis, sans élargir au reste du forum sauf si l'utilisateur le demande explicitement."
+        if context_remarque_id is not None:
+            row = conn.execute(
+                """SELECT r.body, t.title AS thread_title
+                   FROM thread_remarques r JOIN threads t ON t.thread_id = r.thread_id
+                   WHERE r.remarque_id=? AND r.status='published'""",
+                (context_remarque_id,),
+            ).fetchone()
+            if row is None:
+                return ""
+            return (
+                f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de cette "
+                f"remarque précise du fil \"{row['thread_title']}\" : \"{row['body']}\". "
+                "Concentre-toi sur CET élément précis, sans élargir au reste du forum sauf si l'utilisateur le demande explicitement."
+            )
+    return ""
+
+
 def current_date_block() -> str:
     """Bloc de contexte "date du jour" (2026-07-26, manque trouvé par Angelo en réel : "tu sais
     quel jour on est ?" -> "je n'ai pas accès à l'heure actuelle"). Toujours injecté dans le
@@ -1736,6 +1814,9 @@ def chat_v2(req: ChatRequest):
     # utile aussi pour raisonner sur list_conseil_municipal_seances ("y a-t-il eu un conseil
     # depuis juin ?").
     context_block = f"{current_date_block()}\n\n{context_block}".strip() if context_block else current_date_block()
+    element_block = _element_context_block(req.context_opinion_id, req.context_remarque_id)
+    if element_block:
+        context_block = f"{context_block}\n\n{element_block}".strip()
     system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block)
     conversation_messages = [{"role": m.role, "content": m.content} for m in req.history[-20:]]
     conversation_messages.append({"role": "user", "content": req.message})
@@ -1814,7 +1895,8 @@ def opinion_confirm(req: OpinionConfirmRequest):
     try:
         if req.new_thread_title is not None:
             return create_thread_with_opinion(
-                req.new_thread_title, identity_token, req.body, req.argumentaire, req.new_thread_summary
+                req.new_thread_title, identity_token, req.body, req.argumentaire,
+                req.new_thread_summary, req.new_thread_category,
             )
         if req.thread_id is None:
             raise ValueError("il faut soit thread_id (fil existant), soit new_thread_title (nouveau fil)")

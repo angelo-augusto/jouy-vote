@@ -1484,6 +1484,49 @@ def test_create_thread_with_opinion_cleans_up_empty_thread_on_partial_failure():
     assert threads == []  # aucune trace orpheline
 
 
+def test_create_thread_with_opinion_stores_valid_category():
+    import main as main_module
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Sujet catégorisé",))
+
+    result = main_module.create_thread_with_opinion(
+        "Sujet catégorisé", "identity-forum-category-1", "Je pense que...", category="voirie"
+    )
+    with main.db() as conn:
+        row = conn.execute("SELECT category FROM threads WHERE thread_id=?", (result["thread_id"],)).fetchone()
+    assert row["category"] == "voirie"
+
+
+def test_create_thread_with_opinion_ignores_invalid_category():
+    """Défense en profondeur (2026-07-29) : même si propose_opinion (validation LLM) bloque déjà
+    une catégorie invalide en amont, la fonction DB elle-même ne doit jamais planter dessus —
+    silently null plutôt qu'une IntegrityError, cohérent avec le reste des validations tolérantes
+    de ce module (voir create_thread)."""
+    import main as main_module
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Sujet catégorie invalide",))
+
+    result = main_module.create_thread_with_opinion(
+        "Sujet catégorie invalide", "identity-forum-category-2", "Je pense que...",
+        category="pas-une-vraie-categorie",
+    )
+    with main.db() as conn:
+        row = conn.execute("SELECT category FROM threads WHERE thread_id=?", (result["thread_id"],)).fetchone()
+    assert row["category"] is None
+
+
+def test_create_thread_stores_valid_category_and_ignores_invalid():
+    import main as main_module
+
+    valid = main_module.create_thread("Sujet catégorie valide direct", category="ecole")
+    assert valid["category"] == "ecole"
+
+    invalid = main_module.create_thread("Sujet catégorie invalide direct", category="inconnue")
+    assert invalid["category"] is None
+
+
 def test_delete_thread_if_empty_rejects_thread_with_content():
     import main as main_module
 
@@ -1981,6 +2024,80 @@ async def test_chat_v2_injects_current_date_in_system_prompt(client, logged_in_u
     assert main_module.current_date_block() in captured["system_prompt"]
 
 
+def test_element_context_block_describes_published_opinion():
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour contexte opinion")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-context-opinion-1", "Corps de test", "Argumentaire de test")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    block = main_module._element_context_block(opinion["opinion_id"], None)
+    assert "Fil pour contexte opinion" in block
+    assert "Corps de test" in block
+    assert "Argumentaire de test" in block
+
+
+def test_element_context_block_describes_published_remarque():
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour contexte remarque")
+    main_module.publish_thread(thread["thread_id"])
+    remarque = main_module.create_remarque(thread["thread_id"], "identity-context-remarque-1", "Corps de la remarque")
+    main_module.publish_remarque(remarque["remarque_id"])
+
+    block = main_module._element_context_block(None, remarque["remarque_id"])
+    assert "Fil pour contexte remarque" in block
+    assert "Corps de la remarque" in block
+
+
+def test_element_context_block_empty_when_nothing_referenced():
+    import main as main_module
+
+    assert main_module._element_context_block(None, None) == ""
+
+
+def test_element_context_block_empty_when_both_referenced():
+    import main as main_module
+
+    assert main_module._element_context_block(1, 1) == ""
+
+
+def test_element_context_block_empty_when_opinion_not_found_or_draft():
+    import main as main_module
+
+    assert main_module._element_context_block(999999, None) == ""
+
+    thread = main_module.create_thread("Fil pour opinion brouillon")
+    main_module.publish_thread(thread["thread_id"])
+    draft_opinion = main_module.create_opinion(thread["thread_id"], "identity-context-draft-1", "Jamais publiée")
+    assert main_module._element_context_block(draft_opinion["opinion_id"], None) == ""
+
+
+@pytest.mark.anyio
+async def test_chat_v2_injects_opinion_context_block(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour contexte chat/v2")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-context-chatv2-1", "Corps repéré dans le prompt")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    captured = {}
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+        captured["system_prompt"] = system_prompt
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    await client.post("/chat/v2", json={
+        "session_token": logged_in_user["session_token"], "message": "je ne suis pas d'accord",
+        "context_opinion_id": opinion["opinion_id"],
+    })
+
+    assert "Corps repéré dans le prompt" in captured["system_prompt"]
+
+
 @pytest.mark.anyio
 async def test_chat_v2_passes_wiki_index_and_callable_in_ctx(client, logged_in_user, monkeypatch):
     import main as main_module
@@ -2002,10 +2119,39 @@ def test_propose_opinion_action_new_thread_valid():
     import chatbot_actions
 
     result = chatbot_actions.propose_opinion(
-        {"new_thread_title": "Un tout nouveau sujet", "body": "Je pense que..."}, {"threads": []}
+        {"new_thread_title": "Un tout nouveau sujet", "new_thread_category": "voirie", "body": "Je pense que..."},
+        {"threads": []},
     )
     assert result["available"] is True
     assert result["new_thread_title"] == "Un tout nouveau sujet"
+    assert result["new_thread_category"] == "voirie"
+
+
+def test_propose_opinion_action_new_thread_rejects_missing_category():
+    """Régression (2026-07-29, catégorisation automatique) : un nouveau fil sans catégorie n'est
+    jamais disponible pour confirmation, même si le reste du brouillon est valide."""
+    import chatbot_actions
+
+    result = chatbot_actions.propose_opinion(
+        {"new_thread_title": "Sujet sans catégorie", "body": "Je pense que..."}, {"threads": []}
+    )
+    assert result["available"] is False
+    assert "new_thread_category" in result["error"]
+
+
+def test_propose_opinion_action_new_thread_rejects_invalid_category():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_opinion(
+        {
+            "new_thread_title": "Sujet catégorie inventée",
+            "new_thread_category": "pas-une-vraie-categorie",
+            "body": "Je pense que...",
+        },
+        {"threads": []},
+    )
+    assert result["available"] is False
+    assert "new_thread_category" in result["error"]
 
 
 def test_propose_opinion_action_new_thread_rejects_exact_title_collision():
@@ -2013,7 +2159,7 @@ def test_propose_opinion_action_new_thread_rejects_exact_title_collision():
 
     ctx = {"threads": [{"thread_id": 5, "title": "Sujet déjà existant", "summary": None, "opinions": []}]}
     result = chatbot_actions.propose_opinion(
-        {"new_thread_title": "Sujet déjà existant", "body": "Je pense que..."}, ctx
+        {"new_thread_title": "Sujet déjà existant", "new_thread_category": "voirie", "body": "Je pense que..."}, ctx
     )
     assert result["available"] is False
     assert "thread_id=5" in result["error"]
@@ -2047,6 +2193,26 @@ async def test_opinion_confirm_endpoint_creates_new_thread_coupled_with_opinion(
     with main.db() as conn:
         row = conn.execute("SELECT status FROM threads WHERE title=?", ("Fil créé via endpoint couplé",)).fetchone()
     assert row["status"] == "published"
+
+
+@pytest.mark.anyio
+async def test_opinion_confirm_endpoint_propagates_new_thread_category(client, logged_in_user):
+    with main.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Fil catégorisé via endpoint",))
+
+    resp = await client.post("/opinion/confirm", json={
+        "session_token": logged_in_user["session_token"],
+        "new_thread_title": "Fil catégorisé via endpoint",
+        "new_thread_category": "environnement",
+        "body": "Je pense que...",
+    })
+    assert resp.status_code == 200
+
+    with main.db() as conn:
+        row = conn.execute(
+            "SELECT category FROM threads WHERE title=?", ("Fil catégorisé via endpoint",)
+        ).fetchone()
+    assert row["category"] == "environnement"
 
 
 @pytest.mark.anyio
@@ -2279,6 +2445,17 @@ def test_get_forum_page_snapshot_includes_remarques_excludes_drafts():
 
     published_row = next(r for r in found["remarques"] if r["remarque_id"] == published_remarque["remarque_id"])
     assert published_row["auteur"] == "Renard orange"
+
+
+def test_get_forum_page_snapshot_includes_category():
+    import main as main_module
+
+    thread = main_module.create_thread("Fil catégorisé pour page Forum", category="culture")
+    main_module.publish_thread(thread["thread_id"])
+
+    snapshot = main_module.get_forum_page_snapshot()
+    found = next(t for t in snapshot if t["thread_id"] == thread["thread_id"])
+    assert found["category"] == "culture"
 
 
 def test_get_forum_page_snapshot_includes_reactions_on_opinions():
@@ -2567,6 +2744,16 @@ def test_tools_description_forbids_inventing_details_absent_from_summary():
     import chatbot_actions
 
     assert "n'invente JAMAIS un nom de rue" in chatbot_actions.TOOLS_DESCRIPTION
+
+
+def test_tools_description_documents_new_thread_category():
+    """Catégorisation automatique (2026-07-29) : le prompt doit lister les 9 catégories fixes et
+    préciser que c'est un jugement du modèle, jamais une question posée à l'utilisateur."""
+    import chatbot_actions
+
+    assert "new_thread_category" in chatbot_actions.TOOLS_DESCRIPTION
+    for key in chatbot_actions.FORUM_CATEGORIES:
+        assert key in chatbot_actions.TOOLS_DESCRIPTION
 
 
 def test_list_threads_action_strips_opinions_from_ctx():
