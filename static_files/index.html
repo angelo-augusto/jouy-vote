@@ -965,7 +965,10 @@ function renderForumCategoryTabs() {
     const btn = document.createElement('button');
     btn.textContent = label;
     btn.className = key === forumCurrentCategory ? 'btn-primary' : '';
-    btn.style.cssText = 'font-size:.85em; padding:.3em .7em;';
+    // width:auto (2026-07-30, même bug que le champ "Réagir" — voir buildInlineReactWidget) :
+    // la règle globale "button { width: 100% }" fait que chaque onglet s'empilait en pleine
+    // largeur au lieu de rester côte à côte dans la rangée flex-wrap.
+    btn.style.cssText = 'font-size:.85em; padding:.3em .7em; width:auto; margin-top:0;';
     btn.onclick = () => { forumCurrentCategory = key; renderForumCategoryTabs(); renderForumThreadsList(); };
     tabsEl.appendChild(btn);
   });
@@ -1102,9 +1105,17 @@ function buildInlineReactWidget(contextRef) {
   const input = document.createElement('input');
   input.type = 'text';
   input.placeholder = 'Réagir à cet élément…';
-  input.style.cssText = 'flex:1;';
+  // width:auto + min-width:0 (2026-07-30, bug réel signalé par Angelo, mobile Chrome) : les
+  // règles globales "input, select { width: 100% }" ET "button { width: 100% }" (voir <style>)
+  // entrent toutes les deux en conflit avec une rangée flex — chacune essayait de prendre 100%
+  // de la largeur du conteneur flex, le bouton (flex-shrink:0) gagnait la course et écrasait le
+  // champ de saisie à une largeur quasi nulle. Ces règles n'ont de sens que pour un élément SEUL
+  // sur sa ligne (comme #chatInput/#chatSendBtn, chacun sur sa propre ligne) ; ici, à l'intérieur
+  // d'une rangée flex, il faut neutraliser explicitement les deux.
+  input.style.cssText = 'flex:1; width:auto; min-width:0;';
   const sendBtn = document.createElement('button');
   sendBtn.className = 'btn-primary';
+  sendBtn.style.cssText = 'width:auto; flex-shrink:0; margin-top:0;';
   sendBtn.textContent = 'Envoyer';
   inputRow.appendChild(input);
   inputRow.appendChild(sendBtn);
