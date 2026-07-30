@@ -110,6 +110,14 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <h2>💬 Assistant</h2>
   <p class="info">Rien de cet échange n'est conservé, sauf si vous demandez explicitement de sauvegarder un résumé.</p>
   <div id="chatMessages" style="max-height:280px; overflow-y:auto; border:1px solid #eee; border-radius:4px; padding:.6em; margin-bottom:.6em; font-size:.9em;"></div>
+  <!-- Pas de display:flex inline ici (2026-07-30) : combiner display inline + classe .hidden
+       ferait gagner l'inline (priorité CSS toujours plus forte qu'une classe) et l'indicateur
+       resterait visible en permanence, même repli de bug déjà vu 2 fois ce soir sur des boutons
+       en rangée flex. Alignement obtenu ici via vertical-align, pas flexbox. -->
+  <div id="chatLoadingIndicator" class="hidden" style="margin-bottom:.6em; color:#666; font-size:.85em;">
+    <img src="/static_files/robot_loading.gif" alt="" width="36" height="36" style="width:36px; height:36px; vertical-align:middle; margin-right:.4em;">
+    <span style="vertical-align:middle;">L'assistant réfléchit…</span>
+  </div>
   <div id="pseudoProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
     <p class="info" style="margin:0 0 .5em;">Choisissez votre pseudonyme (jamais votre nom réel) :</p>
     <div id="pseudoCandidates"></div>
@@ -511,6 +519,11 @@ async function sendChatMessage() {
   chatHistory.push({ role: 'user', content: message });
   renderChatMessages();
   input.value = '';
+  // Animation de chargement (2026-07-30, demande développeur — remplace l'absence de feedback
+  // visuel pendant l'attente d'une réponse LLM, qui peut prendre 10-20s) : classList plutôt
+  // qu'un style inline, voir commentaire sur #chatLoadingIndicator dans le HTML.
+  const loadingEl = document.getElementById('chatLoadingIndicator');
+  loadingEl.classList.remove('hidden');
   try {
     // POC tool-calling (mandat angelobot 2026-07-25) : /chat/v2 renvoie {replies: [...], error}
     // au lieu d'un seul data.reply — plusieurs say_user possibles dans un même tour, et une
@@ -536,6 +549,8 @@ async function sendChatMessage() {
     renderRemarqueProposal(data.actions_log);
   } catch (e) {
     showMsg('chatMsg', e.message, 'error');
+  } finally {
+    loadingEl.classList.add('hidden');
   }
 }
 // Choix collaboratif du pseudo (mandat angelobot 2026-07-25, tâtonnement tour après tour) :
@@ -1181,7 +1196,23 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
     } catch (e) { /* pas bloquant : les boutons restent simplement non surlignés */ }
   }
 
+  // Animation de chargement (2026-07-30, même mécanisme que sur /assistant, voir
+  // #chatLoadingIndicator) — pas de display inline pour la même raison (conflit avec .hidden).
+  const inlineLoadingEl = document.createElement('div');
+  inlineLoadingEl.className = 'hidden';
+  inlineLoadingEl.style.cssText = 'margin-bottom:.4em; color:#666; font-size:.8em;';
+  const inlineLoadingImg = document.createElement('img');
+  inlineLoadingImg.src = '/static_files/robot_loading.gif';
+  inlineLoadingImg.alt = '';
+  inlineLoadingImg.style.cssText = 'width:24px; height:24px; vertical-align:middle; margin-right:.4em;';
+  const inlineLoadingText = document.createElement('span');
+  inlineLoadingText.textContent = "L'assistant réfléchit…";
+  inlineLoadingText.style.cssText = 'vertical-align:middle;';
+  inlineLoadingEl.appendChild(inlineLoadingImg);
+  inlineLoadingEl.appendChild(inlineLoadingText);
+
   panel.appendChild(messagesEl);
+  panel.appendChild(inlineLoadingEl);
   panel.appendChild(proposalEl);
   panel.appendChild(inputRow);
 
@@ -1206,6 +1237,7 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
     const payload = { session_token, message, history: historyBefore };
     if (contextRef.type === 'opinion') payload.context_opinion_id = contextRef.id;
     if (contextRef.type === 'remarque') payload.context_remarque_id = contextRef.id;
+    inlineLoadingEl.classList.remove('hidden');
     try {
       const data = await api('/chat/v2', payload);
       if (data.replies) {
@@ -1217,6 +1249,8 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
       renderInlineProposal(data.actions_log);
     } catch (e) {
       proposalEl.textContent = e.message;
+    } finally {
+      inlineLoadingEl.classList.add('hidden');
     }
   }
 
