@@ -1053,18 +1053,24 @@ function renderForumOpinion(o) {
   }
   // Réactions (2026-07-26, oubli de spec initial corrigé : la page Forum n'affichait aucune
   // réaction alors que Mon activité les affichait déjà) — même présentation que Mon activité.
-  if (o.reaction_counts) {
-    const c = o.reaction_counts;
+  // Rafraîchi en live (2026-07-30, demande développeur) après un clic sur un bouton direct
+  // adhérer/opposer/neutre — voir renderReactionSummary passé à buildInlineReactWidget, qui
+  // renvoie déjà reaction_counts/reactions à jour dans la réponse de /reaction/toggle.
+  const reactionSummaryEl = document.createElement('div');
+  function renderReactionSummary(counts, reactions) {
+    reactionSummaryEl.innerHTML = '';
     const countsP = document.createElement('p');
     countsP.style.cssText = 'margin:.5em 0 0; font-size:.85em; color:#666;';
     countsP.textContent =
-      c.adherer + ' adhésion' + (c.adherer !== 1 ? 's' : '') + ' · ' +
-      c.opposer + ' opposition' + (c.opposer !== 1 ? 's' : '') + ' · ' +
-      c.neutre + ' neutre' + (c.neutre !== 1 ? 's' : '');
-    div.appendChild(countsP);
-    (o.reactions || []).forEach(r => div.appendChild(renderMyActivityReaction(r)));
+      counts.adherer + ' adhésion' + (counts.adherer !== 1 ? 's' : '') + ' · ' +
+      counts.opposer + ' opposition' + (counts.opposer !== 1 ? 's' : '') + ' · ' +
+      counts.neutre + ' neutre' + (counts.neutre !== 1 ? 's' : '');
+    reactionSummaryEl.appendChild(countsP);
+    (reactions || []).forEach(r => reactionSummaryEl.appendChild(renderMyActivityReaction(r)));
   }
-  div.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }));
+  if (o.reaction_counts) renderReactionSummary(o.reaction_counts, o.reactions);
+  div.appendChild(reactionSummaryEl);
+  div.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary));
   return div;
 }
 function renderForumRemarque(r) {
@@ -1088,7 +1094,7 @@ function renderForumRemarque(r) {
 function contextRefEquals(a, b) {
   return !!a && !!b && a.type === b.type && a.id === b.id;
 }
-function buildInlineReactWidget(contextRef) {
+function buildInlineReactWidget(contextRef, onReactionUpdate) {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'margin-top:.4em;';
   const toggleBtn = document.createElement('button');
@@ -1148,6 +1154,7 @@ function buildInlineReactWidget(contextRef) {
         try {
           const data = await api('/reaction/toggle', { session_token, opinion_id: contextRef.id, stance });
           highlightStanceButtons(data.stance);
+          if (onReactionUpdate) onReactionUpdate(data.reaction_counts, data.reactions);
         } catch (e) {
           stanceErrorEl.textContent = e.message;
           stanceErrorEl.style.display = '';
@@ -1410,19 +1417,26 @@ function renderMyActivityOpinion(o) {
     disavowed.textContent = 'Vous avez désavoué cette opinion.';
     block.appendChild(disavowed);
   }
-  const c = o.reaction_counts;
-  const countsP = document.createElement('p');
-  countsP.style.fontSize = '.85em';
-  countsP.style.color = '#666';
-  // Forme nominale (adhésion/opposition/neutre) plutôt que verbale (adhèrent/s'opposent) :
-  // évite d'avoir à conjuguer correctement au singulier ET au pluriel pour 3 décomptes distincts.
-  countsP.textContent =
-    c.adherer + ' adhésion' + (c.adherer !== 1 ? 's' : '') + ' · ' +
-    c.opposer + ' opposition' + (c.opposer !== 1 ? 's' : '') + ' · ' +
-    c.neutre + ' neutre' + (c.neutre !== 1 ? 's' : '');
-  block.appendChild(countsP);
-  o.reactions.forEach(r => block.appendChild(renderMyActivityReaction(r)));
-  block.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }));
+  // Rafraîchi en live (2026-07-30, même mécanisme que renderForumOpinion) après un clic sur un
+  // bouton direct adhérer/opposer/neutre.
+  const reactionSummaryEl = document.createElement('div');
+  function renderReactionSummary(counts, reactions) {
+    reactionSummaryEl.innerHTML = '';
+    const countsP = document.createElement('p');
+    countsP.style.fontSize = '.85em';
+    countsP.style.color = '#666';
+    // Forme nominale (adhésion/opposition/neutre) plutôt que verbale (adhèrent/s'opposent) :
+    // évite d'avoir à conjuguer correctement au singulier ET au pluriel pour 3 décomptes distincts.
+    countsP.textContent =
+      counts.adherer + ' adhésion' + (counts.adherer !== 1 ? 's' : '') + ' · ' +
+      counts.opposer + ' opposition' + (counts.opposer !== 1 ? 's' : '') + ' · ' +
+      counts.neutre + ' neutre' + (counts.neutre !== 1 ? 's' : '');
+    reactionSummaryEl.appendChild(countsP);
+    (reactions || []).forEach(r => reactionSummaryEl.appendChild(renderMyActivityReaction(r)));
+  }
+  renderReactionSummary(o.reaction_counts, o.reactions);
+  block.appendChild(reactionSummaryEl);
+  block.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary));
   return block;
 }
 function renderMyActivityReaction(r) {
