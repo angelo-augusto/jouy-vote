@@ -2272,6 +2272,49 @@ def test_element_context_block_includes_author_pseudo_for_remarque():
     assert "Corail rouge" in block
 
 
+def test_element_context_block_recognizes_own_opinion_as_you():
+    """Régression bug réel connexe (2026-07-30, signalé par Angelo) : sur SA PROPRE opinion,
+    l'assistant répondait à la 3e personne ("publiée par Chat gris") au lieu de reconnaître que
+    l'auteur EST l'utilisateur courant — le pseudo de l'utilisateur courant n'était jamais mis en
+    texte lisible dans le prompt. Comparaison faite en Python (word+color canoniques), jamais
+    laissée au modèle."""
+    import main as main_module
+
+    author_identity = "identity-context-own-opinion-1"
+    main_module.confirm_pseudo(author_identity, "Ravin", "violet")
+    thread = main_module.create_thread("Fil pour contexte propre opinion")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], author_identity, "Ma propre opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    block_as_author = main_module._element_context_block(opinion["opinion_id"], None, author_identity)
+    assert "c'est TOI" in block_as_author
+
+    # Un autre utilisateur (ou personne connue) consultant la MÊME opinion ne doit jamais voir
+    # cette mention.
+    block_as_stranger = main_module._element_context_block(opinion["opinion_id"], None, "identity-context-stranger-1")
+    assert "c'est TOI" not in block_as_stranger
+    block_without_identity = main_module._element_context_block(opinion["opinion_id"], None)
+    assert "c'est TOI" not in block_without_identity
+
+
+def test_element_context_block_recognizes_own_remarque_as_you():
+    import main as main_module
+
+    author_identity = "identity-context-own-remarque-1"
+    main_module.confirm_pseudo(author_identity, "Sittelle", "noir")
+    thread = main_module.create_thread("Fil pour contexte propre remarque")
+    main_module.publish_thread(thread["thread_id"])
+    remarque = main_module.create_remarque(thread["thread_id"], author_identity, "Ma propre remarque")
+    main_module.publish_remarque(remarque["remarque_id"])
+
+    block_as_author = main_module._element_context_block(None, remarque["remarque_id"], author_identity)
+    assert "c'est TOI" in block_as_author
+
+    block_as_stranger = main_module._element_context_block(None, remarque["remarque_id"], "identity-context-stranger-2")
+    assert "c'est TOI" not in block_as_stranger
+
+
 def test_element_context_block_mentions_current_stance_when_reacted_via_button():
     """2026-07-30, boutons directs : si l'utilisateur a déjà posé un stance via bouton, le
     contexte doit le rappeler pour qu'un argumentaire tapé ensuite dans le chat réutilise ce

@@ -1888,6 +1888,18 @@ def _element_context_block(
             # soir : même leçon, ne jamais laisser le modèle deviner/chercher ce qu'on peut lui
             # fournir directement.
             auteur = _agree_pseudo_display(row["word"], row["color"]) if row["word"] else "auteur inconnu"
+            # "C'est toi" (2026-07-30, bug réel connexe signalé par Angelo) : le pseudo de
+            # l'utilisateur COURANT n'est jamais mis en texte lisible ailleurs dans le prompt
+            # (ctx["pseudo"] n'existe que pour des comparaisons internes côté action, jamais
+            # exposé au modèle) — sans ce rappel, le modèle répondait toujours à la 3e personne,
+            # même sur la propre opinion de l'utilisateur. Comparaison faite ICI en Python (sur
+            # word+color canoniques, pas la forme accordée) plutôt que de faire deviner au modèle
+            # si deux pseudos affichés désignent la même personne — même logique que le blocage
+            # auto-réaction plus tôt dans la soirée.
+            if identity_token is not None and row["word"]:
+                own_pseudo = get_existing_pseudo(identity_token)
+                if own_pseudo and own_pseudo["word"] == row["word"] and own_pseudo["color"] == row["color"]:
+                    auteur += " (c'est TOI, l'utilisateur avec qui tu parles en ce moment)"
             block = (
                 f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de l'opinion "
                 f"opinion_id={context_opinion_id} (thread_id={row['thread_id']}), fil "
@@ -1922,6 +1934,10 @@ def _element_context_block(
             if row is None:
                 return ""
             auteur = _agree_pseudo_display(row["word"], row["color"]) if row["word"] else "auteur inconnu"
+            if identity_token is not None and row["word"]:
+                own_pseudo = get_existing_pseudo(identity_token)
+                if own_pseudo and own_pseudo["word"] == row["word"] and own_pseudo["color"] == row["color"]:
+                    auteur += " (c'est TOI, l'utilisateur avec qui tu parles en ce moment)"
             return (
                 f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de la remarque "
                 f"remarque_id={context_remarque_id} (thread_id={row['thread_id']}), fil "
