@@ -2036,6 +2036,11 @@ def test_element_context_block_describes_published_opinion():
     assert "Fil pour contexte opinion" in block
     assert "Corps de test" in block
     assert "Argumentaire de test" in block
+    # Régression bug réel (2026-07-30, signalé par Angelo) : sans l'identifiant numérique
+    # explicite, le modèle devinait un opinion_id au hasard (souvent 1) au lieu d'utiliser celui
+    # réellement visé, annonçant à tort "opinion introuvable" avant de se corriger tout seul.
+    assert f"opinion_id={opinion['opinion_id']}" in block
+    assert f"thread_id={thread['thread_id']}" in block
 
 
 def test_element_context_block_describes_published_remarque():
@@ -2049,6 +2054,9 @@ def test_element_context_block_describes_published_remarque():
     block = main_module._element_context_block(None, remarque["remarque_id"])
     assert "Fil pour contexte remarque" in block
     assert "Corps de la remarque" in block
+    # Même régression que pour l'opinion ci-dessus.
+    assert f"remarque_id={remarque['remarque_id']}" in block
+    assert f"thread_id={thread['thread_id']}" in block
 
 
 def test_element_context_block_empty_when_nothing_referenced():

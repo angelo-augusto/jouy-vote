@@ -1754,7 +1754,7 @@ def _element_context_block(context_opinion_id: int | None, context_remarque_id: 
     with db() as conn:
         if context_opinion_id is not None:
             row = conn.execute(
-                """SELECT o.body, o.argumentaire, t.title AS thread_title
+                """SELECT o.thread_id, o.body, o.argumentaire, t.title AS thread_title
                    FROM opinions o JOIN threads t ON t.thread_id = o.thread_id
                    WHERE o.opinion_id=? AND o.status='published'""",
                 (context_opinion_id,),
@@ -1762,15 +1762,22 @@ def _element_context_block(context_opinion_id: int | None, context_remarque_id: 
             if row is None:
                 return ""
             block = (
-                f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de cette "
-                f"opinion précise du fil \"{row['thread_title']}\" : \"{row['body']}\""
+                f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de l'opinion "
+                f"opinion_id={context_opinion_id} (thread_id={row['thread_id']}), fil "
+                f"\"{row['thread_title']}\" : \"{row['body']}\""
             )
             if row["argumentaire"]:
                 block += f" (argumentaire : \"{row['argumentaire']}\")"
-            return block + ". Concentre-toi sur CET élément précis, sans élargir au reste du forum sauf si l'utilisateur le demande explicitement."
+            return (
+                block + f". Si l'utilisateur veut réagir à CETTE opinion précise, appelle "
+                f"directement propose_reaction avec opinion_id={context_opinion_id} — n'appelle "
+                f"JAMAIS list_threads/get_thread pour la retrouver, tu as déjà tout ce qu'il faut "
+                f"ci-dessus, y compris l'identifiant exact. Concentre-toi sur CET élément précis, "
+                f"sans élargir au reste du forum sauf si l'utilisateur le demande explicitement."
+            )
         if context_remarque_id is not None:
             row = conn.execute(
-                """SELECT r.body, t.title AS thread_title
+                """SELECT r.thread_id, r.body, t.title AS thread_title
                    FROM thread_remarques r JOIN threads t ON t.thread_id = r.thread_id
                    WHERE r.remarque_id=? AND r.status='published'""",
                 (context_remarque_id,),
@@ -1778,9 +1785,15 @@ def _element_context_block(context_opinion_id: int | None, context_remarque_id: 
             if row is None:
                 return ""
             return (
-                f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de cette "
-                f"remarque précise du fil \"{row['thread_title']}\" : \"{row['body']}\". "
-                "Concentre-toi sur CET élément précis, sans élargir au reste du forum sauf si l'utilisateur le demande explicitement."
+                f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de la remarque "
+                f"remarque_id={context_remarque_id} (thread_id={row['thread_id']}), fil "
+                f"\"{row['thread_title']}\" : \"{row['body']}\". Si l'utilisateur veut répondre à "
+                f"CETTE remarque précise, appelle directement propose_remarque avec "
+                f"thread_id={row['thread_id']} et reply_to_remarque_id={context_remarque_id} — "
+                f"n'appelle JAMAIS list_threads/get_thread pour la retrouver, tu as déjà tout ce "
+                f"qu'il faut ci-dessus, y compris les identifiants exacts. Concentre-toi sur CET "
+                f"élément précis, sans élargir au reste du forum sauf si l'utilisateur le demande "
+                f"explicitement."
             )
     return ""
 
