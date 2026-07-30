@@ -432,7 +432,16 @@ def propose_reaction(params: dict, ctx: dict) -> dict:
     write. Cherche l'opinion dans ctx["threads"] (opinions publiées imbriquées par fil, voir
     get_thread) pour vérifier qu'elle existe réellement avant de proposer une réaction dessus.
     "stance" doit être "adherer", "opposer" ou "neutre" — ce 3e état ("neutre") compte comme une
-    vraie réaction (l'utilisateur a lu et reste neutre), distinct de ne pas avoir réagi du tout."""
+    vraie réaction (l'utilisateur a lu et reste neutre), distinct de ne pas avoir réagi du tout.
+
+    Auto-réaction (2026-07-30, décision développeur, affinée le même soir) : adhérer/neutre sur sa
+    propre opinion restent normaux. Seul "opposer" sur soi-même est signalé ICI via comparaison de
+    pseudo affiché (ctx["pseudo"] vs opinion["auteur"]) — pas fiable à 100% (deux pseudos affichés
+    identiques resteraient distincts en cas de collision théorique), donc ne remplace JAMAIS le
+    vrai blocage côté DB (main.add_reaction, comparaison de debate_token réel) qui reste le seul
+    rempart autoritaire — juste évite une proposition inutile et une confirmation qui échouerait
+    de toute façon. S'opposer à sa propre opinion signale un changement d'avis, pas une vraie
+    réaction — invite à reformuler plutôt que de proposer la réaction telle quelle."""
     opinion_id = params.get("opinion_id")
     stance = params.get("stance", "")
     argumentaire = params.get("argumentaire")
@@ -445,6 +454,13 @@ def propose_reaction(params: dict, ctx: dict) -> dict:
             break
     if opinion is None:
         return {"available": False, "error": "opinion introuvable (ou pas encore publiée)"}
+    own_pseudo = ctx.get("pseudo")
+    is_own_opinion = own_pseudo and opinion["auteur"] == _agree_pseudo_display(own_pseudo["word"], own_pseudo["color"])
+    if stance == "opposer" and is_own_opinion:
+        return {
+            "available": False,
+            "error": "tu ne peux pas t'opposer à ta propre opinion — si tu as changé d'avis, reformule-la plutôt",
+        }
     return {
         "opinion_id": opinion_id, "stance": stance, "argumentaire": argumentaire,
         "opinion_body": opinion["body"], "available": True,
@@ -963,6 +979,14 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   "neutre" — ce 3e état est une VRAIE réaction (l'utilisateur a lu et reste neutre), jamais à
   confondre avec "n'a pas réagi du tout". "argumentaire" (optionnel) : le raisonnement du
   désaccord/accord, souvent aussi précieux que l'opinion elle-même en cas de désaccord.
+  RÈGLE (2026-07-30, affinée le même soir) : adhérer/neutre sur sa propre opinion restent
+  normaux. Seul stance="opposer" sur sa propre opinion renvoie available=false — s'opposer à sa
+  propre opinion signale en réalité un changement d'avis, pas une vraie réaction : invite alors
+  l'utilisateur à reformuler son opinion plutôt que d'enregistrer une opposition à lui-même. Sur
+  la page Forum, un bouton direct (adhérer/opposer/neutre) existe aussi pour poser le stance sans
+  passer par toi — si le message de l'utilisateur n'est qu'un argumentaire sur une opinion déjà
+  scopée, voir le rappel de contexte qui précise le stance déjà choisi (ne le redemande pas, ne
+  l'invente pas).
 - propose_remarque(thread_id, body, reply_to_remarque_id, reply_to_opinion_id) : brouillon de
   remarque informelle sur un fil (dire bonjour, élaborer sur le sujet sans passer par le
   formalisme adhérer/opposer/argumentaire). "reply_to_remarque_id" et "reply_to_opinion_id" sont

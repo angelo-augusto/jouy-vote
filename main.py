@@ -357,6 +357,43 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
     _fix_reset_token_expiry_type()
+    _fix_opinion_reactions_status_check()
+
+
+def _fix_opinion_reactions_status_check():
+    """Ajoute 'retracted' aux valeurs autorisées pour opinion_reactions.status (2026-07-30,
+    bouton direct "annuler ma réaction" — voir retract_reaction). ALTER TABLE ADD COLUMN ne
+    permet pas de modifier une contrainte CHECK existante en SQLite — même technique de
+    reconstruction que _fix_reset_token_expiry_type, idempotente (détecte via le SQL de création
+    déjà stocké dans sqlite_master si la migration a déjà eu lieu)."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='opinion_reactions'"
+        ).fetchone()
+        if row is None or "retracted" in row["sql"]:
+            return
+        conn.execute("ALTER TABLE opinion_reactions RENAME TO opinion_reactions_old_migration")
+        conn.execute(
+            """CREATE TABLE opinion_reactions (
+                reaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opinion_id INTEGER NOT NULL REFERENCES opinions(opinion_id),
+                reactor_debate_token TEXT NOT NULL,
+                stance TEXT NOT NULL CHECK (stance IN ('adherer', 'opposer', 'neutre')),
+                argumentaire TEXT,
+                status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published', 'retracted')),
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO opinion_reactions
+               SELECT reaction_id, opinion_id, reactor_debate_token, stance, argumentaire, status, created_at
+               FROM opinion_reactions_old_migration"""
+        )
+        conn.execute("DROP TABLE opinion_reactions_old_migration")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_opinion_reactions_opinion ON opinion_reactions(opinion_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_opinion_reactions_reactor ON opinion_reactions(reactor_debate_token)"
+        )
 
 
 def _fix_reset_token_expiry_type():
@@ -502,6 +539,17 @@ class ReactionConfirmRequest(BaseModel):
     opinion_id: int
     stance: str
     argumentaire: str | None = None
+
+
+class ReactionToggleRequest(BaseModel):
+    session_token: str
+    opinion_id: int
+    stance: str
+
+
+class ReactionMineRequest(BaseModel):
+    session_token: str
+    opinion_id: int
 
 
 class RemarqueConfirmRequest(BaseModel):
@@ -851,12 +899,29 @@ def add_reaction(opinion_id: int, reactor_identity_token: str, stance: str, argu
     if stance not in ("adherer", "opposer", "neutre"):
         raise ValueError("stance invalide")
     with db() as conn:
-        opinion_row = conn.execute("SELECT status FROM opinions WHERE opinion_id=?", (opinion_id,)).fetchone()
+        opinion_row = conn.execute(
+            "SELECT status, author_debate_token FROM opinions WHERE opinion_id=?", (opinion_id,)
+        ).fetchone()
         if opinion_row is None:
             raise ValueError("opinion introuvable")
         if opinion_row["status"] != "published":
             raise ValueError("cette opinion n'est pas publiée")
     reactor_debate_token = compute_debate_token(reactor_identity_token)
+    # Auto-réaction (2026-07-30, décision développeur, affinée le même soir) : adhérer/neutre sur
+    # sa propre opinion restent normaux (pas de sens à bloquer — l'auteur qui confirme sa position
+    # ou reste neutre sur son propre texte n'est pas absurde). Seul "opposer" sur soi-même est
+    # bloqué ICI (seul point d'écriture réel des réactions, voir docstring — valable pour tous les
+    # chemins : /reaction/confirm ET le bouton direct set_reaction_stance) : s'opposer à sa propre
+    # opinion signale en réalité un changement d'avis, pas une vraie réaction — le message invite
+    # à reformuler via le chat plutôt que d'enregistrer une opposition à soi-même. Le déclenchement
+    # automatique du mécanisme de remplacement (supersede_opinion) n'est PAS câblé côté LLM à ce
+    # jour (vérifié : aucune action propose_supersede, aucun endpoint) — hors scope de ce fix,
+    # backlog distinct plutôt qu'improvisé ce soir.
+    if stance == "opposer" and reactor_debate_token == opinion_row["author_debate_token"]:
+        raise ValueError(
+            "tu ne peux pas t'opposer à ta propre opinion — si tu as changé d'avis, "
+            "reformule-la plutôt via l'assistant"
+        )
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO opinion_reactions (opinion_id, reactor_debate_token, stance, argumentaire) "
@@ -885,6 +950,51 @@ def get_current_reaction(opinion_id: int, reactor_identity_token: str) -> dict |
             (opinion_id, reactor_debate_token),
         ).fetchone()
     return dict(row) if row else None
+
+
+def retract_reaction(opinion_id: int, reactor_identity_token: str) -> dict:
+    """Annule la réaction courante de l'utilisateur sur cette opinion (2026-07-30, bouton direct
+    "reclic sur le même stance = annule"). Jamais de suppression (voir add_reaction : chaque
+    réaction reste un fait historique) — juste un changement de statut, même principe que
+    disavow_opinion pour les opinions. Marque TOUTES les réactions encore 'published' de ce
+    réacteur sur cette opinion (pas seulement la plus récente) : si on ne marquait que la
+    dernière, une réaction PLUS ANCIENNE encore au statut 'published' réapparaîtrait comme
+    "courante" dans get_current_reaction/_get_opinion_reaction_summary (qui ne filtrent que sur
+    status='published', sans notion de récence au niveau SQL) — en pratique il ne devrait y avoir
+    qu'une réaction 'published' à la fois par réacteur, mais ce garde-fou coûte rien. Idempotent :
+    ne fait rien si aucune réaction active."""
+    reactor_debate_token = compute_debate_token(reactor_identity_token)
+    with db() as conn:
+        conn.execute(
+            "UPDATE opinion_reactions SET status='retracted' "
+            "WHERE opinion_id=? AND reactor_debate_token=? AND status='published'",
+            (opinion_id, reactor_debate_token),
+        )
+    return {"opinion_id": opinion_id, "stance": None}
+
+
+def set_reaction_stance(opinion_id: int, reactor_identity_token: str, stance: str) -> dict:
+    """Bouton direct "Réagir" (2026-07-30, décision développeur) : écrit IMMÉDIATEMENT, sans
+    passer par le chatbot ni par la double confirmation habituelle (opinion/remarque) — justifié
+    par le choix fermé parmi 3 options, sans texte libre, donc sans besoin de modération ni de
+    risque de publication accidentelle d'un contenu non voulu. Élimine aussi structurellement le
+    bug d'ID trouvé le 2026-07-30 sur le chat inline : le bouton connaît déjà opinion_id, le LLM
+    n'a plus besoin de le deviner pour CE choix précis.
+
+    Toggle : reclic sur le MÊME stance que la réaction courante retire la réaction (voir
+    retract_reaction) ; un stance différent (ou l'absence de réaction courante) en crée une
+    nouvelle, publiée directement (même mécanisme "changer d'avis" que add_reaction — l'ancienne
+    réaction reste un fait historique, jamais écrasée). Aucun argumentaire ici : le texte libre
+    accompagnant la réaction continue de passer par propose_reaction (chat), voir
+    _element_context_block qui rappelle au modèle le stance déjà choisi par bouton."""
+    if stance not in ("adherer", "opposer", "neutre"):
+        raise ValueError("stance invalide")
+    current = get_current_reaction(opinion_id, reactor_identity_token)
+    if current is not None and current["stance"] == stance:
+        return retract_reaction(opinion_id, reactor_identity_token)
+    reaction = add_reaction(opinion_id, reactor_identity_token, stance)
+    publish_reaction(reaction["reaction_id"])
+    return {"opinion_id": opinion_id, "stance": stance}
 
 
 def create_remarque(
@@ -1743,12 +1853,20 @@ _MOIS_NOMS = [
 ]
 
 
-def _element_context_block(context_opinion_id: int | None, context_remarque_id: int | None) -> str:
+def _element_context_block(
+    context_opinion_id: int | None, context_remarque_id: int | None,
+    identity_token: str | None = None,
+) -> str:
     """Chat inline scopé (2026-07-29, bouton "Réagir" sur Forum/Mon activité) : décrit l'opinion
     ou la remarque précise sur laquelle l'utilisateur vient de cliquer "Réagir", pour qu'il n'ait
     jamais à la réexpliquer lui-même. Dégrade en chaîne vide si l'id est absent, invalide ou pointe
     vers un contenu non publié — un contexte manquant ne doit jamais faire échouer la conversation,
-    juste priver le modèle de ce rappel (il peut toujours demander lui-même si besoin)."""
+    juste priver le modèle de ce rappel (il peut toujours demander lui-même si besoin).
+
+    identity_token (2026-07-30, boutons directs adherer/opposer/neutre) : optionnel — permet de
+    rappeler au modèle le stance déjà posé par bouton pour cette opinion (voir
+    set_reaction_stance), pour qu'un message ultérieur de simple argumentaire ("parce que...")
+    réutilise ce stance au lieu d'en redemander un ou d'en inventer un par défaut."""
     if context_opinion_id is not None and context_remarque_id is not None:
         return ""
     with db() as conn:
@@ -1768,6 +1886,15 @@ def _element_context_block(context_opinion_id: int | None, context_remarque_id: 
             )
             if row["argumentaire"]:
                 block += f" (argumentaire : \"{row['argumentaire']}\")"
+            if identity_token is not None:
+                current = get_current_reaction(context_opinion_id, identity_token)
+                if current is not None:
+                    block += (
+                        f". L'utilisateur a déjà choisi le stance \"{current['stance']}\" via un "
+                        f"bouton direct pour cette opinion — si son message n'est qu'un "
+                        f"argumentaire (ex: \"parce que...\"), réutilise CE stance, ne lui redemande "
+                        f"pas et n'en invente pas un autre sauf s'il l'exprime clairement"
+                    )
             return (
                 block + f". Si l'utilisateur veut réagir à CETTE opinion précise, appelle "
                 f"directement propose_reaction avec opinion_id={context_opinion_id} — n'appelle "
@@ -1827,7 +1954,7 @@ def chat_v2(req: ChatRequest):
     # utile aussi pour raisonner sur list_conseil_municipal_seances ("y a-t-il eu un conseil
     # depuis juin ?").
     context_block = f"{current_date_block()}\n\n{context_block}".strip() if context_block else current_date_block()
-    element_block = _element_context_block(req.context_opinion_id, req.context_remarque_id)
+    element_block = _element_context_block(req.context_opinion_id, req.context_remarque_id, identity_token)
     if element_block:
         context_block = f"{context_block}\n\n{element_block}".strip()
     system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block)
@@ -1921,15 +2048,49 @@ def opinion_confirm(req: OpinionConfirmRequest):
 
 @app.post("/reaction/confirm")
 def reaction_confirm(req: ReactionConfirmRequest):
-    """SEUL endpoint qui écrit une réaction — jamais le LLM (voir chatbot_actions.
-    propose_reaction, lecture/validation pure). Même logique que /opinion/confirm : création +
-    publication en un seul geste, déclenché uniquement par un clic utilisateur explicite."""
+    """Chemin LLM (voir chatbot_actions.propose_reaction, lecture/validation pure) — jamais
+    d'écriture directe par le modèle. Même logique que /opinion/confirm : création + publication
+    en un seul geste, déclenché uniquement par un clic utilisateur explicite. Utilisé quand la
+    réaction porte un argumentaire en texte libre (voir /reaction/toggle pour le choix de stance
+    seul, sans passer par le chat, 2026-07-30)."""
     identity_token = _require_identity(req.session_token)
     try:
         reaction = add_reaction(req.opinion_id, identity_token, req.stance, req.argumentaire)
         return publish_reaction(reaction["reaction_id"])
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/reaction/toggle")
+def reaction_toggle(req: ReactionToggleRequest):
+    """Bouton direct "Réagir" (2026-07-30, décision développeur, voir set_reaction_stance) :
+    ÉCRITURE DIRECTE sans passer par le chatbot ni par une double confirmation — justifié par le
+    choix fermé parmi 3 options (adherer/opposer/neutre), sans texte libre, donc sans risque de
+    contenu non désiré à modérer. Aucun argumentaire ici (voir /reaction/confirm pour l'ajouter
+    via le chat, sur la MÊME opinion, une fois le stance déjà posé par bouton). Renvoie le stance
+    résultant (None si la réaction vient d'être annulée) + les décomptes à jour de l'opinion, pour
+    que le frontend puisse rafraîchir l'affichage sans requête supplémentaire."""
+    identity_token = _require_identity(req.session_token)
+    if req.stance not in ("adherer", "opposer", "neutre"):
+        raise HTTPException(400, "stance invalide")
+    try:
+        result = set_reaction_stance(req.opinion_id, identity_token, req.stance)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    with db() as conn:
+        counts = _get_opinion_reaction_summary(conn, req.opinion_id)
+    return {**result, **counts}
+
+
+@app.post("/reaction/mine")
+def reaction_mine(req: ReactionMineRequest):
+    """Bouton direct "Réagir" (2026-07-30) : renvoie le stance actuel de l'utilisateur connecté
+    sur cette opinion (ou None), pour pré-sélectionner/surligner le bon bouton à l'ouverture du
+    panneau — jamais l'inverse (get_forum_page_snapshot/forum/snapshot restent identiques pour
+    tout le monde, sans filtre par identité, voir leur docstring)."""
+    identity_token = _require_identity(req.session_token)
+    current = get_current_reaction(req.opinion_id, identity_token)
+    return {"stance": current["stance"] if current else None}
 
 
 @app.post("/remarque/confirm")

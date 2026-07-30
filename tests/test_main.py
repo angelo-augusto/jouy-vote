@@ -1377,6 +1377,202 @@ def test_add_reaction_rejects_invalid_stance():
         main_module.add_reaction(opinion["opinion_id"], "identity-forum-14", "pour")
 
 
+def test_add_reaction_rejects_self_opposer_only():
+    """Régression (2026-07-30, décision développeur, affinée le même soir) : s'opposer à sa
+    propre opinion n'a pas de sens sémantique (signale un changement d'avis, pas une vraie
+    réaction) — bloqué ici (seul point d'écriture réel des réactions, voir add_reaction).
+    adhérer/neutre sur sa propre opinion, en revanche, restent normaux."""
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet auto-réaction")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-self-react-1", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    with pytest.raises(ValueError, match="propre opinion"):
+        main_module.add_reaction(opinion["opinion_id"], "identity-self-react-1", "opposer")
+
+    # adhérer et neutre restent autorisés sur sa propre opinion.
+    r1 = main_module.add_reaction(opinion["opinion_id"], "identity-self-react-1", "adherer")
+    assert r1["stance"] == "adherer"
+    r2 = main_module.add_reaction(opinion["opinion_id"], "identity-self-react-1", "neutre")
+    assert r2["stance"] == "neutre"
+
+
+@pytest.mark.anyio
+async def test_reaction_confirm_endpoint_rejects_self_opposer_only(client, logged_in_user):
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet auto-réaction endpoint")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], logged_in_user["token"], "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    resp = await client.post("/reaction/confirm", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": opinion["opinion_id"], "stance": "opposer",
+    })
+    assert resp.status_code == 400
+    assert "propre opinion" in resp.json()["detail"]
+
+    resp = await client.post("/reaction/confirm", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": opinion["opinion_id"], "stance": "adherer",
+    })
+    assert resp.status_code == 200
+
+
+def test_set_reaction_stance_creates_and_publishes_directly():
+    """Bouton direct "Réagir" (2026-07-30) : écrit et publie en un seul appel, sans double
+    confirmation — justifié par le choix fermé parmi 3 options."""
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet bouton stance direct")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-stance-author-1", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    result = main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-reactor-1", "adherer")
+    assert result == {"opinion_id": opinion["opinion_id"], "stance": "adherer"}
+
+    current = main_module.get_current_reaction(opinion["opinion_id"], "identity-stance-reactor-1")
+    assert current["stance"] == "adherer"
+    assert current["status"] == "published"
+
+
+def test_set_reaction_stance_reclick_same_stance_retracts():
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet bouton stance toggle off")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-stance-author-2", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-reactor-2", "neutre")
+    result = main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-reactor-2", "neutre")
+    assert result == {"opinion_id": opinion["opinion_id"], "stance": None}
+    assert main_module.get_current_reaction(opinion["opinion_id"], "identity-stance-reactor-2") is None
+
+
+def test_set_reaction_stance_reclick_different_stance_changes_mind():
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet bouton stance change avis")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-stance-author-3", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-reactor-3", "adherer")
+    result = main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-reactor-3", "opposer")
+    assert result == {"opinion_id": opinion["opinion_id"], "stance": "opposer"}
+    current = main_module.get_current_reaction(opinion["opinion_id"], "identity-stance-reactor-3")
+    assert current["stance"] == "opposer"
+
+
+def test_set_reaction_stance_rejects_self_opposer_but_allows_adherer_neutre():
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet bouton auto-réaction")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-stance-self-1", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    with pytest.raises(ValueError, match="propre opinion"):
+        main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-self-1", "opposer")
+
+    result = main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-self-1", "adherer")
+    assert result["stance"] == "adherer"
+
+
+def test_retract_reaction_is_idempotent_without_active_reaction():
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet retrait idempotent")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-retract-author-1", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    result = main_module.retract_reaction(opinion["opinion_id"], "identity-retract-reactor-1")
+    assert result == {"opinion_id": opinion["opinion_id"], "stance": None}
+
+
+def test_retract_reaction_does_not_resurrect_older_published_reaction():
+    """Régression du garde-fou documenté dans retract_reaction : si un réacteur a plusieurs
+    réactions encore 'published' (ne devrait normalement pas arriver via set_reaction_stance, mais
+    testé directement via add_reaction/publish_reaction pour couvrir le cas), retirer doit annuler
+    TOUTES ces réactions, pas seulement la plus récente — sinon une réaction plus ancienne
+    réapparaîtrait comme "courante"."""
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet retrait sans résurrection")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-retract-author-2", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    r1 = main_module.add_reaction(opinion["opinion_id"], "identity-retract-reactor-2", "adherer")
+    main_module.publish_reaction(r1["reaction_id"])
+    r2 = main_module.add_reaction(opinion["opinion_id"], "identity-retract-reactor-2", "opposer")
+    main_module.publish_reaction(r2["reaction_id"])
+
+    main_module.retract_reaction(opinion["opinion_id"], "identity-retract-reactor-2")
+    assert main_module.get_current_reaction(opinion["opinion_id"], "identity-retract-reactor-2") is None
+
+
+@pytest.mark.anyio
+async def test_reaction_toggle_endpoint_full_flow_with_counts(client, logged_in_user):
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet endpoint toggle")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-toggle-author-1", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    resp = await client.post("/reaction/toggle", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": opinion["opinion_id"], "stance": "adherer",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["stance"] == "adherer"
+    assert data["reaction_counts"]["adherer"] == 1
+    assert data["reaction_counts"]["opposer"] == 0
+
+    resp = await client.post("/reaction/toggle", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": opinion["opinion_id"], "stance": "adherer",
+    })
+    data = resp.json()
+    assert data["stance"] is None
+    assert data["reaction_counts"]["adherer"] == 0
+
+
+@pytest.mark.anyio
+async def test_reaction_toggle_endpoint_rejects_invalid_stance(client, logged_in_user):
+    resp = await client.post("/reaction/toggle", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": 1, "stance": "pour",
+    })
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_reaction_mine_endpoint_returns_current_stance_or_null(client, logged_in_user):
+    import main as main_module
+
+    thread = main_module.create_thread("Sujet endpoint mine")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-mine-author-1", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    resp = await client.post("/reaction/mine", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": opinion["opinion_id"],
+    })
+    assert resp.json()["stance"] is None
+
+    await client.post("/reaction/toggle", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": opinion["opinion_id"], "stance": "neutre",
+    })
+    resp = await client.post("/reaction/mine", json={
+        "session_token": logged_in_user["session_token"], "opinion_id": opinion["opinion_id"],
+    })
+    assert resp.json()["stance"] == "neutre"
+
+
 def test_create_remarque_reply_to_remarque_or_opinion_but_not_both():
     import main as main_module
 
@@ -2041,6 +2237,28 @@ def test_element_context_block_describes_published_opinion():
     # réellement visé, annonçant à tort "opinion introuvable" avant de se corriger tout seul.
     assert f"opinion_id={opinion['opinion_id']}" in block
     assert f"thread_id={thread['thread_id']}" in block
+
+
+def test_element_context_block_mentions_current_stance_when_reacted_via_button():
+    """2026-07-30, boutons directs : si l'utilisateur a déjà posé un stance via bouton, le
+    contexte doit le rappeler pour qu'un argumentaire tapé ensuite dans le chat réutilise ce
+    stance plutôt que d'en redemander un ou d'en inventer un."""
+    import main as main_module
+
+    thread = main_module.create_thread("Fil pour contexte stance bouton")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-context-stance-author-1", "Corps de test")
+    main_module.publish_opinion(opinion["opinion_id"])
+    main_module.set_reaction_stance(opinion["opinion_id"], "identity-context-stance-reactor-1", "opposer")
+
+    block = main_module._element_context_block(opinion["opinion_id"], None, "identity-context-stance-reactor-1")
+    assert "opposer" in block
+
+    # Sans identity_token (rétrocompatible) ou sans réaction posée : pas de mention de stance.
+    block_no_identity = main_module._element_context_block(opinion["opinion_id"], None)
+    assert "déjà choisi le stance" not in block_no_identity
+    block_no_reaction = main_module._element_context_block(opinion["opinion_id"], None, "identity-context-stance-nobody")
+    assert "déjà choisi le stance" not in block_no_reaction
 
 
 def test_element_context_block_describes_published_remarque():
@@ -2857,6 +3075,43 @@ def test_propose_reaction_action_rejects_unknown_opinion():
 
     result = chatbot_actions.propose_reaction({"opinion_id": 999, "stance": "neutre"}, {"threads": []})
     assert result["available"] is False
+
+
+def test_propose_reaction_action_rejects_self_opposer_via_pseudo_match():
+    """Signal précoce (2026-07-30, affiné le même soir) : si l'auteur affiché de l'opinion
+    correspond au pseudo de l'utilisateur courant ET que le stance visé est "opposer", refus
+    avant même de proposer — le vrai blocage reste côté DB (add_reaction, comparaison de
+    debate_token), voir docstring de propose_reaction. adhérer/neutre sur sa propre opinion
+    restent autorisés."""
+    import chatbot_actions
+
+    ctx = {
+        "threads": [{"thread_id": 1, "title": "Sujet", "summary": None, "opinions": [
+            {"opinion_id": 42, "auteur": "Renard bleu", "body": "Une opinion", "argumentaire": None, "superseded_by_opinion_id": None},
+        ]}],
+        "pseudo": {"word": "Renard", "color": "bleu"},
+    }
+    result = chatbot_actions.propose_reaction({"opinion_id": 42, "stance": "opposer"}, ctx)
+    assert result["available"] is False
+    assert "propre opinion" in result["error"]
+
+    result = chatbot_actions.propose_reaction({"opinion_id": 42, "stance": "adherer"}, ctx)
+    assert result["available"] is True
+    result = chatbot_actions.propose_reaction({"opinion_id": 42, "stance": "neutre"}, ctx)
+    assert result["available"] is True
+
+
+def test_propose_reaction_action_allows_reaction_when_pseudo_differs():
+    import chatbot_actions
+
+    ctx = {
+        "threads": [{"thread_id": 1, "title": "Sujet", "summary": None, "opinions": [
+            {"opinion_id": 42, "auteur": "Renard bleu", "body": "Une opinion", "argumentaire": None, "superseded_by_opinion_id": None},
+        ]}],
+        "pseudo": {"word": "Hibou", "color": "violet"},
+    }
+    result = chatbot_actions.propose_reaction({"opinion_id": 42, "stance": "opposer"}, ctx)
+    assert result["available"] is True
 
 
 def test_propose_remarque_action_valid():

@@ -1119,6 +1119,61 @@ function buildInlineReactWidget(contextRef) {
   sendBtn.textContent = 'Envoyer';
   inputRow.appendChild(input);
   inputRow.appendChild(sendBtn);
+
+  // Boutons directs adhérer/opposer/neutre (2026-07-30, décision développeur) : uniquement pour
+  // une opinion (les remarques n'ont pas de notion de réaction), écriture DIRECTE sans passer par
+  // le chatbot — élimine structurellement le bug d'ID trouvé le même jour sur le choix de stance
+  // en langage naturel, et un choix fermé parmi 3 options n'a pas besoin de modération. L'argu-
+  // mentaire optionnel qui accompagne la réaction reste via le chat (voir sendInlineMessage,
+  // _element_context_block rappelle au modèle le stance déjà posé).
+  let stanceButtons = null;
+  const stanceErrorEl = document.createElement('p');
+  // Pas les classes .msg/.error habituelles (spécificité CSS ".msg.error" > ".hidden", le message
+  // resterait visible malgré classList.add('hidden')) — gestion directe via style.display, plus
+  // simple qu'une 3e classe dédiée pour ce cas isolé.
+  stanceErrorEl.style.cssText = 'display:none; font-size:.85em; margin:.3em 0; color:#721c24;';
+  if (contextRef.type === 'opinion') {
+    const stanceRow = document.createElement('div');
+    stanceRow.style.cssText = 'display:flex; gap:.4em; margin-bottom:.5em;';
+    stanceButtons = {};
+    Object.entries(REACTION_STANCE_LABELS).forEach(([stance, label]) => {
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      // width:auto (même bug que le champ de saisie ci-dessus, voir commentaire) + flex:1 pour
+      // que les 3 boutons se partagent la largeur également.
+      btn.style.cssText = 'width:auto; margin-top:0; font-size:.85em; padding:.3em .5em; flex:1;';
+      btn.onclick = async () => {
+        stanceErrorEl.style.display = 'none';
+        const session_token = localStorage.getItem('session_token');
+        try {
+          const data = await api('/reaction/toggle', { session_token, opinion_id: contextRef.id, stance });
+          highlightStanceButtons(data.stance);
+        } catch (e) {
+          stanceErrorEl.textContent = e.message;
+          stanceErrorEl.style.display = '';
+        }
+      };
+      stanceButtons[stance] = btn;
+      stanceRow.appendChild(btn);
+    });
+    panel.appendChild(stanceRow);
+    panel.appendChild(stanceErrorEl);
+  }
+  function highlightStanceButtons(activeStance) {
+    if (!stanceButtons) return;
+    Object.entries(stanceButtons).forEach(([stance, btn]) => {
+      btn.className = stance === activeStance ? 'btn-primary' : '';
+    });
+  }
+  async function loadCurrentStance() {
+    if (!stanceButtons) return;
+    const session_token = localStorage.getItem('session_token');
+    try {
+      const data = await api('/reaction/mine', { session_token, opinion_id: contextRef.id });
+      highlightStanceButtons(data.stance);
+    } catch (e) { /* pas bloquant : les boutons restent simplement non surlignés */ }
+  }
+
   panel.appendChild(messagesEl);
   panel.appendChild(proposalEl);
   panel.appendChild(inputRow);
@@ -1175,7 +1230,7 @@ function buildInlineReactWidget(contextRef) {
   toggleBtn.addEventListener('click', () => {
     const shown = panel.style.display !== 'none';
     panel.style.display = shown ? 'none' : '';
-    if (!shown) renderInlineMessages();
+    if (!shown) { renderInlineMessages(); loadCurrentStance(); }
   });
   wrap.appendChild(toggleBtn);
   wrap.appendChild(panel);
