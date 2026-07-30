@@ -2239,6 +2239,39 @@ def test_element_context_block_describes_published_opinion():
     assert f"thread_id={thread['thread_id']}" in block
 
 
+def test_element_context_block_includes_author_pseudo_for_opinion():
+    """Régression bug réel (2026-07-30, signalé par Angelo) : "qui a publié cette opinion ?" via
+    le chat inline donnait parfois une réponse garbled (mélange thread_id/titre/résumé) ou un
+    placeholder {{résultat}} non résolu — le modèle devait chercher le pseudo via get_thread à
+    chaque fois et se plantait parfois en route. Fix : le pseudo est maintenant donné directement,
+    le modèle n'a plus besoin de le chercher."""
+    import main as main_module
+
+    author_identity = "identity-context-author-pseudo-1"
+    main_module.confirm_pseudo(author_identity, "Falaise", "blanc")
+    thread = main_module.create_thread("Fil pour contexte pseudo auteur")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], author_identity, "Corps de test")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    block = main_module._element_context_block(opinion["opinion_id"], None)
+    assert "Falaise blanche" in block
+
+
+def test_element_context_block_includes_author_pseudo_for_remarque():
+    import main as main_module
+
+    author_identity = "identity-context-remarque-author-pseudo-1"
+    main_module.confirm_pseudo(author_identity, "Corail", "rouge")
+    thread = main_module.create_thread("Fil pour contexte pseudo auteur remarque")
+    main_module.publish_thread(thread["thread_id"])
+    remarque = main_module.create_remarque(thread["thread_id"], author_identity, "Une remarque")
+    main_module.publish_remarque(remarque["remarque_id"])
+
+    block = main_module._element_context_block(None, remarque["remarque_id"])
+    assert "Corail rouge" in block
+
+
 def test_element_context_block_mentions_current_stance_when_reacted_via_button():
     """2026-07-30, boutons directs : si l'utilisateur a déjà posé un stance via bouton, le
     contexte doit le rappeler pour qu'un argumentaire tapé ensuite dans le chat réutilise ce

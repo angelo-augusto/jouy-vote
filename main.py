@@ -1872,17 +1872,26 @@ def _element_context_block(
     with db() as conn:
         if context_opinion_id is not None:
             row = conn.execute(
-                """SELECT o.thread_id, o.body, o.argumentaire, t.title AS thread_title
+                """SELECT o.thread_id, o.body, o.argumentaire, t.title AS thread_title,
+                          p.word, p.color
                    FROM opinions o JOIN threads t ON t.thread_id = o.thread_id
+                   LEFT JOIN pseudos p ON p.debate_token = o.author_debate_token
                    WHERE o.opinion_id=? AND o.status='published'""",
                 (context_opinion_id,),
             ).fetchone()
             if row is None:
                 return ""
+            # Pseudo de l'auteur (2026-07-30, bug réel signalé par Angelo : "qui a publié cette
+            # opinion ?" donnait parfois une réponse garbled ou un placeholder {{résultat}} non
+            # résolu) — le modèle devait auparavant appeler get_thread pour le trouver, et se
+            # plantait parfois en route. Donné ici directement, comme opinion_id plus tôt le même
+            # soir : même leçon, ne jamais laisser le modèle deviner/chercher ce qu'on peut lui
+            # fournir directement.
+            auteur = _agree_pseudo_display(row["word"], row["color"]) if row["word"] else "auteur inconnu"
             block = (
                 f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de l'opinion "
                 f"opinion_id={context_opinion_id} (thread_id={row['thread_id']}), fil "
-                f"\"{row['thread_title']}\" : \"{row['body']}\""
+                f"\"{row['thread_title']}\", publiée par {auteur} : \"{row['body']}\""
             )
             if row["argumentaire"]:
                 block += f" (argumentaire : \"{row['argumentaire']}\")"
@@ -1904,17 +1913,20 @@ def _element_context_block(
             )
         if context_remarque_id is not None:
             row = conn.execute(
-                """SELECT r.thread_id, r.body, t.title AS thread_title
+                """SELECT r.thread_id, r.body, t.title AS thread_title, p.word, p.color
                    FROM thread_remarques r JOIN threads t ON t.thread_id = r.thread_id
+                   LEFT JOIN pseudos p ON p.debate_token = r.author_debate_token
                    WHERE r.remarque_id=? AND r.status='published'""",
                 (context_remarque_id,),
             ).fetchone()
             if row is None:
                 return ""
+            auteur = _agree_pseudo_display(row["word"], row["color"]) if row["word"] else "auteur inconnu"
             return (
                 f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos de la remarque "
                 f"remarque_id={context_remarque_id} (thread_id={row['thread_id']}), fil "
-                f"\"{row['thread_title']}\" : \"{row['body']}\". Si l'utilisateur veut répondre à "
+                f"\"{row['thread_title']}\", écrite par {auteur} : \"{row['body']}\". Si "
+                f"l'utilisateur veut répondre à "
                 f"CETTE remarque précise, appelle directement propose_remarque avec "
                 f"thread_id={row['thread_id']} et reply_to_remarque_id={context_remarque_id} — "
                 f"n'appelle JAMAIS list_threads/get_thread pour la retrouver, tu as déjà tout ce "
