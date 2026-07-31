@@ -2787,7 +2787,13 @@ def test_get_forum_page_snapshot_includes_reactions_on_opinions():
     found_thread = next(t for t in snapshot if t["thread_id"] == thread["thread_id"])
     found_opinion = next(o for o in found_thread["opinions"] if o["opinion_id"] == opinion["opinion_id"])
     assert found_opinion["reaction_counts"] == {"adherer": 0, "opposer": 1, "neutre": 0}
-    assert found_opinion["reactions"] == [{"auteur": "Sittelle jaune", "stance": "opposer", "argumentaire": "Pas convaincu"}]
+    assert len(found_opinion["reactions"]) == 1
+    got_reaction = found_opinion["reactions"][0]
+    assert got_reaction["auteur"] == "Sittelle jaune"
+    assert got_reaction["auteur_word"] == "Sittelle"
+    assert got_reaction["auteur_color"] == "jaune"
+    assert got_reaction["stance"] == "opposer"
+    assert got_reaction["argumentaire"] == "Pas convaincu"
 
 
 @pytest.mark.anyio

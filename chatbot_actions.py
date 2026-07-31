@@ -117,17 +117,26 @@ def compute_debate_token(identity_token: str) -> str:
 #
 # 2e passe le même jour (critère "iconifiable", demande Angelo via angelobot) : "Aurore",
 # "Clairière", "Frimas", "Brume" retirés — trop abstraits/atmosphériques pour un logo simple,
-# par contraste avec de bons exemples comme Renard/Hibou/Chêne/Faucon/Comète/Phare/Écureuil/
-# Corail. Ce critère sert à CURER cette liste (le générateur ne doit pas suggérer lui-même ce qui
-# serait jugé limite si un utilisateur le proposait), PAS une nouvelle règle de rejet dans le
-# jugement "appropriate" — une proposition LIBRE trop abstraite reste acceptée (décision
-# angelobot : pas le même niveau de gravité que politique/religieux/sexuel, disproportionné de
-# bloquer pour ça).
+# par contraste avec de bons exemples comme Renard/Hibou/Faucon/Écureuil. Ce critère sert à
+# CURER cette liste (le générateur ne doit pas suggérer lui-même ce qui serait jugé limite si un
+# utilisateur le proposait), PAS une nouvelle règle de rejet dans le jugement "appropriate" — une
+# proposition LIBRE trop abstraite reste acceptée (décision angelobot : pas le même niveau de
+# gravité que politique/religieux/sexuel, disproportionné de bloquer pour ça).
+#
+# 3e passe (2026-07-31, retour direct Angelo pendant un test en conditions réelles) : "Corail"
+# et "Sittelle" retirés — objets/êtres trop peu connus du grand public pour être reconnaissables
+# une fois réduits à une silhouette simple (même défaut que la 2e passe, mais côté
+# méconnaissance plutôt qu'abstraction). Repasse complète de la liste dans la foulée : Chêne,
+# Lanterne, Rivière, Comète, Sentier, Orage, Prairie, Ruche, Glacier, Roseau, Cascade, Bourgeon,
+# Genêt, Tilleul, Ravin remplacés/retirés au profit de mots à silhouette plus immédiatement
+# reconnaissable (véhicules, objets du quotidien, animaux courants).
 PSEUDO_WORDS = [
-    "Renard", "Hibou", "Chêne", "Lanterne", "Rivière", "Nuage", "Phare",
-    "Comète", "Sentier", "Écureuil", "Orage", "Prairie", "Faucon", "Ruche", "Glacier",
-    "Roseau", "Cascade", "Bourgeon", "Falaise", "Genêt",
-    "Corail", "Tilleul", "Sittelle", "Ravin",
+    "Renard", "Hibou", "Nuage", "Phare", "Écureuil", "Faucon", "Falaise",
+    "Bateau", "Arbre", "Bougie", "Galaxie", "Chaussure", "Éclair", "Vache",
+    "Abeille", "Glace", "Fleur", "Poisson", "Banane",
+    "Cobra", "Voiture", "Vélo", "Cloche", "Échelle", "Enclume", "Trompette",
+    "Licorne", "Dragon", "Éléphant", "Cygne", "Libellule", "Maison",
+    "Feu", "Klaxon",
 ]
 # Palette de couleurs simples et universelles (retour développeur 2026-07-25, via angelobot) —
 # les couleurs précédentes (argenté, carmin, ambre...) jugées trop compliquées pour un public
@@ -162,6 +171,12 @@ PSEUDO_WORD_GENDER = {
     "Faucon": "m", "Ruche": "f", "Glacier": "m", "Roseau": "m", "Aurore": "f", "Cascade": "f",
     "Bourgeon": "m", "Falaise": "f", "Clairière": "f", "Genêt": "m", "Corail": "m", "Frimas": "m",
     "Tilleul": "m", "Brume": "f", "Sittelle": "f", "Ravin": "m",
+    # Ajoutés le 2026-07-31 (3e passe de curation, voir commentaire au-dessus de PSEUDO_WORDS).
+    "Bateau": "m", "Arbre": "m", "Bougie": "f", "Galaxie": "f", "Chaussure": "f", "Éclair": "m",
+    "Vache": "f", "Abeille": "f", "Glace": "f", "Fleur": "f", "Poisson": "m", "Banane": "f",
+    "Cobra": "m", "Voiture": "f", "Vélo": "m", "Cloche": "f", "Échelle": "f", "Enclume": "f",
+    "Trompette": "f", "Licorne": "f", "Dragon": "m", "Éléphant": "m", "Cygne": "m",
+    "Libellule": "f", "Maison": "f", "Feu": "m", "Klaxon": "m",
 }
 # 6 couleurs variables en genre (vert/bleu/violet/blanc/noir/gris), 3 invariables (rouge/orange/
 # jaune) — "bleu" et "violet" initialement oubliés (2 corrections successives d'angelobot/
