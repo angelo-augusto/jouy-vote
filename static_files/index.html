@@ -503,11 +503,28 @@ async function loadResults(questionId) {
 
 // ---------- assistant ----------
 let chatHistory = [];  // en mémoire seulement, jamais persisté — perdu à la fermeture/rechargement
+// Rendu markdown minimal et sûr (2026-07-31, bug réel signalé par Angelo : le LLM produit du
+// markdown — **gras**, *italique*, listes à puces — en supposant un affichage formaté, mais le
+// frontend affichait le texte brut avec les ** visibles). Échappe le HTML EN PREMIER (contenu
+// utilisateur/LLM jamais fiable), puis applique seulement une poignée de règles simples — pas de
+// lib markdown complète, juste de quoi couvrir ce que le prompt du chatbot produit réellement.
+function renderMarkdownSafe(text) {
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  html = html
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*(?!\*)(.+?)\*(?!\*)/g, '$1<em>$2</em>')
+    .replace(/^- (.+)$/gm, '• $1')
+    .replace(/\n/g, '<br>');
+  return html;
+}
 function renderChatMessages() {
   const el = document.getElementById('chatMessages');
   el.innerHTML = chatHistory.map(m =>
     '<p style="margin:.4em 0;"><strong>' + (m.role === 'user' ? 'Vous' : 'Assistant') + ' :</strong> ' +
-    m.content.replace(/</g, '&lt;') + '</p>'
+    renderMarkdownSafe(m.content) + '</p>'
   ).join('');
   el.scrollTop = el.scrollHeight;
 }
@@ -1245,7 +1262,7 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
       .filter(m => contextRefEquals(m.contextRef, contextRef))
       .map(m =>
         '<p style="margin:.3em 0;"><strong>' + (m.role === 'user' ? 'Vous' : 'Assistant') + ' :</strong> ' +
-        m.content.replace(/</g, '&lt;') + '</p>'
+        renderMarkdownSafe(m.content) + '</p>'
       ).join('');
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
