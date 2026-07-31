@@ -663,6 +663,15 @@ async function fetchPseudoLogoPreview(word, color, containerEl) {
     if (data.image_base64) {
       const logoEl = buildColoredLogoElement('data:image/png;base64,' + data.image_base64, color, 4.2);
       containerEl.appendChild(logoEl);
+    } else if (data.is_new) {
+      // Contrôle qualité (2026-07-31, demande développeur) : le backend a essayé de générer ET
+      // vérifier un logo pour ce mot (dessin + relecture par un modèle vision, jusqu'à 2 tentatives
+      // bornées) sans succès — jamais silencieux, on l'explique plutôt que de laisser deviner.
+      const p = document.createElement('p');
+      p.className = 'info';
+      p.style.margin = '.3em 0 0';
+      p.textContent = "Je n'ai pas réussi à générer un logo clair pour ce mot — le pseudo reste utilisable normalement (affiché en texte), ou choisis un autre mot si tu veux un logo.";
+      containerEl.appendChild(p);
     }
     return data.image_base64 ? data : null;
   } catch (e) {
@@ -1255,8 +1264,19 @@ function appendAuteurLabel(container, auteurText, suffix, word, color) {
   const logoFile = word ? PSEUDO_WORD_LOGOS[word] : null;
   if (logoFile) {
     const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + logoFile, color, 2);
-    logoEl.title = auteurText;
+    logoEl.title = auteurText; // tooltip au survol (desktop) — voir clic/tap ci-dessous pour mobile
+    logoEl.style.cursor = 'pointer';
     container.appendChild(logoEl);
+    // Révéler le pseudo au clic/tap (2026-07-31, demande Angelo) : le tooltip natif (title) ne
+    // s'affiche pas au tap sur mobile, seulement au survol souris — un clic sur le logo bascule
+    // l'affichage du nom du pseudo à côté, pour rester identifiable même sans souris.
+    const nameEl = document.createElement('span');
+    nameEl.textContent = ' ' + auteurText;
+    nameEl.style.cssText = 'display:none; font-style:italic;';
+    logoEl.addEventListener('click', () => {
+      nameEl.style.display = nameEl.style.display === 'none' ? 'inline' : 'none';
+    });
+    container.appendChild(nameEl);
     if (suffix) container.appendChild(document.createTextNode(suffix));
   } else {
     container.textContent = auteurText + (suffix || '');
