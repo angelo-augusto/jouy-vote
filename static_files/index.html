@@ -1055,11 +1055,30 @@ function renderForumThread(thread) {
   block.appendChild(content);
   return block;
 }
+// Pseudo -> logo (2026-07-31, demande Angelo) : un pseudo AVEC logo généré s'affiche en image
+// partout où son texte apparaîtrait, un pseudo SANS logo reste en texte normal. À étendre au fil
+// de la génération des logos (voir reference_flux2_klein_disparu_openrouter en mémoire pour l'API).
+const PSEUDO_LOGO_MAP = { 'Chat gris': '/static_files/pseudo_logos/chat_gris.png' };
+function appendAuteurLabel(container, auteurText, suffix) {
+  container.textContent = '';
+  const logoUrl = PSEUDO_LOGO_MAP[auteurText];
+  if (logoUrl) {
+    const img = document.createElement('img');
+    img.src = logoUrl;
+    img.alt = auteurText;
+    img.title = auteurText;
+    img.style.cssText = 'height:1.4em; width:auto; vertical-align:middle;';
+    container.appendChild(img);
+    if (suffix) container.appendChild(document.createTextNode(suffix));
+  } else {
+    container.textContent = auteurText + (suffix || '');
+  }
+}
 function renderForumOpinion(o) {
   const div = document.createElement('div');
   div.style.cssText = 'margin:.6em 0; padding:.6em; background:#f8f9fa; border-radius:4px; font-size:.9em;';
   const strong = document.createElement('strong');
-  strong.textContent = o.auteur + (o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '');
+  appendAuteurLabel(strong, o.auteur, o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '');
   div.appendChild(strong);
   div.appendChild(document.createElement('br'));
   div.appendChild(document.createTextNode(o.body));
@@ -1095,7 +1114,7 @@ function renderForumRemarque(r) {
   const div = document.createElement('div');
   div.style.cssText = 'margin:.4em 0 .4em 1.2em; padding:.4em .6em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
   const strong = document.createElement('strong');
-  strong.textContent = r.auteur + ' : ';
+  appendAuteurLabel(strong, r.auteur, ' : ');
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.body));
   div.appendChild(buildInlineReactWidget({ type: 'remarque', id: r.remarque_id }));
@@ -1482,7 +1501,7 @@ function renderMyActivityReaction(r) {
   const div = document.createElement('div');
   div.style.cssText = 'margin:.4em 0 .4em 1.2em; padding:.4em .6em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
   const strong = document.createElement('strong');
-  strong.textContent = r.auteur + ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ';
+  appendAuteurLabel(strong, r.auteur, ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ');
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.argumentaire || '(sans argumentaire)'));
   return div;
