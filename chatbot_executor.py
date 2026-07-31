@@ -56,14 +56,24 @@ def _render_result_value(previous_result: dict | None) -> str:
     substituer {{résultat}} et pour générer un texte de repli quand le LLM laisse un say_user
     vide juste après une action (voir bug #5 plus bas). Préfère "display" (forme déjà accordée
     grammaticalement, voir chatbot_actions._agree_pseudo_display) s'il existe, sinon joint les
-    valeurs scalaires restantes (hors champs de statut interne)."""
+    valeurs scalaires restantes (hors champs de statut interne).
+
+    Priorité "display" AVANT "error" (2026-07-31, bug #17 partie 2, trouvé via angelobot) :
+    inversé depuis la version d'origine, qui priorisait "error". Un résultat pseudo en ÉCHEC porte
+    les DEUX champs (ex: {"display": "Écureuil noir", "error": "déjà pris..."}) — quand le LLM
+    écrit "{{résultat}}" dans SA PROPRE phrase pour référencer le pseudo dont il parle ("tu
+    proposes {{résultat}}"), il attend le NOM proposé, pas le motif de l'échec, sous peine de
+    phrases absurdes ("tu proposes « déjà pris par quelqu'un d'autre »"). Le texte de repli quand
+    say_user est vide (bug #5) a maintenant sa PROPRE logique dédiée dans _presentable_fallback,
+    qui va chercher "error" directement plutôt que de dépendre de la priorité ici — donc ce
+    changement ne régresse pas ce cas."""
     if not previous_result:
         return ""
-    if "error" in previous_result:
-        return str(previous_result["error"])
     display = previous_result.get("display")
     if isinstance(display, str) and display:
         return display
+    if "error" in previous_result:
+        return str(previous_result["error"])
     scalar_values = [
         str(v) for k, v in previous_result.items()
         if k not in ("text", "available", "display") and isinstance(v, (str, int, float)) and not isinstance(v, bool)
@@ -129,6 +139,35 @@ def _run_action(fn, action: str, cmd: dict, ctx: dict) -> dict:
     except Exception:
         log.exception("Exception non capturée dans l'action %s", action)
         return {"available": False, "error": "cette action a rencontré un problème technique, réessaie."}
+
+
+def _presentable_fallback(effective_result: dict | None, value: str) -> str:
+    """Repli textuel utilisé quand le say_user du LLM est absent/insuffisant (bugs #5/#6/#12
+    ci-dessous) — contrairement à _render_result_value (aussi utilisé pour {{résultat}}, où une
+    valeur nue a du sens une fois insérée par le LLM au milieu de sa PROPRE phrase déjà écrite),
+    CECI remplace le texte du say_user EN ENTIER : doit donc être une phrase complète et
+    présentable à elle seule, jamais un fragment technique brut.
+
+    Bug réel #17 (2026-07-31, trouvé via angelobot en testant plusieurs comptes en parallèle) : un
+    fragment brut ("déjà pris par quelqu'un d'autre") est sorti tel quel comme SEUL contenu d'un
+    say_user, sans phrase autour — value venait de previous_result["error"] (via
+    _render_result_value, qui priorisait ce champ), jamais pensé pour être lu seul par un
+    utilisateur. Racine trouvée en 2 endroits distincts : (1) le bloc bug#6 forçait à tort la
+    citation du pseudo même sur un ÉCHEC — corrigé séparément en excluant available=False de ce
+    bloc ; (2) le say_user du LLM était parfois totalement VIDE après un échec (bug#5), auquel cas
+    le fallback brut s'appliquait sans passer par aucun des 2 filtres dédiés aux erreurs. Ce
+    wrapper couvre les 2 cas en un seul endroit plutôt que de dupliquer la logique aux 3 sites
+    d'appel.
+
+    Va lire "error" DIRECTEMENT dans effective_result plutôt que de réutiliser "value" (2026-07-31,
+    même bug, partie 2) : _render_result_value priorise désormais "display" avant "error" (pour
+    que {{résultat}} substitue le NOM du pseudo dans une phrase du LLM, pas le motif d'échec) — si
+    ce wrapper réutilisait "value" tel quel, un résultat pseudo en échec (qui a les 2 champs)
+    donnerait "Désolé, Écureuil noir." au lieu du vrai message d'erreur. Les 2 fonctions ont des
+    besoins différents et ne doivent plus partager la même valeur source."""
+    if effective_result and "error" in effective_result:
+        return f"Désolé, {effective_result['error']}."
+    return value
 
 
 def _turn_result(replies: list, actions_log: list, error: str | None, trace_log: list | None) -> dict:
@@ -255,8 +294,11 @@ def run_turn(
                     # frontend anti-bulle-vide masque la bulle, effaçant toute trace du candidat
                     # proposé dans l'historique renvoyé au modèle au tour suivant. Sans mémoire de
                     # ce qu'il vient d'offrir, le modèle repart d'index=0 → répétition.
-                    text = fallback
-                elif is_pseudo_result and display_value not in text and display_value not in cited_displays:
+                    text = _presentable_fallback(effective_result, fallback)
+                elif (
+                    is_pseudo_result and available_value is not False
+                    and display_value not in text and display_value not in cited_displays
+                ):
                     # Bug réel #6 (même jour, mesuré à ~2 tentatives sur 5 malgré une clarification
                     # de prompt) : le LLM ne laisse pas toujours le say_user TOTALEMENT vide — il
                     # écrit parfois du texte autour d'un "trou" ("Que penses-tu de **** ?"), sans
@@ -270,8 +312,21 @@ def run_turn(
                     # de SUIVI plus tard dans le même tour ("clique sur le bouton si ça te plaît")
                     # n'a pas besoin de répéter le nom déjà cité une fois, sans quoi son texte
                     # légitime se fait écraser par le simple nom du pseudo en boucle.
-                    text = fallback
-                elif available_value is False and not is_pseudo_result and fallback and fallback not in text:
+                    #
+                    # "and available_value is not False" (bug réel #17, 2026-07-31, trouvé via
+                    # angelobot : un fragment brut "déjà pris par quelqu'un d'autre" est sorti seul
+                    # comme say_user) : _check_pseudo_availability renvoie "display" même en cas
+                    # d'ÉCHEC (available=False, pseudo déjà pris) — donc is_pseudo_result restait
+                    # vrai sur un échec, et ce bloc écrasait à tort une phrase LLM déjà correcte
+                    # ("Ce pseudo est déjà pris...") par le champ "error" brut (via fallback =
+                    # _render_result_value, qui priorise "error" s'il existe), AVANT même que le
+                    # bloc bug#12 ci-dessous (qui aurait correctement laissé le texte intact, car
+                    # l'erreur y était déjà mentionnée en toutes lettres) ait sa chance de s'exécuter.
+                    # Sur un échec, forcer la citation du NOM proposé n'a plus de sens de toute
+                    # façon (rien à confirmer) — seul le bloc bug#12 juste en dessous, dédié aux
+                    # échecs, doit s'appliquer.
+                    text = _presentable_fallback(effective_result, fallback)
+                elif available_value is False and fallback and fallback not in text:
                     # Bug réel #12 (2026-07-25, trouvé en réel en testant propose_opinion, phase 3
                     # du forum) : propose_opinion a renvoyé available=false + error="fil
                     # introuvable (ou pas encore publié)" (mauvais thread_id), mais le say_user a
@@ -281,9 +336,14 @@ def run_turn(
                     # champ structuré). Généralise le principe des bugs #5/#6 (jusque-là réservés
                     # aux actions pseudo via "display") à TOUTE action qui expose un booléen
                     # "available" — si available=false et que le message d'erreur réel n'apparaît
+                    # PAS "not is_pseudo_result" (retiré 2026-07-31, bug #17) : ce garde-fou excluait
+                    # à tort les actions pseudo EN ÉCHEC, qui ont un display mais plus rien à citer
+                    # (voir le bloc juste au-dessus, désormais restreint aux succès) — sans lui, un
+                    # pseudo refusé/déjà pris qui échappe totalement à la mention du LLM n'avait plus
+                    # AUCUN filet de secours.
                     # nulle part dans le texte, force ce message plutôt que de laisser une fausse
                     # promesse de succès.
-                    text = fallback
+                    text = _presentable_fallback(effective_result, fallback)
                 if is_pseudo_result and display_value in text:
                     cited_displays.add(display_value)
                 replies.append(text)

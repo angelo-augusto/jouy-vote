@@ -49,5 +49,11 @@ def call_openrouter(
             data = json.loads(resp.read().decode())
         content = data["choices"][0]["message"]["content"]
         return content, data.get("usage", {})
-    except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError):
+    except (OSError, KeyError, IndexError, json.JSONDecodeError):
+        # OSError (2026-07-31, point fragile trouvé en creusant un blocage signalé par angelobot
+        # pendant un test réel) : un timeout réseau lève socket.timeout/TimeoutError, PAS toujours
+        # enveloppé dans urllib.error.URLError (qui hérite d'OSError mais n'est levé que pour
+        # certaines erreurs de connexion). L'ancien except ne couvrait que URLError — un vrai
+        # timeout aurait pu remonter non capturé jusqu'à run_turn, qui suppose (docstring) que
+        # cette fonction "ne lève jamais". OSError couvre toutes ces variantes réseau d'un coup.
         return None, {}
