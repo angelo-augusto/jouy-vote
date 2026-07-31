@@ -564,6 +564,10 @@ class PseudoLogosRequest(BaseModel):
     session_token: str
 
 
+class PseudoMineRequest(BaseModel):
+    session_token: str
+
+
 class OpinionConfirmRequest(BaseModel):
     session_token: str
     # Soit thread_id (fil EXISTANT déjà publié), soit new_thread_title (création couplée d'un
@@ -2203,6 +2207,22 @@ def pseudo_confirm(req: PseudoConfirmRequest):
     except ValueError as e:
         status = 409 if "déjà pris" in str(e) else 400
         raise HTTPException(status, str(e))
+
+
+@app.post("/pseudo/mine")
+def pseudo_mine(req: PseudoMineRequest):
+    """Lecture seule — le pseudo déjà confirmé de l'utilisateur connecté, ou None. Manquait
+    jusqu'ici en dehors du contexte chatbot (2026-07-31, besoin réel : afficher/proposer un logo
+    sur "Mon compte" pour un pseudo confirmé AVANT l'existence du pipeline de logos, ou pour un
+    compte de test qui n'est jamais passé par le flux de confirmation avec preview)."""
+    identity_token = _require_identity(req.session_token)
+    pseudo = get_existing_pseudo(identity_token)
+    if pseudo is None:
+        return {"word": None, "color": None, "display": None}
+    return {
+        "word": pseudo["word"], "color": pseudo["color"],
+        "display": _agree_pseudo_display(pseudo["word"], pseudo["color"]),
+    }
 
 
 @app.post("/pseudo/logo/preview")

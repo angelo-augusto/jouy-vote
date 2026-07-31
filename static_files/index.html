@@ -183,6 +183,11 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <p><strong>Nom :</strong> <span id="compteNom"></span></p>
   <p><strong>Email :</strong> <span id="compteEmail"></span></p>
   <hr>
+  <div id="compteLogoSection" class="hidden">
+    <label>Logo de mon pseudo</label>
+    <div id="compteLogoStatus" style="margin:.4em 0;"></div>
+  </div>
+  <hr id="compteLogoHr" class="hidden">
   <label>Mon jeton de vote</label>
   <p>
     <span id="voteTokenMasked" style="font-family: monospace;">••••••••••••••••••••••••••••••••</span>
@@ -337,6 +342,7 @@ function render() {
     document.getElementById('compteNom').textContent = localStorage.getItem('user_nom');
     document.getElementById('compteEmail').textContent = localStorage.getItem('user_email');
     resetVoteTokenDisplay();
+    loadMyPseudoLogoStatus();
   }
 }
 
@@ -662,6 +668,96 @@ async function fetchPseudoLogoPreview(word, color, containerEl) {
   } catch (e) {
     return null;
   }
+}
+// Logo pour un pseudo DÉJÀ confirmé (2026-07-31, demande développeur via angelobot) : le flux
+// normal (askPseudoConfirmation) ne couvre que le moment de la confirmation initiale — un compte
+// dont le pseudo a été confirmé AVANT ce pipeline (ou via un chemin qui a sauté cette étape,
+// comme un compte de test créé directement en base) n'a jamais eu l'occasion de proposer/valider
+// un logo. Section "Mon compte" : réutilise exactement les mêmes 2 endpoints
+// (/pseudo/logo/preview, /pseudo/logo/confirm) que le flux normal, juste un nouveau point d'entrée.
+async function loadMyPseudoLogoStatus() {
+  const section = document.getElementById('compteLogoSection');
+  const hr = document.getElementById('compteLogoHr');
+  const statusEl = document.getElementById('compteLogoStatus');
+  const session_token = localStorage.getItem('session_token');
+  statusEl.innerHTML = '';
+  try {
+    const pseudo = await api('/pseudo/mine', { session_token });
+    if (!pseudo.word) {
+      section.classList.add('hidden');
+      hr.classList.add('hidden');
+      return;
+    }
+    section.classList.remove('hidden');
+    hr.classList.remove('hidden');
+    await loadPseudoWordLogos(); // toujours réattendu ici, pas de dépendance au flag de la page Forum
+    const existingFile = PSEUDO_WORD_LOGOS[pseudo.word];
+    if (existingFile) {
+      const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + existingFile, pseudo.color, 3);
+      statusEl.appendChild(logoEl);
+      const p = document.createElement('p');
+      p.className = 'info';
+      p.style.cssText = 'margin:.4em 0 0; display:inline-block; vertical-align:middle; margin-left:.5em;';
+      p.textContent = 'Logo de « ' + pseudo.display + ' » — déjà validé.';
+      statusEl.appendChild(p);
+    } else {
+      const p = document.createElement('p');
+      p.className = 'info';
+      p.style.margin = '0 0 .5em';
+      p.textContent = 'Ton pseudo « ' + pseudo.display + ' » n\'a pas encore de logo.';
+      statusEl.appendChild(p);
+      const btn = document.createElement('button');
+      btn.className = 'btn-primary';
+      btn.textContent = 'Proposer un logo pour mon pseudo';
+      btn.addEventListener('click', () => proposeLogoForExistingPseudo(pseudo.word, pseudo.color, pseudo.display, statusEl));
+      statusEl.appendChild(btn);
+    }
+  } catch (e) {
+    section.classList.add('hidden');
+    hr.classList.add('hidden');
+  }
+}
+async function proposeLogoForExistingPseudo(word, color, displayText, containerEl) {
+  containerEl.innerHTML = '';
+  const loadingP = document.createElement('p');
+  loadingP.className = 'info';
+  loadingP.textContent = 'Génération en cours (quelques secondes)…';
+  containerEl.appendChild(loadingP);
+  const previewEl = document.createElement('div');
+  const result = await fetchPseudoLogoPreview(word, color, previewEl);
+  containerEl.innerHTML = '';
+  containerEl.appendChild(previewEl);
+  if (!result || !result.image_base64) {
+    const p = document.createElement('p');
+    p.className = 'info';
+    p.textContent = 'La génération a échoué, réessaie plus tard.';
+    containerEl.appendChild(p);
+    return;
+  }
+  const question = document.createElement('p');
+  question.className = 'info';
+  question.style.margin = '.4em 0';
+  question.textContent = 'Valider ce logo pour « ' + displayText + ' » ?';
+  containerEl.appendChild(question);
+  const validateBtn = document.createElement('button');
+  validateBtn.className = 'btn-primary';
+  validateBtn.textContent = 'Valider ce logo';
+  validateBtn.addEventListener('click', async () => {
+    const session_token = localStorage.getItem('session_token');
+    try {
+      await api('/pseudo/logo/confirm', { session_token, word, image_base64: result.image_base64 });
+      await loadPseudoWordLogos();
+      loadMyPseudoLogoStatus();
+    } catch (e) {
+      showMsg('compteMsg', e.message, 'error');
+    }
+  });
+  const skipBtn = document.createElement('button');
+  skipBtn.className = 'btn-link';
+  skipBtn.textContent = 'Pas maintenant';
+  skipBtn.addEventListener('click', () => loadMyPseudoLogoStatus());
+  containerEl.appendChild(validateBtn);
+  containerEl.appendChild(skipBtn);
 }
 async function confirmPseudo(word, color, displayText, pendingLogo) {
   const session_token = localStorage.getItem('session_token');
