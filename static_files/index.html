@@ -7,8 +7,8 @@
 <style>
 * { box-sizing: border-box; }
 html { font-size: 150%; }
-body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2em auto; padding: 0 1em; background: #f5f5f5; color: #222; }
-.card { background: #fff; border-radius: 8px; padding: 1.5em; margin-bottom: 1em; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
+body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2em auto; padding: 0 .5em; background: #f5f5f5; color: #222; }
+.card { background: #fff; border-radius: 8px; padding: 1.2em .8em; margin-bottom: 1em; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
 h1 { text-align: center; font-size: 1.4em; margin: 0 0 1em; }
 h2 { font-size: 1.1em; margin: 0 0 .8em; }
 label { display: block; margin: .6em 0 .2em; font-weight: 600; font-size: .9em; }
@@ -1077,7 +1077,7 @@ function appendAuteurLabel(container, auteurText, suffix) {
 }
 function renderForumOpinion(o) {
   const div = document.createElement('div');
-  div.style.cssText = 'margin:.6em 0; padding:.6em; background:#f8f9fa; border-radius:4px; font-size:.9em;';
+  div.style.cssText = 'margin:.6em 0; padding:.5em .4em; background:#f8f9fa; border-radius:4px; font-size:.9em;';
   const strong = document.createElement('strong');
   appendAuteurLabel(strong, o.auteur, o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '');
   div.appendChild(strong);
@@ -1113,7 +1113,7 @@ function renderForumOpinion(o) {
 }
 function renderForumRemarque(r) {
   const div = document.createElement('div');
-  div.style.cssText = 'margin:.4em 0 .4em 1.2em; padding:.4em .6em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
+  div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
   const strong = document.createElement('strong');
   appendAuteurLabel(strong, r.auteur, ' : ');
   div.appendChild(strong);
@@ -1500,7 +1500,7 @@ function renderMyActivityOpinion(o) {
 }
 function renderMyActivityReaction(r) {
   const div = document.createElement('div');
-  div.style.cssText = 'margin:.4em 0 .4em 1.2em; padding:.4em .6em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
+  div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
   const strong = document.createElement('strong');
   appendAuteurLabel(strong, r.auteur, ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ');
   div.appendChild(strong);
