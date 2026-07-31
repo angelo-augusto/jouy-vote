@@ -3,6 +3,7 @@
 Sépare identité (nom/adresse/email) et vote (jeton/choix) pour garantir
 l'anonymat du vote tout en gardant une vérification de résidence déclarative.
 """
+import base64
 import hashlib
 import json
 import os
@@ -27,6 +28,7 @@ from chatbot_actions import (
     _agree_pseudo_display, compute_debate_token,
 )
 from chatbot_executor import build_system_prompt, run_turn
+import pseudo_logo_gen
 
 DB_PATH = os.environ.get("DB_PATH") or os.path.join(os.path.dirname(__file__), "vote.db")
 ADMIN_KEY = os.environ.get("JOUY_ADMIN_KEY")
@@ -307,6 +309,19 @@ def init_db():
             )
         except sqlite3.OperationalError:
             pass
+        # pseudo_word_logos (2026-07-31) : un logo silhouette généré par MOT (pas par mot+couleur
+        # — la couleur est appliquée dynamiquement côté client via CSS mask-image, voir
+        # pseudo_logo_gen.py). "word" est la clé, un seul logo partagé par tous les pseudos qui
+        # utilisent ce mot quelle que soit leur couleur. Validé par le premier utilisateur qui
+        # confirme un pseudo avec ce mot (voir /pseudo/logo/confirm) — jamais généré à l'insu de
+        # quiconque, jamais avant qu'un vrai pseudo ne le déclenche.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pseudo_word_logos (
+                word TEXT PRIMARY KEY,
+                file TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
         # Seule exception au principe "chatbot = passage obligé" : l'administration s'adresse
         # directement à un citoyen, jamais via le chatbot comme intermédiaire. admin_identity est
         # une identité FIXE et publique par construction (jamais un pseudo, jamais peppée) —
@@ -534,6 +549,21 @@ class PseudoConfirmRequest(BaseModel):
     color: str
 
 
+class PseudoLogoPreviewRequest(BaseModel):
+    session_token: str
+    word: str
+
+
+class PseudoLogoConfirmRequest(BaseModel):
+    session_token: str
+    word: str
+    image_base64: str
+
+
+class PseudoLogosRequest(BaseModel):
+    session_token: str
+
+
 class OpinionConfirmRequest(BaseModel):
     session_token: str
     # Soit thread_id (fil EXISTANT déjà publié), soit new_thread_title (création couplée d'un
@@ -673,6 +703,72 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
         except sqlite3.IntegrityError:
             raise ValueError("ce mot+couleur est déjà pris par quelqu'un d'autre")
     return {"word": word, "color": color}
+
+
+# Volontairement DANS le volume /data (même montage persistant que vote.db), PAS sous
+# static_files/ (2026-07-31, bug réel trouvé au déploiement) : (1) static_files/ est COPIÉ dans
+# l'image au build, appartient à root, illisible en écriture par l'utilisateur "app" du
+# conteneur — un logo généré au runtime plantait sur PermissionError ; (2) même corrigé côté
+# permissions, un fichier écrit dans la couche writable de l'image serait PERDU au prochain
+# rebuild (le piège déjà documenté pour vote.db). Servi séparément via /pseudo_logos_data (voir
+# app.mount plus bas), pas /static_files — chat_gris.png (logo unique généré manuellement avant
+# ce pipeline) reste sous static_files/pseudo_logos/ tel quel, fichier commité au dépôt, sans
+# rapport avec ce dossier runtime.
+_PSEUDO_LOGO_DIR = os.path.join(os.path.dirname(DB_PATH), "pseudo_logos")
+os.makedirs(_PSEUDO_LOGO_DIR, exist_ok=True)
+
+
+def _slugify_word(word: str) -> str:
+    """Nom de fichier sûr pour un mot de pseudo — mots accentués (ex: "Écureuil") possibles,
+    jamais réutilisés tels quels comme nom de fichier. Simple, pas de lib externe : translittère
+    les caractères ASCII usuels, retire le reste."""
+    import unicodedata
+    normalized = unicodedata.normalize("NFKD", word).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-zA-Z0-9]+", "", normalized).lower() or "mot"
+
+
+def get_word_logo_file(word: str) -> str | None:
+    """Lecture pure — None si aucun logo n'a encore été validé pour ce mot (voir
+    pseudo_logo_gen.generate_word_silhouette pour la génération, save_word_logo pour l'écriture)."""
+    with db() as conn:
+        row = conn.execute("SELECT file FROM pseudo_word_logos WHERE word=?", (word,)).fetchone()
+    return row["file"] if row else None
+
+
+def save_word_logo(word: str, png_bytes: bytes) -> str:
+    """SEUL point d'écriture de pseudo_word_logos, déclenché par /pseudo/logo/confirm (clic
+    utilisateur explicite, même moment que la confirmation du pseudo lui-même — jamais le LLM).
+
+    Idempotent/race-safe (2026-07-31) : si 2 personnes confirment quasi simultanément un pseudo
+    avec le MÊME mot nouveau (2 générations indépendantes en parallèle, chacune valide à ses yeux),
+    la table pseudo_word_logos a "word" en clé primaire — la 2e écriture échoue proprement
+    (IntegrityError, silencieuse), et on relit le fichier déjà écrit par la 1re plutôt que
+    d'écraser ou de planter. Le fichier sur disque de la 2e génération reste orphelin mais inoffensif
+    (juste un peu d'espace disque, jamais référencé)."""
+    filename = f"{_slugify_word(word)}.png"
+    path = os.path.join(_PSEUDO_LOGO_DIR, filename)
+    os.makedirs(_PSEUDO_LOGO_DIR, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(png_bytes)
+    with db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO pseudo_word_logos (word, file) VALUES (?, ?)", (word, filename)
+            )
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                "SELECT file FROM pseudo_word_logos WHERE word=?", (word,)
+            ).fetchone()
+            return row["file"]
+    return filename
+
+
+def get_all_word_logos() -> dict[str, str]:
+    """Lecture pure — {word: filename} pour tous les logos déjà validés, utilisé par le frontend
+    pour peupler sa table pseudo->logo au chargement (voir GET /pseudo/logos)."""
+    with db() as conn:
+        rows = conn.execute("SELECT word, file FROM pseudo_word_logos").fetchall()
+    return {r["word"]: r["file"] for r in rows}
 
 
 # ===== Forum (2026-07-25, phase 1 : schéma + fonctions d'écriture + tests, ZÉRO branchement =====
@@ -1128,6 +1224,8 @@ def _get_opinion_reaction_summary(conn: sqlite3.Connection, opinion_id: int) -> 
         reactions.append({
             "reaction_id": r["reaction_id"],
             "auteur": _agree_pseudo_display(pseudo_row["word"], pseudo_row["color"]) if pseudo_row else "auteur inconnu",
+            "auteur_word": pseudo_row["word"] if pseudo_row else None,
+            "auteur_color": pseudo_row["color"] if pseudo_row else None,
             "stance": r["stance"],
             "argumentaire": r["argumentaire"],
         })
@@ -1180,6 +1278,8 @@ def get_forum_page_snapshot() -> list[dict]:
                     {
                         "opinion_id": o["opinion_id"],
                         "auteur": _agree_pseudo_display(o["word"], o["color"]) if o["word"] else "auteur inconnu",
+                        "auteur_word": o["word"],
+                        "auteur_color": o["color"],
                         "body": o["body"],
                         "argumentaire": o["argumentaire"],
                         "superseded_by_opinion_id": o["superseded_by_opinion_id"],
@@ -1191,6 +1291,8 @@ def get_forum_page_snapshot() -> list[dict]:
                     {
                         "remarque_id": r["remarque_id"],
                         "auteur": _agree_pseudo_display(r["word"], r["color"]) if r["word"] else "auteur inconnu",
+                        "auteur_word": r["word"],
+                        "auteur_color": r["color"],
                         "body": r["body"],
                         "reply_to_remarque_id": r["reply_to_remarque_id"],
                         "reply_to_opinion_id": r["reply_to_opinion_id"],
@@ -2103,6 +2205,65 @@ def pseudo_confirm(req: PseudoConfirmRequest):
         raise HTTPException(status, str(e))
 
 
+@app.post("/pseudo/logo/preview")
+def pseudo_logo_preview(req: PseudoLogoPreviewRequest):
+    """Étape "valider ce logo" (2026-07-31, décision développeur via angelobot) : appelé quand
+    l'utilisateur entre dans l'étape de double-confirmation d'un pseudo, POUR PRÉVISUALISER un
+    logo silhouette avant qu'il soit permanent — jamais écrit en base/disque ici (voir
+    /pseudo/logo/confirm pour le seul point d'écriture). Si le mot a déjà un logo validé par
+    quelqu'un d'autre (mot déjà utilisé), le relit directement sans regénérer (gratuit, instantané).
+    Sinon, génère synchrone (5-8s, ~0,014$) — jamais bloquant plus que ça, jamais en arrière-plan
+    (décision développeur : difficile de valider quelque chose encore en cours de génération)."""
+    _require_identity(req.session_token)
+    word = req.word.strip()
+    if not word:
+        raise HTTPException(400, "mot manquant")
+    existing_file = get_word_logo_file(word)
+    if existing_file:
+        with open(os.path.join(_PSEUDO_LOGO_DIR, existing_file), "rb") as f:
+            png_bytes = f.read()
+        return {
+            "image_base64": base64.b64encode(png_bytes).decode(),
+            "is_new": False,
+        }
+    png_bytes = pseudo_logo_gen.generate_word_silhouette(word)
+    if png_bytes is None:
+        # Dégradation propre (2026-07-31) : la génération d'image est un agrément, jamais un
+        # blocage du parcours pseudo — is_new/image_base64 absents, le frontend retombe sur
+        # l'affichage texte habituel pour ce mot, sans erreur bruyante pour l'utilisateur.
+        return {"image_base64": None, "is_new": True}
+    return {"image_base64": base64.b64encode(png_bytes).decode(), "is_new": True}
+
+
+@app.post("/pseudo/logo/confirm")
+def pseudo_logo_confirm(req: PseudoLogoConfirmRequest):
+    """SEUL endpoint qui écrit un logo de mot — jamais le LLM, jamais automatique : appelé par le
+    frontend juste après un /pseudo/confirm réussi, SEULEMENT si /pseudo/logo/preview avait
+    renvoyé une image nouvelle pour ce mot (is_new=true). Idempotent (voir save_word_logo) : si le
+    mot a déjà un logo au moment de l'appel (race entre 2 confirmations quasi simultanées), la
+    2e écriture est silencieusement ignorée, le fichier déjà en place fait foi."""
+    _require_identity(req.session_token)
+    word = req.word.strip()
+    if not word:
+        raise HTTPException(400, "mot manquant")
+    try:
+        png_bytes = base64.b64decode(req.image_base64)
+    except Exception:
+        raise HTTPException(400, "image invalide")
+    filename = save_word_logo(word, png_bytes)
+    return {"word": word, "file": filename}
+
+
+@app.post("/pseudo/logos")
+def pseudo_logos(req: PseudoLogosRequest):
+    """Table complète mot->fichier logo, lue une fois par le frontend au chargement (voir
+    PSEUDO_WORD_LOGOS côté JS) — authentifiée comme le reste (session_token requis) mais sans lien
+    avec l'identité de l'appelant, cette donnée est publique par nature (les logos sont affichés à
+    tout le monde sur le Forum)."""
+    _require_identity(req.session_token)
+    return get_all_word_logos()
+
+
 @app.post("/opinion/confirm")
 def opinion_confirm(req: OpinionConfirmRequest):
     """SEUL endpoint qui écrit une opinion — jamais le LLM (voir chatbot_actions.propose_opinion,
@@ -2438,6 +2599,7 @@ for _route in _SPA_ROUTES:
     )
 
 app.mount("/static_files", StaticFiles(directory="static_files"), name="static")
+app.mount("/pseudo_logos_data", StaticFiles(directory=_PSEUDO_LOGO_DIR), name="pseudo_logos_data")
 
 
 if __name__ == "__main__":

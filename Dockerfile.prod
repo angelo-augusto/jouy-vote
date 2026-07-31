@@ -16,9 +16,10 @@ COPY requirements.txt .
 # piège réel rencontré en développant ce pipeline, a fait planter le disque du Khadas de dev).
 RUN pip install --no-cache-dir --break-system-packages fastapi uvicorn \
     && pip install --no-cache-dir --break-system-packages torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir --break-system-packages qdrant-client sentence-transformers
+    && pip install --no-cache-dir --break-system-packages qdrant-client sentence-transformers \
+    && pip install --no-cache-dir --break-system-packages Pillow
 
-COPY main.py chatbot_llm.py chatbot_actions.py chatbot_executor.py .
+COPY main.py chatbot_llm.py chatbot_actions.py chatbot_executor.py pseudo_logo_gen.py .
 COPY rag_conseil_municipal/__init__.py rag_conseil_municipal/embeddings.py ./rag_conseil_municipal/
 COPY static_files ./static_files
 # Répertoire dédié pour la base SQLite, monté en volume pour survivre aux redéploiements —

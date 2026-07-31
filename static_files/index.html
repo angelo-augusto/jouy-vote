@@ -320,6 +320,11 @@ function render() {
   clearAllMessages();
   renderNav();
 
+  if (isLoggedIn() && !PSEUDO_LOGOS_LOADED) {
+    PSEUDO_LOGOS_LOADED = true;
+    loadPseudoWordLogos();
+  }
+
   if (pageName === 'Home') loadWikiHomeContent();
   else if (pageName === 'Register') initRegisterPage();
   else if (pageName === 'Reset') initResetPage();
@@ -618,22 +623,60 @@ function askPseudoConfirmation(word, color, displayText) {
   question.className = 'info';
   question.style.margin = '0 0 .5em';
   question.textContent = 'Confirmer définitivement « ' + displayText + ' » comme pseudonyme ?';
+  const logoPreviewEl = document.createElement('div');
+  logoPreviewEl.style.cssText = 'margin:.4em 0;';
   const confirmBtn = document.createElement('button');
   confirmBtn.className = 'btn-primary';
   confirmBtn.textContent = 'Oui, confirmer';
-  confirmBtn.addEventListener('click', () => confirmPseudo(word, color, displayText));
+  // pendingLogo (2026-07-31) : rempli en tâche de fond dès l'entrée dans cette étape (voir plus
+  // bas), reste null tant que la génération n'est pas terminée — confirmPseudo gère ce cas en
+  // écrivant juste le pseudo sans logo cette fois (dégradation propre, jamais bloquant, voir
+  // décision développeur : synchrone MAIS le clic "Oui, confirmer" n'attend jamais le logo lui
+  // seul le permet de faire cliquer avant que le logo arrive).
+  let pendingLogo = null;
+  confirmBtn.addEventListener('click', () => confirmPseudo(word, color, displayText, pendingLogo));
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-link';
   cancelBtn.textContent = 'Annuler';
   cancelBtn.addEventListener('click', () => showPseudoProposalButton(word, color, displayText));
   list.appendChild(question);
+  list.appendChild(logoPreviewEl);
   list.appendChild(confirmBtn);
   list.appendChild(cancelBtn);
+  fetchPseudoLogoPreview(word, color, logoPreviewEl).then(result => { pendingLogo = result; });
 }
-async function confirmPseudo(word, color, displayText) {
+// Preview du logo (2026-07-31) : appelé dès l'entrée dans l'étape de confirmation — si le mot a
+// déjà un logo validé (mot déjà utilisé par quelqu'un), le relit instantanément (gratuit) ; sinon
+// génère une silhouette (5-8s, ~0,014$). Jamais bloquant pour l'utilisateur : le bouton "Oui,
+// confirmer" reste cliquable pendant ce temps (voir pendingLogo ci-dessus), et un échec de
+// génération (image_base64 absent) n'affiche simplement rien, sans erreur visible.
+async function fetchPseudoLogoPreview(word, color, containerEl) {
+  const session_token = localStorage.getItem('session_token');
+  try {
+    const data = await api('/pseudo/logo/preview', { session_token, word });
+    if (data.image_base64) {
+      const logoEl = buildColoredLogoElement('data:image/png;base64,' + data.image_base64, color, 3);
+      containerEl.appendChild(logoEl);
+    }
+    return data.image_base64 ? data : null;
+  } catch (e) {
+    return null;
+  }
+}
+async function confirmPseudo(word, color, displayText, pendingLogo) {
   const session_token = localStorage.getItem('session_token');
   try {
     await api('/pseudo/confirm', { session_token, word, color });
+    // Logo (2026-07-31) : commis SEULEMENT si preview a renvoyé une image NOUVELLE (is_new) —
+    // un mot déjà pourvu d'un logo (is_new=false) n'a rien à réécrire, /pseudo/logo/confirm ne
+    // serait qu'un aller-retour réseau inutile. Échec silencieux : le pseudo est déjà confirmé à
+    // ce stade, un souci sur le logo ne doit jamais faire échouer la confirmation elle-même.
+    if (pendingLogo && pendingLogo.is_new && pendingLogo.image_base64) {
+      try {
+        await api('/pseudo/logo/confirm', { session_token, word, image_base64: pendingLogo.image_base64 });
+        loadPseudoWordLogos(); // rafraîchit le cache local, pas besoin d'attendre ici
+      } catch (e) { /* pas bloquant */ }
+    }
     document.getElementById('pseudoProposal').classList.add('hidden');
     chatHistory.push({ role: 'assistant', content: 'Pseudo confirmé : ' + (displayText || (word + ' ' + color)) + '.' });
     renderChatMessages();
@@ -1074,20 +1117,50 @@ function renderForumThread(thread) {
   block.appendChild(content);
   return block;
 }
-// Pseudo -> logo (2026-07-31, demande Angelo) : un pseudo AVEC logo généré s'affiche en image
-// partout où son texte apparaîtrait, un pseudo SANS logo reste en texte normal. À étendre au fil
-// de la génération des logos (voir reference_flux2_klein_disparu_openrouter en mémoire pour l'API).
-const PSEUDO_LOGO_MAP = { 'Chat gris': '/static_files/pseudo_logos/chat_gris.png' };
-function appendAuteurLabel(container, auteurText, suffix) {
+// Pseudo -> logo (2026-07-31, système général) : un pseudo dont le MOT a un logo silhouette
+// généré s'affiche en image (recolorée dynamiquement selon la couleur du pseudo, via CSS
+// mask-image) partout où son texte apparaîtrait ; un pseudo dont le mot n'a pas encore de logo
+// reste en texte normal. Un seul logo par MOT (pas par mot+couleur) — réutilisé pour tout pseudo
+// qui partage ce mot, quelle que soit sa couleur. PSEUDO_WORD_LOGOS chargé une fois au démarrage
+// (voir loadPseudoWordLogos), mis à jour localement dès qu'un nouveau logo est validé (voir
+// confirmPseudo) — jamais besoin de recharger la page pour voir apparaître un logo qu'on vient
+// soi-même de valider.
+let PSEUDO_WORD_LOGOS = {};
+let PSEUDO_LOGOS_LOADED = false;
+async function loadPseudoWordLogos() {
+  const session_token = localStorage.getItem('session_token');
+  if (!session_token) return;
+  try {
+    PSEUDO_WORD_LOGOS = await api('/pseudo/logos', { session_token });
+  } catch (e) { /* pas bloquant : les pseudos restent simplement en texte si ça échoue */ }
+}
+const PSEUDO_COLOR_HEX = {
+  rouge: '#e53935', orange: '#fb8c00', jaune: '#fdd835', vert: '#43a047', bleu: '#1e88e5',
+  violet: '#8e24aa', blanc: '#f5f5f5', noir: '#212121', gris: '#757575',
+};
+// mask-image (2026-07-31) : la silhouette générée est un PNG noir sur fond transparent — masquée
+// avec la couleur du pseudo comme background-color, plutôt qu'une image par couleur (1 seul appel
+// de génération par MOT, peu importe combien de couleurs l'utilisent). -webkit- requis pour
+// Safari/Chrome, qui n'ont pas encore la version non préfixée.
+function buildColoredLogoElement(imageUrl, color, sizeEm) {
+  const el = document.createElement('span');
+  const bg = PSEUDO_COLOR_HEX[color] || '#757575';
+  el.style.cssText =
+    'display:inline-block; vertical-align:middle; width:' + sizeEm + 'em; height:' + sizeEm + 'em; ' +
+    'background-color:' + bg + '; ' +
+    '-webkit-mask-image:url(' + imageUrl + '); mask-image:url(' + imageUrl + '); ' +
+    '-webkit-mask-size:contain; mask-size:contain; ' +
+    '-webkit-mask-repeat:no-repeat; mask-repeat:no-repeat; ' +
+    '-webkit-mask-position:center; mask-position:center;';
+  return el;
+}
+function appendAuteurLabel(container, auteurText, suffix, word, color) {
   container.textContent = '';
-  const logoUrl = PSEUDO_LOGO_MAP[auteurText];
-  if (logoUrl) {
-    const img = document.createElement('img');
-    img.src = logoUrl;
-    img.alt = auteurText;
-    img.title = auteurText;
-    img.style.cssText = 'height:1.4em; width:auto; vertical-align:middle;';
-    container.appendChild(img);
+  const logoFile = word ? PSEUDO_WORD_LOGOS[word] : null;
+  if (logoFile) {
+    const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + logoFile, color, 1.4);
+    logoEl.title = auteurText;
+    container.appendChild(logoEl);
     if (suffix) container.appendChild(document.createTextNode(suffix));
   } else {
     container.textContent = auteurText + (suffix || '');
@@ -1097,7 +1170,7 @@ function renderForumOpinion(o) {
   const div = document.createElement('div');
   div.style.cssText = 'margin:.6em 0; padding:.5em .4em; background:#f8f9fa; border-radius:4px; font-size:.9em;';
   const strong = document.createElement('strong');
-  appendAuteurLabel(strong, o.auteur, o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '');
+  appendAuteurLabel(strong, o.auteur, o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '', o.auteur_word, o.auteur_color);
   div.appendChild(strong);
   div.appendChild(document.createElement('br'));
   div.appendChild(document.createTextNode(o.body));
@@ -1133,7 +1206,7 @@ function renderForumRemarque(r) {
   const div = document.createElement('div');
   div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
   const strong = document.createElement('strong');
-  appendAuteurLabel(strong, r.auteur, ' : ');
+  appendAuteurLabel(strong, r.auteur, ' : ', r.auteur_word, r.auteur_color);
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.body));
   div.appendChild(buildInlineReactWidget({ type: 'remarque', id: r.remarque_id }));
@@ -1514,7 +1587,7 @@ function renderMyActivityReaction(r) {
   const div = document.createElement('div');
   div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
   const strong = document.createElement('strong');
-  appendAuteurLabel(strong, r.auteur, ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ');
+  appendAuteurLabel(strong, r.auteur, ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ', r.auteur_word, r.auteur_color);
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.argumentaire || '(sans argumentaire)'));
   if (r.reaction_id) div.appendChild(buildInlineReactWidget({ type: 'reaction', id: r.reaction_id }));
