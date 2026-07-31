@@ -89,10 +89,25 @@ def generate_word_silhouette(word: str) -> bytes | None:
     interne (un œil blanc devenait un TROU transparent une fois masqué en CSS, bug réel corrigé
     ici) ; (3) cadrage tête/buste testé pour mieux distinguer les espèces à tête caractéristique —
     ÉCARTÉ, résultat PIRE (têtes méconnaissables, ex. Faucon = tête à cornes, Hibou = oreilles de
-    chauve-souris) ; le corps entier en vue de profil reste la meilleure option trouvée à ce jour."""
+    chauve-souris) ; le corps entier en vue de profil reste la meilleure option trouvée à ce jour.
+
+    Ambiguïté franco-anglaise (2026-07-31, trouvé par Angelo sur son propre pseudo "Chat") : le
+    prompt étant en anglais, le mot français "chat" a été compris comme le mot ANGLAIS "chat"
+    (conversation en ligne) plutôt que le félin — logo généré = bulle de discussion avec des
+    oreilles, pas un chat. "Chat" n'est pas dans PSEUDO_WORDS (mot LIBRE proposé par Angelo via
+    propose_custom_pseudo) — les 24 mots curés de la liste officielle n'ont pas d'homographe
+    anglais évident (vérifié), mais le risque reste réel et imprévisible pour tout mot libre.
+    Fix générique (pas une liste de cas particuliers à maintenir) : préciser explicitement dans le
+    prompt que le mot est FRANÇAIS et doit être interprété selon son sens français littéral, avec
+    "chat" cité en exemple concret pour ancrer l'instruction."""
     prompt = (
-        f"A bold, minimalist flat icon/pictogram of a {word}, in the style of a simple app icon "
-        "or emoji logo — NOT a realistic silhouette. Solid thick black shape on a plain white "
+        f"A bold, minimalist flat icon/pictogram depicting a {word} — {word} is a French word "
+        f"naming a concrete animal, plant, or physical object; interpret its natural French "
+        f"meaning, never any unrelated English word that happens to share the same spelling "
+        f"(for instance a French cat/feline animal, never an online chat/messaging bubble icon). "
+        f"Depict the OBJECT ITSELF as a picture — never render the word as text, letters, or a "
+        f"logotype. In the style of a simple app icon or emoji logo — NOT a realistic silhouette. "
+        "Solid thick black shape on a plain white "
         "background, heavily simplified and geometric, thick rounded chunky outlines, no thin "
         "lines, no spindly legs — designed to stay clearly recognizable even at a very small "
         "size like 24x24 pixels. Exaggerate the ONE OR TWO most distinctive features that make "
