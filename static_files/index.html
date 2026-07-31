@@ -661,7 +661,7 @@ async function fetchPseudoLogoPreview(word, color, containerEl) {
   try {
     const data = await api('/pseudo/logo/preview', { session_token, word });
     if (data.image_base64) {
-      const logoEl = buildColoredLogoElement('data:image/png;base64,' + data.image_base64, color, 3);
+      const logoEl = buildColoredLogoElement('data:image/png;base64,' + data.image_base64, color, 4.2);
       containerEl.appendChild(logoEl);
     }
     return data.image_base64 ? data : null;
@@ -693,7 +693,7 @@ async function loadMyPseudoLogoStatus() {
     await loadPseudoWordLogos(); // toujours réattendu ici, pas de dépendance au flag de la page Forum
     const existingFile = PSEUDO_WORD_LOGOS[pseudo.word];
     if (existingFile) {
-      const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + existingFile, pseudo.color, 3);
+      const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + existingFile, pseudo.color, 4.2);
       statusEl.appendChild(logoEl);
       const p = document.createElement('p');
       p.className = 'info';
@@ -1254,7 +1254,7 @@ function appendAuteurLabel(container, auteurText, suffix, word, color) {
   container.textContent = '';
   const logoFile = word ? PSEUDO_WORD_LOGOS[word] : null;
   if (logoFile) {
-    const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + logoFile, color, 1.4);
+    const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + logoFile, color, 2);
     logoEl.title = auteurText;
     container.appendChild(logoEl);
     if (suffix) container.appendChild(document.createTextNode(suffix));

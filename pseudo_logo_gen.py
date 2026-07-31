@@ -78,13 +78,32 @@ def generate_word_silhouette(word: str) -> bytes | None:
     """Génère une silhouette noire pure (fond transparent) représentant le MOT donné — sans
     référence de couleur, la couleur du pseudo est appliquée à l'affichage (CSS mask-image +
     background-color), pas cuite dans l'image. Retourne les octets PNG (avec alpha) ou None en
-    cas d'échec à n'importe quelle étape."""
+    cas d'échec à n'importe quelle étape.
+
+    2e version du prompt (2026-07-31, retour réel Angelo après test sur 6 comptes) : le 1er
+    prompt ("shadow-puppet silhouette" naturaliste) donnait des formes illisibles/informes une
+    fois réduites à la petite taille d'affichage ("des cacas ou des tas de terre"), et 2 animaux
+    morphologiquement proches (Faucon/Hibou) se confondaient en silhouette corps entier. Testé et
+    validé avec angelobot : (1) style icône/pictogramme plat façon emoji plutôt que silhouette
+    photo-réaliste — bien plus lisible et net ; (2) exiger explicitement AUCUN trou/zone blanche
+    interne (un œil blanc devenait un TROU transparent une fois masqué en CSS, bug réel corrigé
+    ici) ; (3) cadrage tête/buste testé pour mieux distinguer les espèces à tête caractéristique —
+    ÉCARTÉ, résultat PIRE (têtes méconnaissables, ex. Faucon = tête à cornes, Hibou = oreilles de
+    chauve-souris) ; le corps entier en vue de profil reste la meilleure option trouvée à ce jour."""
     prompt = (
-        f"A naive, minimalist shadow-puppet silhouette (ombre chinoise style) of a {word}, "
-        "solid flat pure black silhouette on a plain white background. Simple, childlike, "
-        "hand-cut-paper look, clean smooth outline, no texture, no gradient, no details inside "
-        "the silhouette, single object/being, nothing else in the image — pure flat black "
-        "paper-cutout shape only, no color, no shading."
+        f"A bold, minimalist flat icon/pictogram of a {word}, in the style of a simple app icon "
+        "or emoji logo — NOT a realistic silhouette. Solid thick black shape on a plain white "
+        "background, heavily simplified and geometric, thick rounded chunky outlines, no thin "
+        "lines, no spindly legs — designed to stay clearly recognizable even at a very small "
+        "size like 24x24 pixels. Exaggerate the ONE OR TWO most distinctive features that make "
+        "this specific animal/object recognizable and different from similar-looking ones (e.g. "
+        "ear tufts for an owl, a hooked beak for a falcon, antlers for a deer) so it cannot be "
+        "confused with a generic shape of the same category. CRITICAL: the shape must be a "
+        "single continuous solid silhouette with ZERO holes, zero gaps, zero white areas inside "
+        "it — no eyes, no facial features, no internal details of any kind, nothing but one "
+        "uninterrupted flat black blob outline. High contrast, bold positive shape. Single "
+        "object/being, centered, nothing else in the image, no color, no shading, no gradient, "
+        "no texture, no background elements."
     )
     raw = _call_flux_image(prompt)
     if raw is None:
