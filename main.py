@@ -296,6 +296,17 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_thread_remarques_thread ON thread_remarques(thread_id)"
         )
+        # reply_to_reaction_id (2026-07-31) : jusqu'ici aucune façon de rebondir sur une réaction
+        # (adhérer/opposer/neutre) elle-même — seulement sur une opinion ou une autre remarque.
+        # Même logique que reply_to_remarque_id/reply_to_opinion_id : nullable, mutuellement
+        # exclusif en pratique avec les deux autres (une remarque répond à au plus une chose).
+        try:
+            conn.execute(
+                "ALTER TABLE thread_remarques ADD COLUMN reply_to_reaction_id "
+                "INTEGER REFERENCES opinion_reactions(reaction_id)"
+            )
+        except sqlite3.OperationalError:
+            pass
         # Seule exception au principe "chatbot = passage obligé" : l'administration s'adresse
         # directement à un citoyen, jamais via le chatbot comme intermédiaire. admin_identity est
         # une identité FIXE et publique par construction (jamais un pseudo, jamais peppée) —
@@ -504,6 +515,7 @@ class ChatRequest(BaseModel):
     # à le réexpliquer.
     context_opinion_id: int | None = None
     context_remarque_id: int | None = None
+    context_reaction_id: int | None = None
 
 
 class ChatSummarizeRequest(BaseModel):
@@ -558,6 +570,7 @@ class RemarqueConfirmRequest(BaseModel):
     body: str
     reply_to_remarque_id: int | None = None
     reply_to_opinion_id: int | None = None
+    reply_to_reaction_id: int | None = None
 
 
 class ActivityMineRequest(BaseModel):
@@ -1000,13 +1013,17 @@ def set_reaction_stance(opinion_id: int, reactor_identity_token: str, stance: st
 def create_remarque(
     thread_id: int, author_identity_token: str, body: str,
     reply_to_remarque_id: int | None = None, reply_to_opinion_id: int | None = None,
+    reply_to_reaction_id: int | None = None,
 ) -> dict:
     """Couche informelle en plus du formalisme opinion/réaction — pas de statut "figé", pas de
     versions : une remarque publiée reste telle quelle (pas de règle de mutation particulière au-
     delà du cycle générique brouillon→publication). Le fil doit exister et être PUBLIÉ (même
-    durcissement 2026-07-25, phase 3, que create_opinion/add_reaction)."""
-    if reply_to_remarque_id is not None and reply_to_opinion_id is not None:
-        raise ValueError("une remarque répond à au plus une chose : soit une remarque, soit une opinion, jamais les deux")
+    durcissement 2026-07-25, phase 3, que create_opinion/add_reaction). reply_to_reaction_id
+    (2026-07-31) permet de rebondir sur une réaction (adhérer/opposer/neutre) elle-même, seul
+    moyen actuel puisque les réactions n'ont pas de sous-réactions formelles."""
+    targets = [x for x in (reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id) if x is not None]
+    if len(targets) > 1:
+        raise ValueError("une remarque répond à au plus une chose : une remarque, une opinion, ou une réaction, jamais plusieurs")
     with db() as conn:
         thread_row = conn.execute("SELECT status FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
         if thread_row is None:
@@ -1017,9 +1034,9 @@ def create_remarque(
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO thread_remarques "
-            "(thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id),
+            "(thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id),
         )
         remarque_id = cur.lastrowid
     return {"remarque_id": remarque_id, "thread_id": thread_id, "body": body, "status": "draft"}
@@ -1092,7 +1109,7 @@ def _get_opinion_reaction_summary(conn: sqlite3.Connection, opinion_id: int) -> 
     get_my_activity. Même règle que get_current_reaction : seule la réaction la plus RÉCENTE par
     réacteur compte, jamais un doublon si quelqu'un a changé d'avis."""
     reaction_rows = conn.execute(
-        """SELECT reactor_debate_token, stance, argumentaire, created_at
+        """SELECT reaction_id, reactor_debate_token, stance, argumentaire, created_at
            FROM opinion_reactions
            WHERE opinion_id=? AND status='published'
            ORDER BY created_at DESC, reaction_id DESC""",
@@ -1109,6 +1126,7 @@ def _get_opinion_reaction_summary(conn: sqlite3.Connection, opinion_id: int) -> 
             "SELECT word, color FROM pseudos WHERE debate_token=?", (reactor_token,)
         ).fetchone()
         reactions.append({
+            "reaction_id": r["reaction_id"],
             "auteur": _agree_pseudo_display(pseudo_row["word"], pseudo_row["color"]) if pseudo_row else "auteur inconnu",
             "stance": r["stance"],
             "argumentaire": r["argumentaire"],
@@ -1146,7 +1164,7 @@ def get_forum_page_snapshot() -> list[dict]:
             ).fetchall()
             remarque_rows = conn.execute(
                 """SELECT r.remarque_id, r.body, r.reply_to_remarque_id, r.reply_to_opinion_id,
-                          p.word, p.color
+                          r.reply_to_reaction_id, p.word, p.color
                    FROM thread_remarques r
                    LEFT JOIN pseudos p ON p.debate_token = r.author_debate_token
                    WHERE r.thread_id=? AND r.status='published'
@@ -1176,6 +1194,7 @@ def get_forum_page_snapshot() -> list[dict]:
                         "body": r["body"],
                         "reply_to_remarque_id": r["reply_to_remarque_id"],
                         "reply_to_opinion_id": r["reply_to_opinion_id"],
+                        "reply_to_reaction_id": r["reply_to_reaction_id"],
                     }
                     for r in remarque_rows
                 ],
@@ -1855,19 +1874,20 @@ _MOIS_NOMS = [
 
 def _element_context_block(
     context_opinion_id: int | None, context_remarque_id: int | None,
-    identity_token: str | None = None,
+    identity_token: str | None = None, context_reaction_id: int | None = None,
 ) -> str:
-    """Chat inline scopé (2026-07-29, bouton "Réagir" sur Forum/Mon activité) : décrit l'opinion
-    ou la remarque précise sur laquelle l'utilisateur vient de cliquer "Réagir", pour qu'il n'ait
-    jamais à la réexpliquer lui-même. Dégrade en chaîne vide si l'id est absent, invalide ou pointe
-    vers un contenu non publié — un contexte manquant ne doit jamais faire échouer la conversation,
-    juste priver le modèle de ce rappel (il peut toujours demander lui-même si besoin).
+    """Chat inline scopé (2026-07-29, bouton "Réagir" sur Forum/Mon activité) : décrit l'opinion,
+    la remarque ou (2026-07-31) la réaction précise sur laquelle l'utilisateur vient de cliquer
+    "Réagir", pour qu'il n'ait jamais à la réexpliquer lui-même. Dégrade en chaîne vide si l'id est
+    absent, invalide ou pointe vers un contenu non publié — un contexte manquant ne doit jamais
+    faire échouer la conversation, juste priver le modèle de ce rappel (il peut toujours demander
+    lui-même si besoin).
 
     identity_token (2026-07-30, boutons directs adherer/opposer/neutre) : optionnel — permet de
     rappeler au modèle le stance déjà posé par bouton pour cette opinion (voir
     set_reaction_stance), pour qu'un message ultérieur de simple argumentaire ("parce que...")
     réutilise ce stance au lieu d'en redemander un ou d'en inventer un par défaut."""
-    if context_opinion_id is not None and context_remarque_id is not None:
+    if len([x for x in (context_opinion_id, context_remarque_id, context_reaction_id) if x is not None]) > 1:
         return ""
     with db() as conn:
         if context_opinion_id is not None:
@@ -1950,6 +1970,41 @@ def _element_context_block(
                 f"élément précis, sans élargir au reste du forum sauf si l'utilisateur le demande "
                 f"explicitement."
             )
+        if context_reaction_id is not None:
+            row = conn.execute(
+                """SELECT re.opinion_id, re.stance, re.argumentaire, o.thread_id, t.title AS thread_title,
+                          p.word, p.color
+                   FROM opinion_reactions re
+                   JOIN opinions o ON o.opinion_id = re.opinion_id
+                   JOIN threads t ON t.thread_id = o.thread_id
+                   LEFT JOIN pseudos p ON p.debate_token = re.reactor_debate_token
+                   WHERE re.reaction_id=? AND re.status='published'""",
+                (context_reaction_id,),
+            ).fetchone()
+            if row is None:
+                return ""
+            auteur = _agree_pseudo_display(row["word"], row["color"]) if row["word"] else "auteur inconnu"
+            if identity_token is not None and row["word"]:
+                own_pseudo = get_existing_pseudo(identity_token)
+                if own_pseudo and own_pseudo["word"] == row["word"] and own_pseudo["color"] == row["color"]:
+                    auteur += " (c'est TOI, l'utilisateur avec qui tu parles en ce moment)"
+            block = (
+                f"CONTEXTE : l'utilisateur vient de cliquer sur \"Réagir\" à propos d'une réaction "
+                f"reaction_id={context_reaction_id} (opinion_id={row['opinion_id']}, "
+                f"thread_id={row['thread_id']}, fil \"{row['thread_title']}\") — {auteur} a choisi le "
+                f"stance \"{row['stance']}\" sur cette opinion"
+            )
+            if row["argumentaire"]:
+                block += f", avec l'argumentaire : \"{row['argumentaire']}\""
+            return (
+                block + f". Une réaction n'a pas de sous-réaction formelle : si l'utilisateur veut "
+                f"rebondir sur CETTE réaction précise, appelle directement propose_remarque avec "
+                f"thread_id={row['thread_id']} et reply_to_reaction_id={context_reaction_id} — "
+                f"n'appelle JAMAIS list_threads/get_thread pour la retrouver, tu as déjà tout ce "
+                f"qu'il faut ci-dessus, y compris les identifiants exacts. Concentre-toi sur CET "
+                f"élément précis, sans élargir au reste du forum sauf si l'utilisateur le demande "
+                f"explicitement."
+            )
     return ""
 
 
@@ -1982,7 +2037,9 @@ def chat_v2(req: ChatRequest):
     # utile aussi pour raisonner sur list_conseil_municipal_seances ("y a-t-il eu un conseil
     # depuis juin ?").
     context_block = f"{current_date_block()}\n\n{context_block}".strip() if context_block else current_date_block()
-    element_block = _element_context_block(req.context_opinion_id, req.context_remarque_id, identity_token)
+    element_block = _element_context_block(
+        req.context_opinion_id, req.context_remarque_id, identity_token, req.context_reaction_id
+    )
     if element_block:
         context_block = f"{context_block}\n\n{element_block}".strip()
     system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block)
@@ -2129,7 +2186,8 @@ def remarque_confirm(req: RemarqueConfirmRequest):
     identity_token = _require_identity(req.session_token)
     try:
         remarque = create_remarque(
-            req.thread_id, identity_token, req.body, req.reply_to_remarque_id, req.reply_to_opinion_id
+            req.thread_id, identity_token, req.body, req.reply_to_remarque_id, req.reply_to_opinion_id,
+            req.reply_to_reaction_id,
         )
         return publish_remarque(remarque["remarque_id"])
     except ValueError as e:

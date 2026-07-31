@@ -854,6 +854,7 @@ async function confirmRemarque(remarque) {
       session_token, thread_id: remarque.thread_id, body: remarque.body,
       reply_to_remarque_id: remarque.reply_to_remarque_id || null,
       reply_to_opinion_id: remarque.reply_to_opinion_id || null,
+      reply_to_reaction_id: remarque.reply_to_reaction_id || null,
     });
     document.getElementById('remarqueProposal').classList.add('hidden');
     chatHistory.push({ role: 'assistant', content: 'Remarque publiée sur le Forum.' });
@@ -1260,6 +1261,7 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
     const payload = { session_token, message, history: historyBefore };
     if (contextRef.type === 'opinion') payload.context_opinion_id = contextRef.id;
     if (contextRef.type === 'remarque') payload.context_remarque_id = contextRef.id;
+    if (contextRef.type === 'reaction') payload.context_reaction_id = contextRef.id;
     inlineLoadingImg.src = '/static_files/robot_loading.gif';
     inlineLoadingText.textContent = "L'assistant réfléchit…";
     try {
@@ -1395,6 +1397,7 @@ function buildInlineRemarqueConfirm(box, remarque, contextRef, onPublished) {
         session_token, thread_id: remarque.thread_id, body: remarque.body,
         reply_to_remarque_id: remarque.reply_to_remarque_id || null,
         reply_to_opinion_id: remarque.reply_to_opinion_id || null,
+        reply_to_reaction_id: remarque.reply_to_reaction_id || null,
       });
       box.innerHTML = '';
       chatHistory.push({ role: 'assistant', content: 'Remarque publiée sur le Forum.', contextRef });
@@ -1505,6 +1508,7 @@ function renderMyActivityReaction(r) {
   appendAuteurLabel(strong, r.auteur, ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ');
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.argumentaire || '(sans argumentaire)'));
+  if (r.reaction_id) div.appendChild(buildInlineReactWidget({ type: 'reaction', id: r.reaction_id }));
   return div;
 }
 

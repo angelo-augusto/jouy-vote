@@ -470,14 +470,18 @@ def propose_reaction(params: dict, ctx: dict) -> dict:
 def propose_remarque(params: dict, ctx: dict) -> dict:
     """Forum, phase 3 : même mécanique — lecture/validation pure, aucun write. Une remarque est
     la couche informelle du forum (dire bonjour, élaborer sur le sujet sans passer par le
-    formalisme adhérer/opposer/argumentaire) — "reply_to_remarque_id" et "reply_to_opinion_id"
-    sont mutuellement exclusifs (au plus une chose, ou rien = nouveau message de premier niveau)."""
+    formalisme adhérer/opposer/argumentaire) — "reply_to_remarque_id", "reply_to_opinion_id" et
+    "reply_to_reaction_id" (2026-07-31, seul moyen de rebondir sur une réaction précise, qui n'a
+    pas de sous-réaction formelle) sont mutuellement exclusifs (au plus une chose, ou rien =
+    nouveau message de premier niveau)."""
     thread_id = params.get("thread_id")
     body = params.get("body", "")
     reply_to_remarque_id = params.get("reply_to_remarque_id")
     reply_to_opinion_id = params.get("reply_to_opinion_id")
-    if reply_to_remarque_id is not None and reply_to_opinion_id is not None:
-        return {"available": False, "error": "une remarque répond à au plus une chose : soit une remarque, soit une opinion, jamais les deux"}
+    reply_to_reaction_id = params.get("reply_to_reaction_id")
+    targets = [x for x in (reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id) if x is not None]
+    if len(targets) > 1:
+        return {"available": False, "error": "une remarque répond à au plus une chose : une remarque, une opinion, ou une réaction, jamais plusieurs"}
     thread = next((t for t in ctx.get("threads", []) if t["thread_id"] == thread_id), None)
     if thread is None:
         return {"available": False, "error": "fil introuvable (ou pas encore publié)"}
@@ -486,6 +490,7 @@ def propose_remarque(params: dict, ctx: dict) -> dict:
     return {
         "thread_id": thread_id, "body": body,
         "reply_to_remarque_id": reply_to_remarque_id, "reply_to_opinion_id": reply_to_opinion_id,
+        "reply_to_reaction_id": reply_to_reaction_id,
         "available": True,
     }
 
@@ -816,8 +821,12 @@ ACTIONS_JSON_SCHEMA = {
                             "body": {"type": "string"},
                             "reply_to_remarque_id": {"type": ["integer", "null"]},
                             "reply_to_opinion_id": {"type": ["integer", "null"]},
+                            "reply_to_reaction_id": {"type": ["integer", "null"]},
                         },
-                        "required": ["action", "thread_id", "body", "reply_to_remarque_id", "reply_to_opinion_id"],
+                        "required": [
+                            "action", "thread_id", "body",
+                            "reply_to_remarque_id", "reply_to_opinion_id", "reply_to_reaction_id",
+                        ],
                         "additionalProperties": False,
                     },
                     {
@@ -987,11 +996,15 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   passer par toi — si le message de l'utilisateur n'est qu'un argumentaire sur une opinion déjà
   scopée, voir le rappel de contexte qui précise le stance déjà choisi (ne le redemande pas, ne
   l'invente pas).
-- propose_remarque(thread_id, body, reply_to_remarque_id, reply_to_opinion_id) : brouillon de
-  remarque informelle sur un fil (dire bonjour, élaborer sur le sujet sans passer par le
-  formalisme adhérer/opposer/argumentaire). "reply_to_remarque_id" et "reply_to_opinion_id" sont
-  mutuellement exclusifs (au plus une chose, ou aucun des deux = nouveau message de premier
-  niveau) — mets-les à null si tu ne réponds à rien de précis.
+- propose_remarque(thread_id, body, reply_to_remarque_id, reply_to_opinion_id,
+  reply_to_reaction_id) : brouillon de remarque informelle sur un fil (dire bonjour, élaborer sur
+  le sujet sans passer par le formalisme adhérer/opposer/argumentaire). "reply_to_remarque_id",
+  "reply_to_opinion_id" et "reply_to_reaction_id" sont mutuellement exclusifs (au plus une chose,
+  ou aucun des trois = nouveau message de premier niveau) — mets-les à null si tu ne réponds à
+  rien de précis. "reply_to_reaction_id" (2026-07-31) est le SEUL moyen de rebondir sur une
+  réaction précise (adhérer/opposer/neutre) : les réactions n'ont pas de sous-réaction formelle,
+  donc si l'utilisateur veut commenter/répondre à ce que quelqu'un a dit en réagissant, c'est
+  toujours via une remarque ciblée sur cette réaction, jamais via propose_reaction.
 
 Ces 5 actions forum (list_threads/get_thread/propose_opinion/propose_reaction/propose_remarque)
 sont toutes des LECTURES/VALIDATIONS PURES : aucune action de publication (créer un fil, écrire
