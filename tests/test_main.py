@@ -2600,9 +2600,9 @@ def test_chat_system_prompt_includes_iconifiable_rejection_criterion():
 
     prompt = main_module.CHAT_SYSTEM_PROMPT
     assert "ICONIFIABLE" in prompt
-    for good_example in ("Renard", "Hibou", "Chêne", "Faucon", "Comète", "Phare", "Écureuil", "Corail"):
+    for good_example in ("Renard", "Hibou", "Faucon", "Éléphant", "Dragon", "Voiture", "Trompette"):
         assert good_example in prompt
-    for bad_example in ("Aurore", "Clairière", "Frimas", "Brume"):
+    for bad_example in ("Aurore", "Clairière", "Frimas", "Brume", "Corail", "Sittelle"):
         assert bad_example in prompt
     assert "appropriate=false" in prompt
 

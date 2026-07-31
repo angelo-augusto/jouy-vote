@@ -229,8 +229,25 @@ def run_turn(
             data = json.loads(content)
             actions = data.get("actions", []) if isinstance(data, dict) else []
         except json.JSONDecodeError:
-            log.error("Réponse LLM non-JSON malgré response_format strict : %s", content[:300])
-            return _turn_result(replies, actions_log, "json_invalide", trace_log)
+            # Bug réel #18 (2026-07-31, signalé par Angelo en conditions réelles : demander à voir
+            # le logo avant confirmation faisait planter tout le tour, proposition en cours perdue
+            # sans explication) — le modèle low-cost ne respecte pas toujours response_format=
+            # json_schema strict, surtout sur une question hors du périmètre des actions
+            # disponibles (aucune action ne permet de "montrer le logo en texte", donc le modèle
+            # dérive vers du texte libre). Non systématique d'un appel à l'autre sur le même prompt
+            # (observé en reproduisant : 1er appel échoue, 2e réussit) — un seul réessai borné
+            # (mêmes messages, nouvel appel) avant d'abandonner, même logique bornée que
+            # pseudo_logo_gen.MAX_DRAW_ATTEMPTS.
+            log.warning("Réponse LLM non-JSON, réessai : %s", content[:300])
+            content, _usage = call_openrouter(messages, response_format=RESPONSE_FORMAT, max_tokens=4096, model=model)
+            if content is None:
+                return _turn_result(replies, actions_log, "llm_indisponible", trace_log)
+            try:
+                data = json.loads(content)
+                actions = data.get("actions", []) if isinstance(data, dict) else []
+            except json.JSONDecodeError:
+                log.error("Réponse LLM non-JSON malgré réessai : %s", content[:300])
+                return _turn_result(replies, actions_log, "json_invalide", trace_log)
 
         if not actions:
             return _turn_result(replies, actions_log, "liste_actions_vide", trace_log)
