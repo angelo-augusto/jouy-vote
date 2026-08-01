@@ -1406,18 +1406,9 @@ function renderForumOpinion(o, replyCtx) {
     em.textContent = o.argumentaire;
     div.appendChild(em);
   }
-  // Liens de réponse (2026-08-01) : remarques qui répondent DIRECTEMENT à cette opinion (voir
-  // _buildThreadReplyIndex) — pas celles qui répondent à une réaction ou à une autre remarque,
-  // affichées à LEUR niveau à elles (renderMyActivityReaction / renderForumRemarque).
-  if (replyCtx) {
-    const indicator = buildRepliesIndicator(replyCtx.byOpinion[o.opinion_id]);
-    if (indicator) div.appendChild(indicator);
-  }
-  // Réactions (2026-07-26, oubli de spec initial corrigé : la page Forum n'affichait aucune
-  // réaction alors que Mon activité les affichait déjà) — même présentation que Mon activité.
-  // Rafraîchi en live (2026-07-30, demande développeur) après un clic sur un bouton direct
-  // adhérer/opposer/neutre — voir renderReactionSummary passé à buildInlineReactWidget, qui
-  // renvoie déjà reaction_counts/reactions à jour dans la réponse de /reaction/toggle.
+  // Bouton "Réagir" JUSTE SOUS l'opinion (2026-08-01, retour Angelo : placé auparavant après
+  // toute la liste des réactions, obligeant à remonter loin pour retrouver à quoi il se référait)
+  // — déplacé ici, avant la liste des réactions, pour rester proche de ce qu'il cible.
   const reactionSummaryEl = document.createElement('div');
   function renderReactionSummary(counts, reactions) {
     reactionSummaryEl.innerHTML = '';
@@ -1430,9 +1421,21 @@ function renderForumOpinion(o, replyCtx) {
     reactionSummaryEl.appendChild(countsP);
     (reactions || []).forEach(r => reactionSummaryEl.appendChild(renderMyActivityReaction(r, replyCtx)));
   }
+  div.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary, "l'opinion de " + o.auteur));
+  // Liens de réponse (2026-08-01) : remarques qui répondent DIRECTEMENT à cette opinion (voir
+  // _buildThreadReplyIndex) — pas celles qui répondent à une réaction ou à une autre remarque,
+  // affichées à LEUR niveau à elles (renderMyActivityReaction / renderForumRemarque).
+  if (replyCtx) {
+    const indicator = buildRepliesIndicator(replyCtx.byOpinion[o.opinion_id]);
+    if (indicator) div.appendChild(indicator);
+  }
+  // Réactions (2026-07-26, oubli de spec initial corrigé : la page Forum n'affichait aucune
+  // réaction alors que Mon activité les affichait déjà) — même présentation que Mon activité.
+  // Rafraîchi en live (2026-07-30, demande développeur) après un clic sur un bouton direct
+  // adhérer/opposer/neutre — voir renderReactionSummary ci-dessus, qui reçoit déjà
+  // reaction_counts/reactions à jour dans la réponse de /reaction/toggle.
   if (o.reaction_counts) renderReactionSummary(o.reaction_counts, o.reactions);
   div.appendChild(reactionSummaryEl);
-  div.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary));
   return div;
 }
 function renderForumRemarque(r, replyCtx) {
@@ -1454,7 +1457,7 @@ function renderForumRemarque(r, replyCtx) {
     const indicator = buildRepliesIndicator(replyCtx.byRemarque[r.remarque_id]);
     if (indicator) div.appendChild(indicator);
   }
-  div.appendChild(buildInlineReactWidget({ type: 'remarque', id: r.remarque_id }));
+  div.appendChild(buildInlineReactWidget({ type: 'remarque', id: r.remarque_id }, undefined, 'la remarque de ' + r.auteur));
   return div;
 }
 
@@ -1468,11 +1471,16 @@ function renderForumRemarque(r, replyCtx) {
 function contextRefEquals(a, b) {
   return !!a && !!b && a.type === b.type && a.id === b.id;
 }
-function buildInlineReactWidget(contextRef, onReactionUpdate) {
+function buildInlineReactWidget(contextRef, onReactionUpdate, targetLabel) {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'margin-top:.4em;';
   const toggleBtn = document.createElement('button');
-  toggleBtn.textContent = '💬 Réagir';
+  // targetLabel (2026-08-01, retour Angelo) : rappelle À QUOI ce bouton précis se réfère — sans
+  // ça, plusieurs boutons "Réagir" identiques qui se suivent (ex: une pile de réactions sous une
+  // opinion) deviennent ambigus une fois qu'on a fait défiler loin de leur contexte. Optionnel
+  // (repli sur "Réagir" nu) pour les cas à faible risque d'ambiguïté (ex: Mon activité, page où
+  // il n'y a qu'une seule opinion à la fois, toujours la sienne).
+  toggleBtn.textContent = '💬 Réagir' + (targetLabel ? ' à ' + targetLabel : '');
   toggleBtn.className = 'btn-link';
   toggleBtn.style.cssText = 'font-size:.85em; padding:.1em 0;';
   const panel = document.createElement('div');
@@ -1863,7 +1871,7 @@ function renderMyActivityReaction(r, replyCtx) {
     const indicator = buildRepliesIndicator(replyCtx.byReaction[r.reaction_id]);
     if (indicator) div.appendChild(indicator);
   }
-  if (r.reaction_id) div.appendChild(buildInlineReactWidget({ type: 'reaction', id: r.reaction_id }));
+  if (r.reaction_id) div.appendChild(buildInlineReactWidget({ type: 'reaction', id: r.reaction_id }, undefined, 'la réaction de ' + r.auteur));
   return div;
 }
 
