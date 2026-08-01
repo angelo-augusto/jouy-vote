@@ -1461,21 +1461,28 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
   messagesEl.style.cssText = 'max-height:180px; overflow-y:auto; font-size:.85em; margin-bottom:.4em;';
   const proposalEl = document.createElement('div');
   const inputRow = document.createElement('div');
-  inputRow.style.cssText = 'display:flex; gap:.4em;';
-  const input = document.createElement('input');
-  input.type = 'text';
+  // Colonne, pas rangée (2026-08-01, retour Angelo : le bouton à côté du champ prenait de la
+  // place utile) — champ pleine largeur au-dessus, bouton en dessous. Remplace l'ancien fix
+  // "width:auto + min-width:0" (2026-07-30) devenu inutile : plus de conflit de largeur flex
+  // puisque les 2 éléments sont maintenant chacun seuls sur leur ligne, les règles globales
+  // "input/textarea, button { width: 100% }" (voir <style>) s'appliquent normalement.
+  inputRow.style.cssText = 'display:flex; flex-direction:column; gap:.4em;';
+  // textarea, pas input (2026-08-01, même demande) : autorise le retour à la ligne. Élastique —
+  // voir l'écouteur 'input' plus bas qui recalcule la hauteur sur le contenu réel (jamais de
+  // scrollbar interne tant que le texte tient sur l'écran).
+  const input = document.createElement('textarea');
+  input.rows = 1;
   input.placeholder = 'Réagir à cet élément…';
-  // width:auto + min-width:0 (2026-07-30, bug réel signalé par Angelo, mobile Chrome) : les
-  // règles globales "input, select { width: 100% }" ET "button { width: 100% }" (voir <style>)
-  // entrent toutes les deux en conflit avec une rangée flex — chacune essayait de prendre 100%
-  // de la largeur du conteneur flex, le bouton (flex-shrink:0) gagnait la course et écrasait le
-  // champ de saisie à une largeur quasi nulle. Ces règles n'ont de sens que pour un élément SEUL
-  // sur sa ligne (comme #chatInput/#chatSendBtn, chacun sur sa propre ligne) ; ici, à l'intérieur
-  // d'une rangée flex, il faut neutraliser explicitement les deux.
-  input.style.cssText = 'flex:1; width:auto; min-width:0;';
+  input.style.cssText =
+    'width:100%; box-sizing:border-box; padding:.6em; border:1px solid #ccc; border-radius:4px; ' +
+    'font-size:1em; font-family:inherit; resize:none; overflow-y:hidden; min-height:2.2em;';
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = input.scrollHeight + 'px';
+  });
   const sendBtn = document.createElement('button');
   sendBtn.className = 'btn-primary';
-  sendBtn.style.cssText = 'width:auto; flex-shrink:0; margin-top:0;';
+  sendBtn.style.cssText = 'margin-top:0;';
   sendBtn.textContent = 'Envoyer';
   inputRow.appendChild(input);
   inputRow.appendChild(sendBtn);
@@ -1568,6 +1575,7 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
     inlinePending = true;
     renderInlineMessages();
     input.value = '';
+    input.style.height = 'auto';
     const payload = { session_token, message, history: historyBefore };
     if (contextRef.type === 'opinion') payload.context_opinion_id = contextRef.id;
     if (contextRef.type === 'remarque') payload.context_remarque_id = contextRef.id;
@@ -1601,7 +1609,13 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
   }
 
   sendBtn.addEventListener('click', sendInlineMessage);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') sendInlineMessage(); });
+  // Entrée simple = retour à la ligne (comportement natif d'un textarea, 2026-08-01) — seul
+  // Ctrl/Cmd+Entrée envoie, pour ne pas surprendre quelqu'un qui tape un message sur plusieurs
+  // lignes (contrairement à l'ancien <input> où Entrée envoyait toujours, sans alternative
+  // possible puisqu'un <input> ne peut de toute façon pas contenir de retour à la ligne).
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendInlineMessage(); }
+  });
   toggleBtn.addEventListener('click', () => {
     const shown = panel.style.display !== 'none';
     panel.style.display = shown ? 'none' : '';
