@@ -134,7 +134,7 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   </div>
   <div id="chatMsg" class="msg"></div>
   <label>Votre message</label>
-  <input type="text" id="chatInput" placeholder="Écrivez votre message…">
+  <input type="text" id="chatInput" placeholder="Écrivez votre message…" style="background:#e3f2fd;">
   <button class="btn-primary" id="chatSendBtn">Envoyer</button>
   <button class="btn-link" id="chatSaveBtn">Sauvegarder cet échange</button>
   <div id="chatSummaryProposal" class="hidden" style="margin-top:.8em; padding:.8em; background:#f8f9fa; border-radius:4px;">
@@ -510,6 +510,11 @@ async function loadResults(questionId) {
 }
 
 // ---------- assistant ----------
+// Bleu clair = intimité (2026-08-01, demande Angelo) : couleur réservée à tout ce qui relève de
+// la conversation PRIVÉE avec l'assistant (champ de saisie + réponses du bot), sur la page
+// Assistant ET le widget "Réagir" inline — jamais sur le contenu déjà publié (opinions/réactions/
+// remarques du forum, qui restent en gris neutre).
+const CHAT_PRIVACY_BG = '#e3f2fd';
 let chatHistory = [];  // en mémoire seulement, jamais persisté — perdu à la fermeture/rechargement
 // Rendu markdown minimal et sûr (2026-07-31, bug réel signalé par Angelo : le LLM produit du
 // markdown — **gras**, *italique*, listes à puces — en supposant un affichage formaté, mais le
@@ -534,8 +539,13 @@ function renderMarkdownSafe(text) {
 let chatPending = false;
 function renderChatMessages() {
   const el = document.getElementById('chatMessages');
+  // Bleu clair = intimité (2026-08-01, demande Angelo) : toute la conversation avec l'assistant
+  // (ses deux côtés, utilisateur ET assistant) est un espace privé, jamais publié tel quel —
+  // contrairement au contenu déjà publié sur le forum (opinions/réactions/remarques), qui reste
+  // en noir sur blanc normal.
   let html = chatHistory.map(m =>
-    '<p style="margin:.4em 0;"><strong>' + (m.role === 'user' ? 'Vous' : 'Assistant') + ' :</strong> ' +
+    '<p style="margin:.4em 0; background:' + CHAT_PRIVACY_BG + '; border-radius:4px; padding:.4em .5em;">' +
+    '<strong>' + (m.role === 'user' ? 'Vous' : 'Assistant') + ' :</strong> ' +
     renderMarkdownSafe(m.content) + '</p>'
   ).join('');
   html += '<p style="margin:.4em 0; color:#666;">' +
@@ -1483,9 +1493,13 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
   const input = document.createElement('textarea');
   input.rows = 1;
   input.placeholder = 'Réagir à cet élément…';
+  // background:CHAT_PRIVACY_BG (2026-08-01) : même bleu clair que les messages échangés avec
+  // l'assistant — signale que cette conversation reste privée, contrairement au texte déjà
+  // publié affiché juste au-dessus dans le panneau.
   input.style.cssText =
     'width:100%; box-sizing:border-box; padding:.6em; border:1px solid #ccc; border-radius:4px; ' +
-    'font-size:1em; font-family:inherit; resize:none; overflow-y:hidden; min-height:2.2em;';
+    'font-size:1em; font-family:inherit; resize:none; overflow-y:hidden; min-height:2.2em; ' +
+    'background:' + CHAT_PRIVACY_BG + ';';
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = input.scrollHeight + 'px';
@@ -1562,10 +1576,13 @@ function buildInlineReactWidget(contextRef, onReactionUpdate) {
   // défaut), animé pendant le traitement (voir sendInlineMessage/inlinePending).
   let inlinePending = false;
   function renderInlineMessages() {
+    // Bleu clair = intimité (2026-08-01) : même règle que renderChatMessages — les deux côtés
+    // de la conversation privée avec l'assistant, jamais le contenu déjà publié à côté.
     let html = chatHistory
       .filter(m => contextRefEquals(m.contextRef, contextRef))
       .map(m =>
-        '<p style="margin:.3em 0;"><strong>' + (m.role === 'user' ? 'Vous' : 'Assistant') + ' :</strong> ' +
+        '<p style="margin:.3em 0; background:' + CHAT_PRIVACY_BG + '; border-radius:4px; padding:.3em .4em;">' +
+        '<strong>' + (m.role === 'user' ? 'Vous' : 'Assistant') + ' :</strong> ' +
         renderMarkdownSafe(m.content) + '</p>'
       ).join('');
     html += '<p style="margin:.3em 0; color:#666;">' +
