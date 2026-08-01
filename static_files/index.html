@@ -1170,6 +1170,106 @@ function renderForumThreadsList() {
   }
   threads.forEach(t => el.appendChild(renderForumThread(t)));
 }
+// Liens de réponse bidirectionnels (2026-08-01, demande Angelo suite à un test réel où une
+// remarque tout en bas du fil répondait à un texte invisible tout en haut, sans aucun lien
+// visuel) : thread.opinions puis thread.remarques restent rendus en LISTE PLATE comme avant
+// (aucune vraie imbrication DOM, pour rester simple/sûr) — seule une couche d'annotation
+// s'ajoute par-dessus. Chaque remarque qui cible une opinion/réaction/autre remarque reçoit une
+// lettre stable (A, B, C...) pour la durée du rendu du fil. Le PARENT affiche
+// "↳ N réponses : [logo][A] [logo][B]" cliquable (descend vers la remarque) ; la remarque
+// elle-même affiche un rappel "en réponse à ... : « extrait »" + sa lettre + un lien "↑ revenir"
+// (remonte vers le parent). "target" toujours retrouvé dans les données DÉJÀ chargées du fil
+// (thread.opinions/reactions/remarques) — aucun appel réseau supplémentaire.
+function _letterTag(index) {
+  let n = index, s = '';
+  do {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return s;
+}
+function _excerpt(text, headLen, tailLen) {
+  if (!text) return '';
+  if (text.length <= headLen + tailLen + 1) return text;
+  return text.slice(0, headLen).trim() + '… ' + text.slice(-tailLen).trim();
+}
+function _buildThreadReplyIndex(thread) {
+  const byOpinion = {}, byReaction = {}, byRemarque = {}, letterOf = {};
+  let letterIndex = 0;
+  (thread.remarques || []).forEach(r => {
+    let bucket = null, key = null;
+    if (r.reply_to_opinion_id != null) { bucket = byOpinion; key = r.reply_to_opinion_id; }
+    else if (r.reply_to_reaction_id != null) { bucket = byReaction; key = r.reply_to_reaction_id; }
+    else if (r.reply_to_remarque_id != null) { bucket = byRemarque; key = r.reply_to_remarque_id; }
+    if (bucket) {
+      (bucket[key] = bucket[key] || []).push(r);
+      letterOf[r.remarque_id] = _letterTag(letterIndex++);
+    }
+  });
+  return { byOpinion, byReaction, byRemarque, letterOf };
+}
+function scrollToAnchor(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const prevTransition = el.style.transition, prevBg = el.style.backgroundColor;
+  el.style.transition = 'background-color .3s';
+  el.style.backgroundColor = '#fff3cd';
+  setTimeout(() => { el.style.backgroundColor = prevBg; el.style.transition = prevTransition; }, 1200);
+}
+function buildRepliesIndicator(replyList, letterOf) {
+  if (!replyList || replyList.length === 0) return null;
+  const p = document.createElement('p');
+  p.style.cssText = 'margin:.3em 0 0; font-size:.8em; color:#666;';
+  p.appendChild(document.createTextNode('↳ ' + replyList.length + ' réponse' + (replyList.length !== 1 ? 's' : '') + ' : '));
+  replyList.forEach((r, i) => {
+    const link = document.createElement('a');
+    link.href = '#remarque-' + r.remarque_id;
+    link.style.cssText = 'text-decoration:none; margin-right:.4em;';
+    link.addEventListener('click', (ev) => { ev.preventDefault(); scrollToAnchor('remarque-' + r.remarque_id); });
+    const logoFile = r.auteur_word ? PSEUDO_WORD_LOGOS[r.auteur_word] : null;
+    if (logoFile) link.appendChild(buildColoredLogoElement('/pseudo_logos_data/' + logoFile, r.auteur_color, 1.3));
+    const letterSpan = document.createElement('span');
+    letterSpan.textContent = '[' + (letterOf[r.remarque_id] || '?') + ']';
+    letterSpan.style.cssText = 'font-weight:bold; margin-left:.15em;';
+    link.appendChild(letterSpan);
+    p.appendChild(link);
+  });
+  return p;
+}
+function buildReplyOriginBlock(remarque, thread, letterOf) {
+  let target = null, kind = null;
+  if (remarque.reply_to_opinion_id != null) {
+    target = (thread.opinions || []).find(o => o.opinion_id === remarque.reply_to_opinion_id);
+    kind = 'opinion';
+  } else if (remarque.reply_to_reaction_id != null) {
+    for (const o of (thread.opinions || [])) {
+      const found = (o.reactions || []).find(rx => rx.reaction_id === remarque.reply_to_reaction_id);
+      if (found) { target = found; break; }
+    }
+    kind = 'reaction';
+  } else if (remarque.reply_to_remarque_id != null) {
+    target = (thread.remarques || []).find(rm => rm.remarque_id === remarque.reply_to_remarque_id);
+    kind = 'remarque';
+  }
+  if (!target) return null;
+  const div = document.createElement('div');
+  div.style.cssText = 'font-size:.8em; color:#888; margin-bottom:.2em;';
+  const auteur = target.auteur || 'auteur inconnu';
+  const text = kind === 'reaction' ? (target.argumentaire || '(sans argumentaire)') : (target.body || '');
+  const label = letterOf[remarque.remarque_id] ? '[' + letterOf[remarque.remarque_id] + '] · ' : '';
+  div.appendChild(document.createTextNode(label + 'en réponse à ' + auteur + ' : « ' + _excerpt(text, 30, 30) + ' »'));
+  const backLink = document.createElement('a');
+  backLink.href = '#';
+  backLink.textContent = ' ↑ revenir';
+  backLink.style.cssText = 'margin-left:.4em;';
+  const anchorId = kind === 'opinion' ? 'opinion-' + target.opinion_id
+    : kind === 'reaction' ? 'reaction-' + target.reaction_id
+    : 'remarque-' + target.remarque_id;
+  backLink.addEventListener('click', (ev) => { ev.preventDefault(); scrollToAnchor(anchorId); });
+  div.appendChild(backLink);
+  return div;
+}
 function renderForumThread(thread) {
   // textContent/createTextNode (jamais innerHTML) pour titre/résumé/opinions/remarques : du
   // texte libre venant de citoyens (via l'assistant), jamais du HTML de confiance.
@@ -1211,8 +1311,9 @@ function renderForumThread(thread) {
     toggleIcon.textContent = expanded ? '▸' : '▾';
   };
 
-  thread.opinions.forEach(o => content.appendChild(renderForumOpinion(o)));
-  thread.remarques.forEach(r => content.appendChild(renderForumRemarque(r)));
+  const replyCtx = Object.assign({ thread }, _buildThreadReplyIndex(thread));
+  thread.opinions.forEach(o => content.appendChild(renderForumOpinion(o, replyCtx)));
+  thread.remarques.forEach(r => content.appendChild(renderForumRemarque(r, replyCtx)));
   if (thread.opinions.length === 0 && thread.remarques.length === 0) {
     const p = document.createElement('p');
     p.className = 'info';
@@ -1282,8 +1383,9 @@ function appendAuteurLabel(container, auteurText, suffix, word, color) {
     container.textContent = auteurText + (suffix || '');
   }
 }
-function renderForumOpinion(o) {
+function renderForumOpinion(o, replyCtx) {
   const div = document.createElement('div');
+  div.id = 'opinion-' + o.opinion_id;
   div.style.cssText = 'margin:.6em 0; padding:.5em .4em; background:#f8f9fa; border-radius:4px; font-size:.9em;';
   const strong = document.createElement('strong');
   appendAuteurLabel(strong, o.auteur, o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '', o.auteur_word, o.auteur_color);
@@ -1295,6 +1397,13 @@ function renderForumOpinion(o) {
     const em = document.createElement('em');
     em.textContent = o.argumentaire;
     div.appendChild(em);
+  }
+  // Liens de réponse (2026-08-01) : remarques qui répondent DIRECTEMENT à cette opinion (voir
+  // _buildThreadReplyIndex) — pas celles qui répondent à une réaction ou à une autre remarque,
+  // affichées à LEUR niveau à elles (renderMyActivityReaction / renderForumRemarque).
+  if (replyCtx) {
+    const indicator = buildRepliesIndicator(replyCtx.byOpinion[o.opinion_id], replyCtx.letterOf);
+    if (indicator) div.appendChild(indicator);
   }
   // Réactions (2026-07-26, oubli de spec initial corrigé : la page Forum n'affichait aucune
   // réaction alors que Mon activité les affichait déjà) — même présentation que Mon activité.
@@ -1311,20 +1420,32 @@ function renderForumOpinion(o) {
       counts.opposer + ' opposition' + (counts.opposer !== 1 ? 's' : '') + ' · ' +
       counts.neutre + ' neutre' + (counts.neutre !== 1 ? 's' : '');
     reactionSummaryEl.appendChild(countsP);
-    (reactions || []).forEach(r => reactionSummaryEl.appendChild(renderMyActivityReaction(r)));
+    (reactions || []).forEach(r => reactionSummaryEl.appendChild(renderMyActivityReaction(r, replyCtx)));
   }
   if (o.reaction_counts) renderReactionSummary(o.reaction_counts, o.reactions);
   div.appendChild(reactionSummaryEl);
   div.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary));
   return div;
 }
-function renderForumRemarque(r) {
+function renderForumRemarque(r, replyCtx) {
   const div = document.createElement('div');
+  div.id = 'remarque-' + r.remarque_id;
   div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
+  // Rappel "en réponse à..." (2026-08-01) : uniquement si cette remarque cible quelque chose de
+  // précis (voir buildReplyOriginBlock) — une remarque libre (aucun reply_to_*) n'a rien à citer.
+  if (replyCtx) {
+    const origin = buildReplyOriginBlock(r, replyCtx.thread, replyCtx.letterOf);
+    if (origin) div.appendChild(origin);
+  }
   const strong = document.createElement('strong');
   appendAuteurLabel(strong, r.auteur, ' : ', r.auteur_word, r.auteur_color);
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.body));
+  // Liens vers les remarques qui répondent à CELLE-CI (chaîne de réponses imbriquées).
+  if (replyCtx) {
+    const indicator = buildRepliesIndicator(replyCtx.byRemarque[r.remarque_id], replyCtx.letterOf);
+    if (indicator) div.appendChild(indicator);
+  }
   div.appendChild(buildInlineReactWidget({ type: 'remarque', id: r.remarque_id }));
   return div;
 }
@@ -1699,13 +1820,20 @@ function renderMyActivityOpinion(o) {
   block.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary));
   return block;
 }
-function renderMyActivityReaction(r) {
+function renderMyActivityReaction(r, replyCtx) {
   const div = document.createElement('div');
+  if (r.reaction_id) div.id = 'reaction-' + r.reaction_id;
   div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
   const strong = document.createElement('strong');
   appendAuteurLabel(strong, r.auteur, ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ', r.auteur_word, r.auteur_color);
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.argumentaire || '(sans argumentaire)'));
+  // replyCtx absent sur "Mon activité" (pas de données de fil complet) — uniquement rempli
+  // depuis renderForumOpinion (page /forum), voir _buildThreadReplyIndex.
+  if (replyCtx && r.reaction_id) {
+    const indicator = buildRepliesIndicator(replyCtx.byReaction[r.reaction_id], replyCtx.letterOf);
+    if (indicator) div.appendChild(indicator);
+  }
   if (r.reaction_id) div.appendChild(buildInlineReactWidget({ type: 'reaction', id: r.reaction_id }));
   return div;
 }
