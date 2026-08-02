@@ -59,6 +59,18 @@ CHAT_SYSTEM_PROMPT = (
     "jeton personnel. Si la conversation porte sur l'anonymat, sur ce qui est permis/interdit, ou "
     "si tu as besoin d'orienter vers la référence complète, cite la Charte de l'anonymat "
     "(https://wiki.jouyvote.fr/doku.php?id=charte-anonymat) plutôt que d'improviser les règles. "
+    "Vigilance particulière (2026-08-02, bug réel signalé par un jeune testeur) : quand tu aides "
+    "quelqu'un à rédiger une opinion/doléance, repère les formulations qui s'auto-identifient sans "
+    "le vouloir — « chez moi », « devant chez moi », « mon jardin », « ma rue » (sans la nommer), "
+    "« près de chez nous »... Dans un petit village, ce genre de tournure peut désigner UNE SEULE "
+    "maison précise, bien plus identifiant qu'un nom de rue qui couvre plusieurs foyers. Propose "
+    "systématiquement de remplacer ce genre de référence par un repère concret et neutre (nom de "
+    "rue, de quartier, de lieu-dit) — ce n'est PAS un compromis anonymat contre richesse : nommer "
+    "la rue est à la fois PLUS anonyme (dilué entre plusieurs foyers) ET plus utile au débat (les "
+    "voisins concernés peuvent réagir avec une vraie connaissance du terrain, contrairement à une "
+    "référence qui ne veut rien dire pour qui ne connaît pas la personne). Explique cette double "
+    "raison si la personne hésite à préciser, plutôt que de laisser passer la formulation "
+    "auto-identifiante sans rien dire. "
     "Quand une personne propose elle-même un pseudonyme (mot + couleur), refuse poliment toute "
     "combinaison à connotation politique, religieuse ou sexuelle (au-delà de la seule règle "
     "technique de disponibilité) — mais ne t'arrête pas au sens le plus évident du mot pris "
@@ -132,10 +144,19 @@ def compute_debate_token(identity_token: str) -> str:
 # Lanterne, Rivière, Comète, Sentier, Orage, Prairie, Ruche, Glacier, Roseau, Cascade, Bourgeon,
 # Genêt, Tilleul, Ravin remplacés/retirés au profit de mots à silhouette plus immédiatement
 # reconnaissable (véhicules, objets du quotidien, animaux courants).
+#
+# 4e passe (2026-08-02, bug réel signalé par le fils d'Angelo, 14 ans, en testant le site) :
+# "Banane" retiré — combiné à la couleur "noir" (dérivation déterministe, voir derive_pseudo),
+# connotation raciale/sexuelle bien connue en argot français. Cause profonde CONFIRMÉE : la
+# génération déterministe (derive_pseudo/generate_pseudo_candidates) ne passe par AUCUN contrôle
+# LLM "appropriate", contrairement à propose_custom_pseudo — seul un mot déjà problématique EN
+# LUI-MÊME (indépendamment de la couleur) peut être intercepté ici, par retrait pur et simple.
+# Fix structurel plus robuste (faire aussi passer la génération déterministe par le contrôle LLM)
+# resté en backlog, cf wiki — pas fait ce soir, priorité à retirer le mot immédiatement.
 PSEUDO_WORDS = [
     "Renard", "Hibou", "Nuage", "Phare", "Écureuil", "Faucon", "Falaise",
     "Bateau", "Arbre", "Bougie", "Galaxie", "Chaussure", "Éclair", "Vache",
-    "Abeille", "Glace", "Fleur", "Poisson", "Banane",
+    "Abeille", "Glace", "Fleur", "Poisson",
     "Cobra", "Voiture", "Vélo", "Cloche", "Échelle", "Enclume", "Trompette",
     "Licorne", "Dragon", "Éléphant", "Cygne", "Libellule", "Maison",
     "Feu", "Klaxon",
