@@ -1723,6 +1723,44 @@ def test_create_thread_stores_valid_category_and_ignores_invalid():
     assert invalid["category"] is None
 
 
+def test_create_thread_accepts_reserved_admin_mairie_categories():
+    """Régression (2026-08-03, voix Admin/Mairie, étape 1/6) : les fonctions d'écriture bas
+    niveau (create_thread/create_thread_with_opinion) valident contre ALL_CATEGORIES (inclut
+    "admin"/"mairie"), pas juste FORUM_CATEGORIES — la restriction citoyenne vit uniquement dans
+    propose_opinion (voir test_propose_opinion_action_new_thread_rejects_reserved_category), pas
+    ici. Prépare l'écriture directe Admin/Mairie (étape 4) sans encore la brancher."""
+    import main as main_module
+
+    admin_thread = main_module.create_thread("Fil réservé Admin", category="admin")
+    assert admin_thread["category"] == "admin"
+
+    mairie_thread = main_module.create_thread("Fil réservé Mairie", category="mairie")
+    assert mairie_thread["category"] == "mairie"
+
+
+def test_identities_table_has_role_and_telephone_columns():
+    """Régression (2026-08-03, voix Admin/Mairie, étape 1/6) : la migration idempotente ajoute
+    "role" (NULL = citoyen implicite) et "telephone" (nullable, réservé aux comptes Admin pour
+    l'annuaire) à la table identities."""
+    import main as main_module
+
+    with main_module.db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(identities)")}
+    assert "role" in columns
+    assert "telephone" in columns
+
+
+def test_reserved_categories_are_disjoint_from_forum_categories_and_included_in_all():
+    import chatbot_actions
+
+    assert set(chatbot_actions.RESERVED_CATEGORIES) & set(chatbot_actions.FORUM_CATEGORIES) == set()
+    assert chatbot_actions.ALL_CATEGORIES == {
+        **chatbot_actions.FORUM_CATEGORIES, **chatbot_actions.RESERVED_CATEGORIES
+    }
+    assert "admin" in chatbot_actions.RESERVED_CATEGORIES
+    assert "mairie" in chatbot_actions.RESERVED_CATEGORIES
+
+
 def test_delete_thread_if_empty_rejects_thread_with_content():
     import main as main_module
 
@@ -2454,6 +2492,25 @@ def test_propose_opinion_action_new_thread_rejects_invalid_category():
     )
     assert result["available"] is False
     assert "new_thread_category" in result["error"]
+
+
+def test_propose_opinion_action_new_thread_rejects_reserved_category():
+    """Régression (2026-08-03, voix Admin/Mairie) : un citoyen ne doit structurellement jamais
+    pouvoir faire créer un fil dans une catégorie réservée via le chatbot, même si le modèle se
+    trompait — new_thread_category valide contre FORUM_CATEGORIES seul, pas ALL_CATEGORIES."""
+    import chatbot_actions
+
+    for reserved in ("admin", "mairie"):
+        result = chatbot_actions.propose_opinion(
+            {
+                "new_thread_title": f"Tentative catégorie {reserved}",
+                "new_thread_category": reserved,
+                "body": "Je pense que...",
+            },
+            {"threads": []},
+        )
+        assert result["available"] is False
+        assert "new_thread_category" in result["error"]
 
 
 def test_propose_opinion_action_new_thread_rejects_exact_title_collision():

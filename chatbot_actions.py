@@ -194,6 +194,21 @@ FORUM_CATEGORIES = {
     "finances": "Finances",
 }
 
+# Voix Admin/Mairie (2026-08-03, spec wiki themes:admin-mairie) : 2 catégories RÉSERVÉES,
+# volontairement SÉPARÉES de FORUM_CATEGORIES plutôt que fusionnées dedans — new_thread_category
+# (propose_opinion, LLM-facing) continue de valider contre FORUM_CATEGORIES seul, donc un citoyen
+# ne peut structurellement pas faire créer un fil dans "admin"/"mairie" via le chatbot, même si le
+# modèle se trompait. Ces 2 catégories ne deviennent postables QUE par l'écriture directe
+# réservée aux rôles admin/mairie (étape 4 du chantier, pas encore implémentée). ALL_CATEGORIES
+# sert aux fonctions d'écriture bas niveau (create_thread/create_thread_with_opinion dans main.py)
+# qui doivent accepter ces 2 clés une fois l'écriture directe branchée, et à l'affichage (onglets,
+# libellés) une fois qu'il existe du contenu dedans.
+RESERVED_CATEGORIES = {
+    "admin": "Admin",
+    "mairie": "Mairie",
+}
+ALL_CATEGORIES = {**FORUM_CATEGORIES, **RESERVED_CATEGORIES}
+
 # Genre grammatical de chaque mot — pour l'accord de la couleur ("Clairière VERTE", pas "Clairière
 # vert"). Bug réel signalé par le développeur (2026-07-25). 6 couleurs variables en genre en
 # français, 3 invariables (rouge/orange/jaune) — voir PSEUDO_COLOR_FEMININE.

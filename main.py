@@ -24,8 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from chatbot_actions import (
-    CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, ONBOARDING_NEW_USER_CONTEXT_BLOCK, PSEUDO_COLORS,
-    _agree_pseudo_display, compute_debate_token,
+    ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, ONBOARDING_NEW_USER_CONTEXT_BLOCK,
+    PSEUDO_COLORS, _agree_pseudo_display, compute_debate_token,
 )
 from chatbot_executor import build_system_prompt, run_turn
 import pseudo_logo_gen
@@ -376,6 +376,14 @@ def init_db():
             "reset_token": "TEXT",
             "reset_token_expiry": "REAL",
             "referred_by_token": "TEXT",
+            # Voix Admin/Mairie (2026-08-03, spec wiki themes:admin-mairie) : "role" par défaut
+            # NULL traité comme "citoyen" partout dans le code (jamais de backfill en masse sur
+            # une table qui grossit), pas une colonne booléenne séparée par rôle — un seul champ
+            # texte, valeurs attendues "admin"/"mairie"/NULL. "telephone" nullable, prévu pour
+            # n'être renseigné QUE sur les comptes Admin (annuaire Admin↔Admin), jamais collecté
+            # pour un compte citoyen normal.
+            "role": "TEXT",
+            "telephone": "TEXT",
         }
         for col, col_type in column_types.items():
             try:
@@ -793,11 +801,15 @@ def create_thread(
     """Un fil peut être créé par le chatbot seul (regroupement thématique automatique, voir wiki)
     — creator_debate_token reste NULL dans ce cas plutôt que de forcer une attribution factice.
 
-    category (2026-07-29) : ignorée silencieusement si absente de FORUM_CATEGORIES plutôt que de
+    category (2026-07-29) : ignorée silencieusement si absente de ALL_CATEGORIES plutôt que de
     faire échouer la création du fil — la catégorisation reste secondaire au contenu lui-même
-    (même philosophie de tolérance que le reste des validations LLM-facing de ce module)."""
+    (même philosophie de tolérance que le reste des validations LLM-facing de ce module).
+    ALL_CATEGORIES (2026-08-03) inclut aussi "admin"/"mairie" (voir chatbot_actions) — cette
+    fonction générique reste utilisable par la future écriture directe Admin/Mairie, la
+    restriction "un citoyen ne peut pas créer de fil dans ces 2 catégories" vit dans
+    propose_opinion (validation contre FORUM_CATEGORIES seul), pas ici."""
     creator_debate_token = compute_debate_token(creator_identity_token) if creator_identity_token else None
-    if category not in FORUM_CATEGORIES:
+    if category not in ALL_CATEGORIES:
         category = None
     with db() as conn:
         cur = conn.execute(
@@ -856,7 +868,7 @@ def create_thread_with_opinion(
     title = title.strip()
     if not title:
         raise ValueError("titre de fil manquant")
-    if category not in FORUM_CATEGORIES:
+    if category not in ALL_CATEGORIES:
         category = None
     with db() as conn:
         try:
