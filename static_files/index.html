@@ -1409,8 +1409,31 @@ function buildColoredLogoElement(imageUrl, color, sizeEm) {
     '-webkit-mask-position:center; mask-position:center;';
   return el;
 }
-function appendAuteurLabel(container, auteurText, suffix, word, color) {
+// Voix Admin/Mairie (2026-08-03) : fond de couleur dédié (Rose/Vert, voir wiki
+// themes:admin-mairie), distinct du système pseudo mot+couleur habituel.
+const VOICE_BADGE_BG = { admin: '#ffd6e8', mairie: '#d6f5db' };
+const VOICE_BADGE_ICON = { admin: '/static_files/admin_icon_static.png', mairie: '/static_files/mairie_icon.png' };
+const VOICE_BADGE_LABEL = { admin: 'Admin', mairie: 'Mairie' };
+function appendAuteurLabel(container, auteurText, suffix, word, color, voice) {
   container.textContent = '';
+  if (voice === 'admin' || voice === 'mairie') {
+    const badge = document.createElement('span');
+    badge.style.cssText =
+      'display:inline-flex; align-items:center; gap:.3em; padding:.1em .4em; border-radius:4px; ' +
+      'background:' + VOICE_BADGE_BG[voice] + ';';
+    const img = document.createElement('img');
+    img.src = VOICE_BADGE_ICON[voice];
+    img.alt = VOICE_BADGE_LABEL[voice];
+    img.style.cssText = 'width:1.4em; height:1.4em; border-radius:3px; vertical-align:middle;';
+    badge.appendChild(img);
+    const nameEl = document.createElement('span');
+    nameEl.textContent = VOICE_BADGE_LABEL[voice];
+    nameEl.style.fontWeight = '600';
+    badge.appendChild(nameEl);
+    container.appendChild(badge);
+    if (suffix) container.appendChild(document.createTextNode(suffix));
+    return;
+  }
   const logoFile = word ? PSEUDO_WORD_LOGOS[word] : null;
   if (logoFile) {
     const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + logoFile, color, 2);
@@ -1435,9 +1458,13 @@ function appendAuteurLabel(container, auteurText, suffix, word, color) {
 function renderForumOpinion(o, replyCtx) {
   const div = document.createElement('div');
   div.id = 'opinion-' + o.opinion_id;
-  div.style.cssText = 'margin:.6em 0; padding:.5em .4em; background:#f8f9fa; border-radius:4px; font-size:.9em;';
+  // Fond de couleur dédié (2026-08-03, voix Admin/Mairie, voir wiki themes:admin-mairie) : une
+  // opinion publiée avec une voix se distingue visuellement au premier coup d'œil dans le fil,
+  // pas seulement via le badge à côté du nom.
+  const bg = o.voice ? VOICE_BADGE_BG[o.voice] : '#f8f9fa';
+  div.style.cssText = 'margin:.6em 0; padding:.5em .4em; background:' + bg + '; border-radius:4px; font-size:.9em;';
   const strong = document.createElement('strong');
-  appendAuteurLabel(strong, o.auteur, o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '', o.auteur_word, o.auteur_color);
+  appendAuteurLabel(strong, o.auteur, o.superseded_by_opinion_id ? ' (opinion remplacée depuis)' : '', o.auteur_word, o.auteur_color, o.voice);
   div.appendChild(strong);
   div.appendChild(document.createElement('br'));
   div.appendChild(document.createTextNode(o.body));
@@ -1490,7 +1517,7 @@ function renderForumRemarque(r, replyCtx) {
     if (origin) div.appendChild(origin);
   }
   const strong = document.createElement('strong');
-  appendAuteurLabel(strong, r.auteur, ' : ', r.auteur_word, r.auteur_color);
+  appendAuteurLabel(strong, r.auteur, ' : ', r.auteur_word, r.auteur_color, r.voice);
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.body));
   // Liens vers les remarques qui répondent à CELLE-CI (chaîne de réponses imbriquées).
@@ -1903,7 +1930,7 @@ function renderMyActivityReaction(r, replyCtx) {
   if (r.reaction_id) div.id = 'reaction-' + r.reaction_id;
   div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
   const strong = document.createElement('strong');
-  appendAuteurLabel(strong, r.auteur, ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ', r.auteur_word, r.auteur_color);
+  appendAuteurLabel(strong, r.auteur, ' — ' + (REACTION_STANCE_LABELS[r.stance] || r.stance) + ' : ', r.auteur_word, r.auteur_color, r.voice);
   div.appendChild(strong);
   div.appendChild(document.createTextNode(r.argumentaire || '(sans argumentaire)'));
   // replyCtx absent sur "Mon activité" (pas de données de fil complet) — uniquement rempli
