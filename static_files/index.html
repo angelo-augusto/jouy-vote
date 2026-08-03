@@ -257,11 +257,7 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
 <div class="card hidden" id="pagePublier">
   <h2>Publier (voix directe)</h2>
   <div id="publierInactiveNotice" class="hidden">
-    <p class="info">
-      Ta voix active est "Citoyen". Active ta voix Admin/Mairie sur
-      <a data-link href="/compte">Mon compte</a> pour publier directement, sans passer par
-      l'assistant.
-    </p>
+    <p class="info" id="publierInactiveText"></p>
   </div>
   <div id="publierFormSection" class="hidden">
     <div id="publierVoiceBanner" style="padding:.6em; border-radius:4px; margin-bottom:.8em; font-weight:600;"></div>
@@ -2197,6 +2193,14 @@ function initPublierPage() {
   // formulaire lui-même n'apparaît que si la VOIX est activement basculée sur Mon compte —
   // sécurité contre une publication accidentelle juste parce que le compte a le rôle.
   if (!voice || voice !== userRole) {
+    // 2 messages distincts (2026-08-03, retour vérification réelle) : un citoyen normal n'a
+    // JAMAIS accès au sélecteur "Voix active" sur Mon compte (section restée cachée) — lui dire
+    // d'aller l'activer là-bas serait un cul-de-sac trompeur.
+    document.getElementById('publierInactiveText').textContent =
+      (userRole === 'admin' || userRole === 'mairie')
+        ? 'Ta voix active est "Citoyen". Active ta voix ' + VOICE_BADGE_LABEL[userRole] +
+          ' sur Mon compte pour publier directement, sans passer par l\'assistant.'
+        : 'Cette page est réservée aux comptes Admin ou Mairie.';
     inactiveNotice.classList.remove('hidden');
     formSection.classList.add('hidden');
     return;
