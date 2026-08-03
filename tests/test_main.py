@@ -2901,6 +2901,26 @@ async def test_spa_fallback_routes_serve_app_for_forum_and_activite(client):
         assert resp.status_code == 200, f"{path} devrait servir l'app, pas un 404"
 
 
+def test_all_js_routes_have_a_spa_fallback():
+    """Régression générique (2026-08-03) : le même piège que ci-dessus (une route ajoutée au
+    ROUTES JS mais oubliée dans _SPA_ROUTES Python) s'est reproduit une 2e fois avec
+    /admin/roles, repéré en vérifiant en conditions réelles via Playwright (404 brut au lieu de
+    l'app). Ce test compare TOUTES les clés de `const ROUTES = {...}` (static_files/index.html)
+    contre main._SPA_ROUTES, pour ne plus jamais avoir à le découvrir en prod — une seule route
+    en trop ici doit faire échouer ce test, pas 2 tests dédiés en plus à chaque fois."""
+    import re
+
+    import main as main_module
+
+    html = open("static_files/index.html", encoding="utf-8").read()
+    match = re.search(r"const ROUTES = \{(.*?)\};", html, re.DOTALL)
+    assert match, "const ROUTES introuvable dans index.html"
+    js_paths = set(re.findall(r"'(/[^']*)':", match.group(1)))
+    assert js_paths, "aucune route extraite, le regex a probablement cassé"
+    missing = js_paths - set(main_module._SPA_ROUTES)
+    assert not missing, f"routes JS sans fallback SPA côté serveur : {missing}"
+
+
 def test_get_my_activity_counts_only_latest_reaction_per_reactor():
     """Page "Mon activité" (2026-07-26) : le décompte adhérer/opposer/neutre ne compte QUE la
     réaction la plus récente par réacteur (même règle que get_current_reaction) — si quelqu'un
