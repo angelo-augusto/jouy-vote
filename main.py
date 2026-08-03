@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from chatbot_actions import (
     ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, ONBOARDING_NEW_USER_CONTEXT_BLOCK,
-    PSEUDO_COLORS, _agree_pseudo_display, compute_debate_token,
+    PSEUDO_COLORS, RESERVED_CATEGORIES, _agree_pseudo_display, compute_debate_token,
 )
 from chatbot_executor import build_system_prompt, run_turn
 import pseudo_logo_gen
@@ -309,6 +309,16 @@ def init_db():
             )
         except sqlite3.OperationalError:
             pass
+        # "voice" (2026-08-03, voix Admin/Mairie, étape 4/6) : NULL = pseudo citoyen normal
+        # (comportement inchangé, l'immense majorité des lignes), 'admin'/'mairie' = publié avec
+        # cette voix — author_debate_token reste TOUJOURS rempli même dans ce cas (traçabilité
+        # interne, voir wiki themes:admin-mairie), seul le RENDU change (badge fixe au lieu du
+        # pseudo mot+couleur). Même ALTER TABLE idempotent sur les 3 tables concernées.
+        for _voice_table in ("opinions", "opinion_reactions", "thread_remarques"):
+            try:
+                conn.execute(f"ALTER TABLE {_voice_table} ADD COLUMN voice TEXT")
+            except sqlite3.OperationalError:
+                pass
         # pseudo_word_logos (2026-07-31) : un logo silhouette généré par MOT (pas par mot+couleur
         # — la couleur est appliquée dynamiquement côté client via CSS mask-image, voir
         # pseudo_logo_gen.py). "word" est la clé, un seul logo partagé par tous les pseudos qui
@@ -586,6 +596,9 @@ class OpinionConfirmRequest(BaseModel):
     new_thread_category: str | None = None
     body: str
     argumentaire: str | None = None
+    # "voice" (2026-08-03, voix Admin/Mairie) : None = chemin normal (chatbot). "admin"/"mairie"
+    # revérifié en base par _validate_voice, jamais fait confiance à ce champ seul.
+    voice: str | None = None
 
 
 class ReactionConfirmRequest(BaseModel):
@@ -593,12 +606,14 @@ class ReactionConfirmRequest(BaseModel):
     opinion_id: int
     stance: str
     argumentaire: str | None = None
+    voice: str | None = None
 
 
 class ReactionToggleRequest(BaseModel):
     session_token: str
     opinion_id: int
     stance: str
+    voice: str | None = None
 
 
 class ReactionMineRequest(BaseModel):
@@ -613,6 +628,7 @@ class RemarqueConfirmRequest(BaseModel):
     reply_to_remarque_id: int | None = None
     reply_to_opinion_id: int | None = None
     reply_to_reaction_id: int | None = None
+    voice: str | None = None
 
 
 class ActivityMineRequest(BaseModel):
@@ -861,6 +877,7 @@ def delete_thread_if_empty(thread_id: int) -> dict:
 def create_thread_with_opinion(
     title: str, author_identity_token: str, body: str,
     argumentaire: str | None = None, summary: str | None = None, category: str | None = None,
+    voice: str | None = None,
 ) -> dict:
     """Création de fil COUPLÉE au 1er post d'opinion (2026-07-25, décision développeur, en
     réponse directe à la question posée plus tôt sur le wiki) : pas de création spéculative d'un
@@ -895,7 +912,7 @@ def create_thread_with_opinion(
             thread_id = row["thread_id"]
 
     try:
-        opinion = create_opinion(thread_id, author_identity_token, body, argumentaire)
+        opinion = create_opinion(thread_id, author_identity_token, body, argumentaire, voice)
         published = publish_opinion(opinion["opinion_id"])
     except ValueError:
         try:
@@ -914,7 +931,10 @@ def _opinion_has_reactions(conn: sqlite3.Connection, opinion_id: int) -> bool:
     return row is not None
 
 
-def create_opinion(thread_id: int, author_identity_token: str, body: str, argumentaire: str | None = None) -> dict:
+def create_opinion(
+    thread_id: int, author_identity_token: str, body: str, argumentaire: str | None = None,
+    voice: str | None = None,
+) -> dict:
     """Brouillon initial — body/argumentaire librement modifiables tant qu'AUCUNE réaction n'a
     encore été publiée dessus (voir update_opinion_draft). Le fil doit exister et être PUBLIÉ —
     on n'attache jamais une opinion à un fil encore en brouillon ou inexistant (durcissement
@@ -923,23 +943,34 @@ def create_opinion(thread_id: int, author_identity_token: str, body: str, argume
     vient d'un paramètre LLM/utilisateur, voir propose_opinion/chatbot_actions.py). "body" non vide
     validé ICI aussi (pas seulement côté propose_opinion, lecture/validation LLM) — même principe
     de défense en profondeur que le reste du module : ne jamais faire reposer une contrainte sur
-    une seule couche."""
+    une seule couche.
+
+    "voice" (2026-08-03, voix Admin/Mairie, étape 4/6) : None = pseudo citoyen normal. Sinon,
+    _validate_voice vérifie que le rôle réel de l'identité correspond, ET
+    _check_category_posting_permission vérifie que la catégorie DU FIL (relue ici, jamais
+    supposée) autorise cette voix — un citoyen ne peut donc pas poster dans un fil déjà catégorisé
+    "admin"/"mairie" même s'il connaît son thread_id (ex: fil trouvé via list_threads)."""
     if not body.strip():
         raise ValueError("le corps de l'opinion est vide")
+    _validate_voice(author_identity_token, voice)
     with db() as conn:
-        thread_row = conn.execute("SELECT status FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
+        thread_row = conn.execute("SELECT status, category FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
         if thread_row is None:
             raise ValueError("fil introuvable")
         if thread_row["status"] != "published":
             raise ValueError("ce fil n'est pas encore publié")
+    _check_category_posting_permission(thread_row["category"], voice)
     author_debate_token = compute_debate_token(author_identity_token)
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO opinions (thread_id, author_debate_token, body, argumentaire) VALUES (?, ?, ?, ?)",
-            (thread_id, author_debate_token, body, argumentaire),
+            "INSERT INTO opinions (thread_id, author_debate_token, body, argumentaire, voice) VALUES (?, ?, ?, ?, ?)",
+            (thread_id, author_debate_token, body, argumentaire, voice),
         )
         opinion_id = cur.lastrowid
-    return {"opinion_id": opinion_id, "thread_id": thread_id, "body": body, "argumentaire": argumentaire, "status": "draft"}
+    return {
+        "opinion_id": opinion_id, "thread_id": thread_id, "body": body, "argumentaire": argumentaire,
+        "voice": voice, "status": "draft",
+    }
 
 
 def update_opinion_draft(opinion_id: int, body: str | None = None, argumentaire: str | None = None) -> dict:
@@ -1024,15 +1055,24 @@ def supersede_opinion(old_opinion_id: int, new_opinion_id: int, author_identity_
     return {"opinion_id": old_opinion_id, "superseded_by_opinion_id": new_opinion_id}
 
 
-def add_reaction(opinion_id: int, reactor_identity_token: str, stance: str, argumentaire: str | None = None) -> dict:
+def add_reaction(
+    opinion_id: int, reactor_identity_token: str, stance: str, argumentaire: str | None = None,
+    voice: str | None = None,
+) -> dict:
     """TOUJOURS un INSERT, jamais un UPDATE (pas de contrainte UNIQUE sur (opinion_id,
     reactor_debate_token), voir init_db) — changer d'avis (adhérer→opposer par ex.) crée une
     NOUVELLE ligne, l'ancienne réaction reste visible comme historique, jamais écrasée ni
     supprimée. L'opinion doit exister et être PUBLIÉE (durcissement 2026-07-25, phase 3 — même
     raison que create_opinion : opinion_id devient exploitable dès que la valeur vient d'un
-    paramètre LLM/utilisateur)."""
+    paramètre LLM/utilisateur).
+
+    "voice" (2026-08-03, voix Admin/Mairie) : PAS de restriction de catégorie ici — "réagir" reste
+    libre partout pour tous les rôles (voir _check_category_posting_permission, jamais appelée
+    dans cette fonction). Seul _validate_voice s'applique : le rôle réel doit correspondre si une
+    voix est demandée."""
     if stance not in ("adherer", "opposer", "neutre"):
         raise ValueError("stance invalide")
+    _validate_voice(reactor_identity_token, voice)
     with db() as conn:
         opinion_row = conn.execute(
             "SELECT status, author_debate_token FROM opinions WHERE opinion_id=?", (opinion_id,)
@@ -1059,12 +1099,12 @@ def add_reaction(opinion_id: int, reactor_identity_token: str, stance: str, argu
         )
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO opinion_reactions (opinion_id, reactor_debate_token, stance, argumentaire) "
-            "VALUES (?, ?, ?, ?)",
-            (opinion_id, reactor_debate_token, stance, argumentaire),
+            "INSERT INTO opinion_reactions (opinion_id, reactor_debate_token, stance, argumentaire, voice) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (opinion_id, reactor_debate_token, stance, argumentaire, voice),
         )
         reaction_id = cur.lastrowid
-    return {"reaction_id": reaction_id, "opinion_id": opinion_id, "stance": stance, "status": "draft"}
+    return {"reaction_id": reaction_id, "opinion_id": opinion_id, "stance": stance, "voice": voice, "status": "draft"}
 
 
 def publish_reaction(reaction_id: int) -> dict:
@@ -1108,7 +1148,9 @@ def retract_reaction(opinion_id: int, reactor_identity_token: str) -> dict:
     return {"opinion_id": opinion_id, "stance": None}
 
 
-def set_reaction_stance(opinion_id: int, reactor_identity_token: str, stance: str) -> dict:
+def set_reaction_stance(
+    opinion_id: int, reactor_identity_token: str, stance: str, voice: str | None = None,
+) -> dict:
     """Bouton direct "Réagir" (2026-07-30, décision développeur) : écrit IMMÉDIATEMENT, sans
     passer par le chatbot ni par la double confirmation habituelle (opinion/remarque) — justifié
     par le choix fermé parmi 3 options, sans texte libre, donc sans besoin de modération ni de
@@ -1127,25 +1169,29 @@ def set_reaction_stance(opinion_id: int, reactor_identity_token: str, stance: st
     current = get_current_reaction(opinion_id, reactor_identity_token)
     if current is not None and current["stance"] == stance:
         return retract_reaction(opinion_id, reactor_identity_token)
-    reaction = add_reaction(opinion_id, reactor_identity_token, stance)
+    reaction = add_reaction(opinion_id, reactor_identity_token, stance, voice=voice)
     publish_reaction(reaction["reaction_id"])
-    return {"opinion_id": opinion_id, "stance": stance}
+    return {"opinion_id": opinion_id, "stance": stance, "voice": voice}
 
 
 def create_remarque(
     thread_id: int, author_identity_token: str, body: str,
     reply_to_remarque_id: int | None = None, reply_to_opinion_id: int | None = None,
-    reply_to_reaction_id: int | None = None,
+    reply_to_reaction_id: int | None = None, voice: str | None = None,
 ) -> dict:
     """Couche informelle en plus du formalisme opinion/réaction — pas de statut "figé", pas de
     versions : une remarque publiée reste telle quelle (pas de règle de mutation particulière au-
     delà du cycle générique brouillon→publication). Le fil doit exister et être PUBLIÉ (même
     durcissement 2026-07-25, phase 3, que create_opinion/add_reaction). reply_to_reaction_id
     (2026-07-31) permet de rebondir sur une réaction (adhérer/opposer/neutre) elle-même, seul
-    moyen actuel puisque les réactions n'ont pas de sous-réactions formelles."""
+    moyen actuel puisque les réactions n'ont pas de sous-réactions formelles.
+
+    "voice" (2026-08-03, voix Admin/Mairie) : comme add_reaction, aucune restriction de catégorie
+    — une remarque est une forme de "réagir", libre partout pour tous les rôles."""
     targets = [x for x in (reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id) if x is not None]
     if len(targets) > 1:
         raise ValueError("une remarque répond à au plus une chose : une remarque, une opinion, ou une réaction, jamais plusieurs")
+    _validate_voice(author_identity_token, voice)
     with db() as conn:
         thread_row = conn.execute("SELECT status FROM threads WHERE thread_id=?", (thread_id,)).fetchone()
         if thread_row is None:
@@ -1156,12 +1202,12 @@ def create_remarque(
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO thread_remarques "
-            "(thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id),
+            "(thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id, voice) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (thread_id, author_debate_token, body, reply_to_remarque_id, reply_to_opinion_id, reply_to_reaction_id, voice),
         )
         remarque_id = cur.lastrowid
-    return {"remarque_id": remarque_id, "thread_id": thread_id, "body": body, "status": "draft"}
+    return {"remarque_id": remarque_id, "thread_id": thread_id, "body": body, "voice": voice, "status": "draft"}
 
 
 def publish_remarque(remarque_id: int) -> dict:
@@ -1231,7 +1277,7 @@ def _get_opinion_reaction_summary(conn: sqlite3.Connection, opinion_id: int) -> 
     get_my_activity. Même règle que get_current_reaction : seule la réaction la plus RÉCENTE par
     réacteur compte, jamais un doublon si quelqu'un a changé d'avis."""
     reaction_rows = conn.execute(
-        """SELECT reaction_id, reactor_debate_token, stance, argumentaire, created_at
+        """SELECT reaction_id, reactor_debate_token, stance, argumentaire, voice, created_at
            FROM opinion_reactions
            WHERE opinion_id=? AND status='published'
            ORDER BY created_at DESC, reaction_id DESC""",
@@ -1247,11 +1293,14 @@ def _get_opinion_reaction_summary(conn: sqlite3.Connection, opinion_id: int) -> 
         pseudo_row = conn.execute(
             "SELECT word, color FROM pseudos WHERE debate_token=?", (reactor_token,)
         ).fetchone()
+        word = pseudo_row["word"] if pseudo_row else None
+        color = pseudo_row["color"] if pseudo_row else None
         reactions.append({
             "reaction_id": r["reaction_id"],
-            "auteur": _agree_pseudo_display(pseudo_row["word"], pseudo_row["color"]) if pseudo_row else "auteur inconnu",
-            "auteur_word": pseudo_row["word"] if pseudo_row else None,
-            "auteur_color": pseudo_row["color"] if pseudo_row else None,
+            "auteur": _voice_or_pseudo_display(r["voice"], word, color),
+            "auteur_word": word,
+            "auteur_color": color,
+            "voice": r["voice"],
             "stance": r["stance"],
             "argumentaire": r["argumentaire"],
         })
@@ -1278,7 +1327,7 @@ def get_forum_page_snapshot() -> list[dict]:
         snapshot = []
         for t in threads:
             opinion_rows = conn.execute(
-                """SELECT o.opinion_id, o.body, o.argumentaire, o.superseded_by_opinion_id,
+                """SELECT o.opinion_id, o.body, o.argumentaire, o.superseded_by_opinion_id, o.voice,
                           p.word, p.color
                    FROM opinions o
                    LEFT JOIN pseudos p ON p.debate_token = o.author_debate_token
@@ -1288,7 +1337,7 @@ def get_forum_page_snapshot() -> list[dict]:
             ).fetchall()
             remarque_rows = conn.execute(
                 """SELECT r.remarque_id, r.body, r.reply_to_remarque_id, r.reply_to_opinion_id,
-                          r.reply_to_reaction_id, p.word, p.color
+                          r.reply_to_reaction_id, r.voice, p.word, p.color
                    FROM thread_remarques r
                    LEFT JOIN pseudos p ON p.debate_token = r.author_debate_token
                    WHERE r.thread_id=? AND r.status='published'
@@ -1303,9 +1352,10 @@ def get_forum_page_snapshot() -> list[dict]:
                 "opinions": [
                     {
                         "opinion_id": o["opinion_id"],
-                        "auteur": _agree_pseudo_display(o["word"], o["color"]) if o["word"] else "auteur inconnu",
+                        "auteur": _voice_or_pseudo_display(o["voice"], o["word"], o["color"]),
                         "auteur_word": o["word"],
                         "auteur_color": o["color"],
+                        "voice": o["voice"],
                         "body": o["body"],
                         "argumentaire": o["argumentaire"],
                         "superseded_by_opinion_id": o["superseded_by_opinion_id"],
@@ -1316,9 +1366,10 @@ def get_forum_page_snapshot() -> list[dict]:
                 "remarques": [
                     {
                         "remarque_id": r["remarque_id"],
-                        "auteur": _agree_pseudo_display(r["word"], r["color"]) if r["word"] else "auteur inconnu",
+                        "auteur": _voice_or_pseudo_display(r["voice"], r["word"], r["color"]),
                         "auteur_word": r["word"],
                         "auteur_color": r["color"],
+                        "voice": r["voice"],
                         "body": r["body"],
                         "reply_to_remarque_id": r["reply_to_remarque_id"],
                         "reply_to_opinion_id": r["reply_to_opinion_id"],
@@ -1341,7 +1392,7 @@ def get_my_activity(identity_token: str) -> dict:
     debate_token = compute_debate_token(identity_token)
     with db() as conn:
         opinion_rows = conn.execute(
-            """SELECT o.opinion_id, o.thread_id, o.body, o.argumentaire, o.status,
+            """SELECT o.opinion_id, o.thread_id, o.body, o.argumentaire, o.status, o.voice,
                       o.superseded_by_opinion_id, o.created_at, t.title AS thread_title
                FROM opinions o
                JOIN threads t ON t.thread_id = o.thread_id
@@ -1357,6 +1408,7 @@ def get_my_activity(identity_token: str) -> dict:
                 "body": o["body"],
                 "argumentaire": o["argumentaire"],
                 "status": o["status"],
+                "voice": o["voice"],
                 "superseded_by_opinion_id": o["superseded_by_opinion_id"],
                 **_get_opinion_reaction_summary(conn, o["opinion_id"]),
             }
@@ -2058,6 +2110,57 @@ def set_account_role(target_email: str, role: str | None) -> dict:
     return dict(updated)
 
 
+def _voice_or_pseudo_display(voice: str | None, word: str | None, color: str | None) -> str:
+    """Nom d'affichage d'un auteur (2026-08-03, voix Admin/Mairie) : "Admin"/"Mairie" fixe si
+    voice est renseigné (jamais le pseudo mot+couleur, même si l'identité en a un — la voix
+    prime), sinon le pseudo habituel via _agree_pseudo_display, ou "auteur inconnu" si aucun des
+    deux (compte de test sans pseudo confirmé, cas déjà géré avant ce champ)."""
+    if voice == "admin":
+        return "Admin"
+    if voice == "mairie":
+        return "Mairie"
+    return _agree_pseudo_display(word, color) if word else "auteur inconnu"
+
+
+def _validate_voice(identity_token: str, voice: str | None) -> None:
+    """Voix Admin/Mairie (2026-08-03, étape 4/6) : voice=None signifie "publication normale sous
+    pseudo citoyen", aucune vérification. voice='admin'/'mairie' n'est accepté QUE si le rôle RÉEL
+    de l'identité (relu en base ici, jamais la valeur envoyée par le client) correspond exactement
+    — un client ne peut jamais s'auto-déclarer Admin/Mairie en mentant sur ce paramètre, même si
+    le reste de la requête est par ailleurs légitime."""
+    if voice is None:
+        return
+    if voice not in ("admin", "mairie"):
+        raise ValueError("voix invalide, doit être 'admin', 'mairie' ou absente")
+    with db() as conn:
+        row = conn.execute("SELECT role FROM identities WHERE token=?", (identity_token,)).fetchone()
+    if row is None or row["role"] != voice:
+        raise ValueError(f"ce compte n'a pas la voix {voice}")
+
+
+def _check_category_posting_permission(category: str | None, voice: str | None) -> None:
+    """"Poster une nouvelle opinion/fil = restreint à sa propre catégorie" (spec wiki
+    themes:admin-mairie) : une catégorie RÉSERVÉE (admin/mairie) ne peut recevoir une NOUVELLE
+    opinion que si elle est postée avec la voix correspondante. Volontairement absent des
+    fonctions de réaction/remarque (add_reaction, create_remarque) : "réagir" reste libre partout,
+    quelle que soit la catégorie du fil, pour tous les rôles — seul "poster une opinion" est
+    concerné par cette restriction.
+
+    Fix structurel (2026-08-03) : avant l'ajout de ce garde-fou, un citoyen quelconque pouvait
+    déjà, en appelant /opinion/confirm directement (hors chatbot, l'endpoint accepte
+    new_thread_category en texte libre sans jamais vérifier qui a le droit d'y poster), créer un
+    fil dans la catégorie "admin" ou "mairie" — la validation LLM (propose_opinion, restreinte à
+    FORUM_CATEGORIES) ne protège que le chemin chatbot, jamais l'écriture elle-même. Ce trou est
+    apparu dès l'élargissement de create_thread_with_opinion/create_thread à ALL_CATEGORIES
+    (étape 1/6, préparation de l'écriture directe) — corrigé ici avant qu'aucune vraie donnée
+    n'ait pu l'exploiter."""
+    if category in RESERVED_CATEGORIES and voice != category:
+        raise ValueError(
+            f"seul un compte utilisant la voix {RESERVED_CATEGORIES[category]} peut poster "
+            f"une opinion dans la catégorie {RESERVED_CATEGORIES[category]}"
+        )
+
+
 @app.post("/chat")
 def chat(req: ChatRequest):
     _require_identity(req.session_token)
@@ -2402,11 +2505,11 @@ def opinion_confirm(req: OpinionConfirmRequest):
         if req.new_thread_title is not None:
             return create_thread_with_opinion(
                 req.new_thread_title, identity_token, req.body, req.argumentaire,
-                req.new_thread_summary, req.new_thread_category,
+                req.new_thread_summary, req.new_thread_category, req.voice,
             )
         if req.thread_id is None:
             raise ValueError("il faut soit thread_id (fil existant), soit new_thread_title (nouveau fil)")
-        opinion = create_opinion(req.thread_id, identity_token, req.body, req.argumentaire)
+        opinion = create_opinion(req.thread_id, identity_token, req.body, req.argumentaire, req.voice)
         return publish_opinion(opinion["opinion_id"])
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -2421,7 +2524,7 @@ def reaction_confirm(req: ReactionConfirmRequest):
     seul, sans passer par le chat, 2026-07-30)."""
     identity_token = _require_identity(req.session_token)
     try:
-        reaction = add_reaction(req.opinion_id, identity_token, req.stance, req.argumentaire)
+        reaction = add_reaction(req.opinion_id, identity_token, req.stance, req.argumentaire, req.voice)
         return publish_reaction(reaction["reaction_id"])
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -2440,7 +2543,7 @@ def reaction_toggle(req: ReactionToggleRequest):
     if req.stance not in ("adherer", "opposer", "neutre"):
         raise HTTPException(400, "stance invalide")
     try:
-        result = set_reaction_stance(req.opinion_id, identity_token, req.stance)
+        result = set_reaction_stance(req.opinion_id, identity_token, req.stance, req.voice)
     except ValueError as e:
         raise HTTPException(400, str(e))
     with db() as conn:
@@ -2468,7 +2571,7 @@ def remarque_confirm(req: RemarqueConfirmRequest):
     try:
         remarque = create_remarque(
             req.thread_id, identity_token, req.body, req.reply_to_remarque_id, req.reply_to_opinion_id,
-            req.reply_to_reaction_id,
+            req.reply_to_reaction_id, req.voice,
         )
         return publish_remarque(remarque["remarque_id"])
     except ValueError as e:

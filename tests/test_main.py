@@ -1431,7 +1431,7 @@ def test_set_reaction_stance_creates_and_publishes_directly():
     main_module.publish_opinion(opinion["opinion_id"])
 
     result = main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-reactor-1", "adherer")
-    assert result == {"opinion_id": opinion["opinion_id"], "stance": "adherer"}
+    assert result == {"opinion_id": opinion["opinion_id"], "stance": "adherer", "voice": None}
 
     current = main_module.get_current_reaction(opinion["opinion_id"], "identity-stance-reactor-1")
     assert current["stance"] == "adherer"
@@ -1462,7 +1462,7 @@ def test_set_reaction_stance_reclick_different_stance_changes_mind():
 
     main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-reactor-3", "adherer")
     result = main_module.set_reaction_stance(opinion["opinion_id"], "identity-stance-reactor-3", "opposer")
-    assert result == {"opinion_id": opinion["opinion_id"], "stance": "opposer"}
+    assert result == {"opinion_id": opinion["opinion_id"], "stance": "opposer", "voice": None}
     current = main_module.get_current_reaction(opinion["opinion_id"], "identity-stance-reactor-3")
     assert current["stance"] == "opposer"
 
@@ -1736,6 +1736,237 @@ def test_create_thread_accepts_reserved_admin_mairie_categories():
 
     mairie_thread = main_module.create_thread("Fil réservé Mairie", category="mairie")
     assert mairie_thread["category"] == "mairie"
+
+
+# ---------- Voix Admin/Mairie (2026-08-03, étape 4/6 : bascule + écriture directe) ----------
+
+def _make_admin_identity(email: str, token: str) -> str:
+    """Identité de test avec role='admin' directement en base — pas besoin de passer par
+    /register+set_account_role pour ces tests bas niveau (main.create_opinion etc. prennent un
+    identity_token directement, pas un session_token)."""
+    import main as main_module
+
+    with main_module.db() as conn:
+        conn.execute("DELETE FROM identities WHERE token=?", (token,))
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, email, role) VALUES (?, ?, ?, ?, ?, 'admin')",
+            (token, f"hash-{token}", "TestVoiceAdmin", "Adresse test", email),
+        )
+    return token
+
+
+def _make_mairie_identity(email: str, token: str) -> str:
+    import main as main_module
+
+    with main_module.db() as conn:
+        conn.execute("DELETE FROM identities WHERE token=?", (token,))
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, email, role) VALUES (?, ?, ?, ?, ?, 'mairie')",
+            (token, f"hash-{token}", "TestVoiceMairie", "Adresse test", email),
+        )
+    return token
+
+
+def test_validate_voice_none_always_ok():
+    import main as main_module
+
+    main_module._validate_voice("identity-voice-anyone", None)  # ne lève rien
+
+
+def test_validate_voice_rejects_citizen_claiming_admin():
+    import main as main_module
+
+    with pytest.raises(ValueError, match="n'a pas la voix"):
+        main_module._validate_voice("identity-voice-citizen-no-role", "admin")
+
+
+def test_validate_voice_accepts_matching_role():
+    import main as main_module
+
+    token = _make_admin_identity("voice-validate-admin@test.fr", "token-voice-validate-admin")
+    main_module._validate_voice(token, "admin")  # ne lève rien
+
+
+def test_validate_voice_rejects_mismatched_role():
+    import main as main_module
+
+    token = _make_mairie_identity("voice-validate-mairie@test.fr", "token-voice-validate-mairie")
+    with pytest.raises(ValueError, match="n'a pas la voix"):
+        main_module._validate_voice(token, "admin")
+
+
+def test_check_category_posting_permission_blocks_citizen_on_reserved_category():
+    """LE fix de sécurité (2026-08-03) : sans ce garde-fou, n'importe quel citoyen pouvait déjà
+    faire créer un fil dans la catégorie "admin" en appelant /opinion/confirm directement (hors
+    chatbot) une fois ALL_CATEGORIES élargi à l'étape 1/6."""
+    import main as main_module
+
+    with pytest.raises(ValueError, match="voix Admin"):
+        main_module._check_category_posting_permission("admin", None)
+    with pytest.raises(ValueError, match="voix Mairie"):
+        main_module._check_category_posting_permission("mairie", "admin")
+
+
+def test_check_category_posting_permission_allows_matching_voice():
+    import main as main_module
+
+    main_module._check_category_posting_permission("admin", "admin")  # ne lève rien
+    main_module._check_category_posting_permission("mairie", "mairie")  # ne lève rien
+
+
+def test_check_category_posting_permission_ignores_normal_categories():
+    """Aucune restriction de voix sur les 9 catégories citoyennes — même voice=None (citoyen
+    normal) doit passer."""
+    import main as main_module
+
+    main_module._check_category_posting_permission("voirie", None)  # ne lève rien
+
+
+def test_create_thread_with_opinion_rejects_citizen_in_reserved_category():
+    import main as main_module
+
+    with main_module.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Tentative citoyenne catégorie admin",))
+    with pytest.raises(ValueError, match="voix Admin"):
+        main_module.create_thread_with_opinion(
+            "Tentative citoyenne catégorie admin", "identity-voice-citizen-attack", "Corps",
+            category="admin",
+        )
+    # le fil orphelin créé avant l'échec de create_opinion doit avoir été nettoyé
+    with main_module.db() as conn:
+        row = conn.execute(
+            "SELECT thread_id FROM threads WHERE title=?", ("Tentative citoyenne catégorie admin",)
+        ).fetchone()
+    assert row is None
+
+
+def test_create_thread_with_opinion_accepts_matching_admin_voice():
+    import main as main_module
+
+    token = _make_admin_identity("voice-thread-admin@test.fr", "token-voice-thread-admin")
+    with main_module.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Annonce officielle Admin",))
+    result = main_module.create_thread_with_opinion(
+        "Annonce officielle Admin", token, "Corps officiel", category="admin", voice="admin",
+    )
+    with main_module.db() as conn:
+        row = conn.execute("SELECT voice FROM opinions WHERE opinion_id=?", (result["opinion_id"],)).fetchone()
+    assert row["voice"] == "admin"
+
+
+def test_create_opinion_rejects_citizen_posting_into_existing_reserved_thread():
+    """Même garde-fou que pour la création de fil, mais sur un fil DÉJÀ EXISTANT — un citoyen ne
+    doit pas pouvoir ajouter une opinion dans un fil "mairie" même s'il en connaît le thread_id
+    (ex: trouvé via list_threads)."""
+    import main as main_module
+
+    admin_token = _make_admin_identity("voice-existing-thread-admin@test.fr", "token-voice-existing-thread")
+    with main_module.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Fil Mairie déjà publié",))
+    thread = main_module.create_thread("Fil Mairie déjà publié", category="mairie")
+    main_module.publish_thread(thread["thread_id"])
+    with pytest.raises(ValueError, match="voix Mairie"):
+        main_module.create_opinion(thread["thread_id"], "identity-voice-citizen-existing", "Corps citoyen")
+    # même un Admin (mauvaise voix pour cette catégorie précise) doit être refusé
+    with pytest.raises(ValueError, match="voix Mairie"):
+        main_module.create_opinion(thread["thread_id"], admin_token, "Corps admin", voice="admin")
+
+
+def test_reacting_stays_free_in_reserved_category_for_citizen():
+    """"Réagir = partout" : un citoyen peut réagir (adhérer/opposer/neutre) sur une opinion postée
+    dans un fil "admin"/"mairie", sans avoir besoin d'aucune voix particulière."""
+    import main as main_module
+
+    admin_token = _make_admin_identity("voice-react-admin@test.fr", "token-voice-react-admin")
+    with main_module.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Annonce Admin réactions libres",))
+    result = main_module.create_thread_with_opinion(
+        "Annonce Admin réactions libres", admin_token, "Corps", category="admin", voice="admin",
+    )
+    reaction = main_module.add_reaction(result["opinion_id"], "identity-voice-citizen-reactor", "adherer")
+    assert reaction["voice"] is None
+    main_module.publish_reaction(reaction["reaction_id"])
+
+
+def test_reacting_with_voice_requires_matching_role():
+    import main as main_module
+
+    admin_token = _make_admin_identity("voice-react-as-admin@test.fr", "token-voice-react-as-admin")
+    with main_module.db() as conn:
+        conn.execute("DELETE FROM threads WHERE title=?", ("Fil pour réaction en voix Admin",))
+    thread = main_module.create_thread("Fil pour réaction en voix Admin", category="voirie")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-voice-opinion-author", "Corps")
+    main_module.publish_opinion(opinion["opinion_id"])
+    reaction = main_module.add_reaction(opinion["opinion_id"], admin_token, "adherer", voice="admin")
+    assert reaction["voice"] == "admin"
+    with pytest.raises(ValueError, match="n'a pas la voix"):
+        main_module.add_reaction(opinion["opinion_id"], "identity-voice-fake-admin", "opposer", voice="admin")
+
+
+def test_create_remarque_with_voice_stored_and_displayed():
+    import main as main_module
+
+    admin_token = _make_admin_identity("voice-remarque-admin@test.fr", "token-voice-remarque-admin")
+    thread = main_module.create_thread("Fil pour remarque voix Admin")
+    main_module.publish_thread(thread["thread_id"])
+    remarque = main_module.create_remarque(thread["thread_id"], admin_token, "Précision officielle", voice="admin")
+    assert remarque["voice"] == "admin"
+    main_module.publish_remarque(remarque["remarque_id"])
+    snapshot = main_module.get_forum_page_snapshot()
+    thread_snapshot = next(t for t in snapshot if t["thread_id"] == thread["thread_id"])
+    assert thread_snapshot["remarques"][0]["auteur"] == "Admin"
+    assert thread_snapshot["remarques"][0]["voice"] == "admin"
+
+
+def test_voice_or_pseudo_display():
+    import main as main_module
+
+    assert main_module._voice_or_pseudo_display("admin", "Renard", "bleu") == "Admin"
+    assert main_module._voice_or_pseudo_display("mairie", None, None) == "Mairie"
+    assert main_module._voice_or_pseudo_display(None, "Renard", "bleu") == "Renard bleu"
+    assert main_module._voice_or_pseudo_display(None, None, None) == "auteur inconnu"
+
+
+@pytest.mark.anyio
+async def test_opinion_confirm_endpoint_rejects_citizen_claiming_admin_voice(client, logged_in_user):
+    resp = await client.post(
+        "/opinion/confirm",
+        json={
+            "session_token": logged_in_user["session_token"],
+            "new_thread_title": "Tentative endpoint citoyen voix admin",
+            "new_thread_category": "admin",
+            "body": "Corps",
+            "voice": "admin",
+        },
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_opinion_confirm_endpoint_allows_real_admin_voice(client):
+    import main as main_module
+
+    body = {"nom": "VoiceAdminEndpoint", "adresse": "1 Rue Test", "email": "voice-endpoint-admin@test.fr", "password": PASSWORD}
+    reg = await client.post("/register", json=body)
+    assert reg.status_code == 200
+    with main_module.db() as conn:
+        conn.execute("UPDATE identities SET role='admin' WHERE email='voice-endpoint-admin@test.fr'")
+    login = await client.post("/login", json={"email": "voice-endpoint-admin@test.fr", "password": PASSWORD})
+    session_token = login.json()["session_token"]
+
+    resp = await client.post(
+        "/opinion/confirm",
+        json={
+            "session_token": session_token,
+            "new_thread_title": "Annonce officielle via endpoint",
+            "new_thread_category": "admin",
+            "body": "Corps officiel",
+            "voice": "admin",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "published"
 
 
 def test_identities_table_has_role_and_telephone_columns():
