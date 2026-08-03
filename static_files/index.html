@@ -629,9 +629,15 @@ function showPseudoProposalButton(word, color, displayText) {
   btn.addEventListener('click', () => askPseudoConfirmation(word, color, displayText));
   list.appendChild(btn);
 }
-// Double confirmation (2026-07-25, demande développeur via angelobot) : le 1er clic ne fait
-// jamais l'écriture réelle, il ouvre juste une 2e étape explicite — évite qu'un clic accidentel
-// (ou un utilisateur qui n'a pas bien lu) verrouille un pseudo sans l'avoir vraiment voulu.
+// Flux en 4 étapes (2026-08-03, refonte suite au bug "Robot gris" — Stefano avait pu confirmer
+// un pseudo sans JAMAIS voir de bouton ni de logo, le clic "Oui, confirmer" étant cliquable dès
+// l'entrée dans cette étape, avant même que la génération du logo ait démarré ou fini) :
+// (0) filtres texte déjà appliqués en amont (appropriate/iconifiable/identité non-humaine) ;
+// (1) ce texte question ci-dessous = proposition texte seul, déjà validée par le clic qui a
+// mené ici ; (2) génération + validation vision du logo, AUCUN bouton affiché tant que ce n'est
+// pas terminé (succès ou échec) ; (3) le bouton final n'apparaît qu'à ce moment-là, avec
+// l'icône réellement générée à côté si elle existe. "Annuler" reste disponible pendant toute
+// la génération pour ne pas bloquer un utilisateur qui change d'avis.
 function askPseudoConfirmation(word, color, displayText) {
   const list = document.getElementById('pseudoCandidates');
   list.innerHTML = '';
@@ -641,31 +647,34 @@ function askPseudoConfirmation(word, color, displayText) {
   question.textContent = 'Confirmer définitivement « ' + displayText + ' » comme pseudonyme ?';
   const logoPreviewEl = document.createElement('div');
   logoPreviewEl.style.cssText = 'margin:.4em 0;';
-  const confirmBtn = document.createElement('button');
-  confirmBtn.className = 'btn-primary';
-  confirmBtn.textContent = 'Oui, confirmer';
-  // pendingLogo (2026-07-31) : rempli en tâche de fond dès l'entrée dans cette étape (voir plus
-  // bas), reste null tant que la génération n'est pas terminée — confirmPseudo gère ce cas en
-  // écrivant juste le pseudo sans logo cette fois (dégradation propre, jamais bloquant, voir
-  // décision développeur : synchrone MAIS le clic "Oui, confirmer" n'attend jamais le logo lui
-  // seul le permet de faire cliquer avant que le logo arrive).
-  let pendingLogo = null;
-  confirmBtn.addEventListener('click', () => confirmPseudo(word, color, displayText, pendingLogo));
+  const loadingEl = document.createElement('p');
+  loadingEl.className = 'info';
+  loadingEl.style.margin = '.3em 0';
+  loadingEl.textContent = 'Génération de ton logo en cours…';
+  logoPreviewEl.appendChild(loadingEl);
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-link';
   cancelBtn.textContent = 'Annuler';
   cancelBtn.addEventListener('click', () => showPseudoProposalButton(word, color, displayText));
   list.appendChild(question);
   list.appendChild(logoPreviewEl);
-  list.appendChild(confirmBtn);
   list.appendChild(cancelBtn);
-  fetchPseudoLogoPreview(word, color, logoPreviewEl).then(result => { pendingLogo = result; });
+  fetchPseudoLogoPreview(word, color, logoPreviewEl).then(result => {
+    loadingEl.remove();
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'btn-primary';
+    confirmBtn.textContent = result ? ('Valider ' + displayText) : ('Valider ' + displayText + ' (sans logo)');
+    confirmBtn.addEventListener('click', () => confirmPseudo(word, color, displayText, result));
+    list.insertBefore(confirmBtn, cancelBtn);
+  });
 }
-// Preview du logo (2026-07-31) : appelé dès l'entrée dans l'étape de confirmation — si le mot a
-// déjà un logo validé (mot déjà utilisé par quelqu'un), le relit instantanément (gratuit) ; sinon
-// génère une silhouette (5-8s, ~0,014$). Jamais bloquant pour l'utilisateur : le bouton "Oui,
-// confirmer" reste cliquable pendant ce temps (voir pendingLogo ci-dessus), et un échec de
-// génération (image_base64 absent) n'affiche simplement rien, sans erreur visible.
+// Preview du logo (2026-07-31, gate du bouton final revue le 2026-08-03) : appelé dès l'entrée
+// dans l'étape de confirmation — si le mot a déjà un logo validé (mot déjà utilisé par
+// quelqu'un), le relit instantanément (gratuit) ; sinon génère une silhouette (5-8s, ~0,014$) et
+// la fait valider par un modèle vision. Le bouton final (voir askPseudoConfirmation) n'apparaît
+// qu'une fois cette promesse résolue, succès ou échec — un échec de génération (image_base64
+// absent) n'affiche pas d'erreur bruyante, juste l'explication ci-dessous et un bouton de
+// secours "sans logo".
 async function fetchPseudoLogoPreview(word, color, containerEl) {
   const session_token = localStorage.getItem('session_token');
   try {
