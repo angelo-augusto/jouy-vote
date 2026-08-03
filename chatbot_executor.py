@@ -312,17 +312,42 @@ def run_turn(
                 display_value = effective_result.get("display") if effective_result else None
                 is_pseudo_result = isinstance(display_value, str) and bool(display_value)
                 available_value = effective_result.get("available") if effective_result else None
-                if fallback and not text.strip():
+                # Bug réel #21 (2026-08-03, signalé par Angelo juste après le fix du #20) : une fois
+                # le #20 corrigé (previous_result qui persiste entre plusieurs say_user du même lot),
+                # un artefact resté invisible jusque-là est apparu au grand jour — le lot contient
+                # [propose_pseudo_candidates, say_user 1 (texte sans le nom), say_user 2 ("Que
+                # penses-tu de {{résultat}} ? ...")] : say_user 2 cite déjà correctement le pseudo
+                # dans une vraie phrase, mais le bloc bug#6 juste en dessous forçait AUSSI la
+                # citation sur say_user 1 (qui ne contenait pas encore le nom) — via
+                # _presentable_fallback, qui en cas de succès renvoie la valeur BRUTE ("Chaussure
+                # orange"), sans aucune phrase autour (voir sa docstring : conçu à l'origine pour un
+                # UNIQUE say_user isolé, jamais pensé pour coexister avec un 2e say_user qui va de
+                # toute façon citer le nom juste après). Résultat : une bulle "Chaussure orange"
+                # seule, suivie d'une bulle qui la répète en entier. Fix : si un say_user PLUS TARD
+                # dans ce même lot va lui-même citer ce résultat (via {{résultat}}), la citation
+                # forcée ici devient inutile — laisser ce say_user tel quel (le filtre frontend
+                # anti-bulle-vide masque toute bulle qui resterait vide, cf. bug #5).
+                later_say_user_will_cite_result = any(
+                    later_cmd.get("action") == "say_user"
+                    and _RESULT_PLACEHOLDER_RE.search(later_cmd.get("text", ""))
+                    for later_cmd in actions[cmd_index + 1:]
+                )
+                if fallback and not text.strip() and not later_say_user_will_cite_result:
                     # Bug réel #5 (2026-07-25, root cause d'une répétition signalée par le
                     # développeur : "Clairière vert" reproposé 5 fois) : le LLM laisse parfois
                     # say_user vide juste après une action de proposition — sans texte, le filtre
                     # frontend anti-bulle-vide masque la bulle, effaçant toute trace du candidat
                     # proposé dans l'historique renvoyé au modèle au tour suivant. Sans mémoire de
                     # ce qu'il vient d'offrir, le modèle repart d'index=0 → répétition.
+                    #
+                    # "and not later_say_user_will_cite_result" (bug #21) : si le trou est comblé de
+                    # toute façon par un say_user suivant du même lot, pas besoin d'un repli ici —
+                    # la bulle vide reste masquée côté frontend (bug #5 déjà couvert autrement).
                     text = _presentable_fallback(effective_result, fallback)
                 elif (
                     is_pseudo_result and available_value is not False
                     and display_value not in text and display_value not in cited_displays
+                    and not later_say_user_will_cite_result
                 ):
                     # Bug réel #6 (même jour, mesuré à ~2 tentatives sur 5 malgré une clarification
                     # de prompt) : le LLM ne laisse pas toujours le say_user TOTALEMENT vide — il

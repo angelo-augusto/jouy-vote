@@ -4060,6 +4060,45 @@ async def test_run_turn_resolves_placeholder_in_second_say_user_of_same_batch(mo
 
 
 @pytest.mark.anyio
+async def test_run_turn_does_not_force_bare_name_bubble_when_a_later_say_user_cites_it(mocked_openrouter_structured):
+    """Régression bug réel #21 (2026-08-03, signalé par Angelo juste après la vérification en réel
+    du fix #20) : une fois previous_result persistant entre plusieurs say_user du même lot (#20),
+    un artefact resté invisible jusque-là est apparu — le lot contient [propose_pseudo_candidates,
+    say_user 1 ("Bonjour !", ne cite pas le pseudo), say_user 2 ("Que penses-tu de {{résultat}} ?
+    ...")]. Le garde-fou bug#6 (citation forcée si display absent du texte) forçait AUSSI say_user 1
+    à devenir la valeur NUE du pseudo ("Chaussure orange"), via _presentable_fallback qui renvoie le
+    nom seul sans phrase autour en cas de succès — donnant une bulle "Chaussure orange" isolée,
+    suivie d'une bulle qui répète le nom en entier. Fix : si un say_user PLUS TARD dans le même lot
+    va de toute façon citer le résultat via {{résultat}}, ne pas forcer la citation ici — laisser
+    say_user 1 tel quel (jamais vide dans ce cas, donc pas concerné par le filtre anti-bulle-vide
+    de bug #5)."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+            {"action": "say_user", "text": "Bonjour !"},
+            {"action": "say_user", "text": "Que penses-tu de {{résultat}} ? Tu peux l'accepter ou en demander une autre."},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "bonjour"}],
+        {"identity_token": "tok-bulle-nue", "taken_pseudos": set()},
+    )
+    assert result["error"] is None
+    display = result["actions_log"][0]["result"]["display"]
+    # say_user 1 ne doit PAS avoir été remplacé par le nom nu du pseudo.
+    assert result["replies"][0] == "Bonjour !"
+    assert display not in result["replies"][0]
+    # say_user 2 cite bien le pseudo dans sa vraie phrase.
+    assert display in result["replies"][1]
+    assert "{{résultat}}" not in result["replies"][1]
+
+
+@pytest.mark.anyio
 async def test_run_turn_forces_error_message_when_say_user_ignores_available_false(mocked_openrouter_structured):
     """Régression bug réel #12 (2026-07-25, trouvé EN RÉEL en testant propose_opinion, phase 3 du
     forum) : propose_opinion a renvoyé available=false + error="fil introuvable (ou pas encore
