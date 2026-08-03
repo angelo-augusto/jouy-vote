@@ -657,6 +657,10 @@ class AdminRolesSetRequest(BaseModel):
     role: str | None = None
 
 
+class MairieDirectoryRequest(BaseModel):
+    session_token: str
+
+
 class Vote(BaseModel):
     token: str
     question_id: int
@@ -1953,6 +1957,16 @@ def admin_roles_set(req: AdminRolesSetRequest):
         raise HTTPException(400, str(e))
 
 
+@app.post("/mairie/directory")
+def mairie_directory(req: MairieDirectoryRequest):
+    """Voix Admin/Mairie (2026-08-03, étape 3/6) : annuaire des comptes Mairie, accessible aux
+    rôles admin ET mairie (voir _require_admin_or_mairie) — noms uniquement, jamais l'email ni le
+    téléphone (voir list_mairie_directory pour la justification, spec wiki
+    themes:admin-mairie)."""
+    _require_admin_or_mairie(req.session_token)
+    return {"accounts": list_mairie_directory()}
+
+
 @app.post("/change-password")
 def change_password(req: ChangePasswordRequest):
     with db() as conn:
@@ -2076,6 +2090,21 @@ def _require_admin(session_token: str) -> str:
     return row["token"]
 
 
+def _require_admin_or_mairie(session_token: str) -> str:
+    """Voix Admin/Mairie (2026-08-03, étape 3/6) : comme _require_admin, mais accepte aussi
+    role='mairie' — utilisé par /mairie/directory (l'annuaire Mairie que la spec ouvre aux deux
+    rôles, pas seulement à l'Admin)."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT token, role FROM identities WHERE session_token=?", (session_token,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(401, "Session invalide.")
+    if row["role"] not in ("admin", "mairie"):
+        raise HTTPException(403, "Réservé aux comptes Admin ou Mairie.")
+    return row["token"]
+
+
 def list_privileged_accounts() -> list[dict]:
     """Lecture pure : tous les comptes ayant un rôle Admin ou Mairie (email, nom, role) —
     l'annuaire complet vu par un Admin (voir wiki themes:admin-mairie). Le filtrage "un compte
@@ -2087,6 +2116,18 @@ def list_privileged_accounts() -> list[dict]:
             "SELECT email, nom, telephone, role FROM identities WHERE role IN ('admin', 'mairie') "
             "ORDER BY role, nom"
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_mairie_directory() -> list[dict]:
+    """Lecture pure : uniquement le NOM des comptes Mairie (JAMAIS l'email ni le téléphone —
+    spec wiki themes:admin-mairie : "les comptes Mairie voient la liste des comptes Mairie",
+    contrairement à l'Admin qui voit en plus les coordonnées des autres Admin, coordonnées
+    jamais partagées avec un compte Mairie). Utilisée par /mairie/directory, accessible aux
+    rôles admin ET mairie (un Admin n'en a normalement pas besoin, /admin/roles/list lui donne
+    déjà une vue plus riche, mais rien ne l'exclut ici)."""
+    with db() as conn:
+        rows = conn.execute("SELECT nom FROM identities WHERE role='mairie' ORDER BY nom").fetchall()
     return [dict(r) for r in rows]
 
 

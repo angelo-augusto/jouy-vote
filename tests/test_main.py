@@ -4418,6 +4418,73 @@ def test_list_privileged_accounts_excludes_citizens():
     assert "citoyen-role-test@test.fr" not in emails
 
 
+# ---------- Voix Admin/Mairie (2026-08-03, étape 3/6 : annuaires) ----------
+
+def test_list_mairie_directory_only_returns_mairie_names():
+    import main as main_module
+
+    with main_module.db() as conn:
+        conn.execute(
+            "DELETE FROM identities WHERE email IN "
+            "('dir-citoyen@test.fr', 'dir-admin@test.fr', 'dir-mairie@test.fr')"
+        )
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, email, role, telephone) VALUES "
+            "('t-dir-citoyen', 'h-dir-citoyen', 'Citoyen', 'Adresse', 'dir-citoyen@test.fr', NULL, NULL)"
+        )
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, email, role, telephone) VALUES "
+            "('t-dir-admin', 'h-dir-admin', 'UnAdmin', 'Adresse', 'dir-admin@test.fr', 'admin', '0600000000')"
+        )
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, email, role, telephone) VALUES "
+            "('t-dir-mairie', 'h-dir-mairie', 'LaMairie', 'Adresse', 'dir-mairie@test.fr', 'mairie', NULL)"
+        )
+    accounts = main_module.list_mairie_directory()
+    noms = {a["nom"] for a in accounts}
+    assert "LaMairie" in noms
+    assert "UnAdmin" not in noms
+    assert "Citoyen" not in noms
+    # jamais l'email ni le téléphone dans cet annuaire — voir docstring list_mairie_directory
+    assert all(set(a.keys()) == {"nom"} for a in accounts)
+
+
+@pytest.mark.anyio
+async def test_mairie_directory_endpoint_rejects_citizen(client, logged_in_user):
+    resp = await client.post("/mairie/directory", json={"session_token": logged_in_user["session_token"]})
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_mairie_directory_endpoint_rejects_invalid_session(client):
+    resp = await client.post("/mairie/directory", json={"session_token": "fake"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_mairie_directory_endpoint_allows_mairie_account(client):
+    import main as main_module
+
+    body = {"nom": "TestMairieDir", "adresse": "1 Rue Test", "email": "mairie-dir-endpoint@test.fr", "password": PASSWORD}
+    reg = await client.post("/register", json=body)
+    assert reg.status_code == 200
+    with main_module.db() as conn:
+        conn.execute("UPDATE identities SET role='mairie' WHERE email='mairie-dir-endpoint@test.fr'")
+    login = await client.post("/login", json={"email": "mairie-dir-endpoint@test.fr", "password": PASSWORD})
+    session_token = login.json()["session_token"]
+
+    resp = await client.post("/mairie/directory", json={"session_token": session_token})
+    assert resp.status_code == 200
+    noms = {a["nom"] for a in resp.json()["accounts"]}
+    assert "TestMairieDir" in noms
+
+
+@pytest.mark.anyio
+async def test_mairie_directory_endpoint_allows_admin_account(client, admin_user):
+    resp = await client.post("/mairie/directory", json={"session_token": admin_user["session_token"]})
+    assert resp.status_code == 200
+
+
 @pytest.mark.anyio
 async def test_admin_key_not_set_prevents_start():
     saved = os.environ.pop("JOUY_ADMIN_KEY", None)

@@ -188,6 +188,11 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
     <div id="compteLogoStatus" style="margin:.4em 0;"></div>
   </div>
   <hr id="compteLogoHr" class="hidden">
+  <div id="compteMairieDirectorySection" class="hidden">
+    <label>Annuaire Mairie</label>
+    <div id="compteMairieDirectoryList" style="margin:.4em 0;"></div>
+    <hr>
+  </div>
   <label>Mon jeton de vote</label>
   <p>
     <span id="voteTokenMasked" style="font-family: monospace;">••••••••••••••••••••••••••••••••</span>
@@ -368,6 +373,11 @@ function render() {
     document.getElementById('compteEmail').textContent = localStorage.getItem('user_email');
     resetVoteTokenDisplay();
     loadMyPseudoLogoStatus();
+    // Annuaire Mairie (2026-08-03, voix Admin/Mairie, étape 3/6) : réservé aux comptes Mairie —
+    // un Admin a déjà une vue plus riche sur /admin/roles (coordonnées incluses), pas besoin de
+    // dupliquer ici pour lui.
+    if (localStorage.getItem('user_role') === 'mairie') loadMairieDirectory();
+    else document.getElementById('compteMairieDirectorySection').classList.add('hidden');
   }
   else if (pageName === 'Roles') loadRolesPage();
 }
@@ -2058,6 +2068,30 @@ document.getElementById('chatConfirmSaveBtn').addEventListener('click', confirmS
 document.getElementById('chatCancelSaveBtn').addEventListener('click', () => document.getElementById('chatSummaryProposal').classList.add('hidden'));
 document.getElementById('referralSubmitBtn').addEventListener('click', sendReferralInvite);
 document.getElementById('voteTokenToggleBtn').addEventListener('click', toggleVoteToken);
+// ---------- annuaire Mairie (voix Admin/Mairie, 2026-08-03, étape 3/6) ----------
+async function loadMairieDirectory() {
+  const section = document.getElementById('compteMairieDirectorySection');
+  const listEl = document.getElementById('compteMairieDirectoryList');
+  section.classList.remove('hidden');
+  listEl.innerHTML = '<p class="info">Chargement…</p>';
+  try {
+    const session_token = localStorage.getItem('session_token');
+    const data = await api('/mairie/directory', { session_token });
+    listEl.innerHTML = '';
+    if (data.accounts.length === 0) {
+      listEl.innerHTML = '<p class="info">Aucun autre compte Mairie pour l\'instant.</p>';
+      return;
+    }
+    for (const a of data.accounts) {
+      const p = document.createElement('p');
+      p.style.margin = '.2em 0';
+      p.textContent = a.nom;
+      listEl.appendChild(p);
+    }
+  } catch (e) {
+    section.classList.add('hidden');
+  }
+}
 // ---------- gestion des rôles (voix Admin, 2026-08-03) ----------
 async function loadRolesPage() {
   const session_token = localStorage.getItem('session_token');
