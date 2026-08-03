@@ -2852,7 +2852,7 @@ def results(question_id: int):
 # (accessibles seulement via un lien reçu par email) mais ont besoin du même traitement.
 _SPA_ROUTES = [
     "/", "/login", "/vote", "/assistant", "/parrainer", "/compte", "/register", "/reset-password",
-    "/forum", "/mon-activite", "/admin/roles",
+    "/forum", "/mon-activite", "/admin/roles", "/publier",
 ]
 for _route in _SPA_ROUTES:
     app.add_api_route(
