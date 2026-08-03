@@ -3823,6 +3823,35 @@ async def test_run_turn_strips_unresolved_placeholder_instead_of_leaking_it(mock
 
 
 @pytest.mark.anyio
+async def test_run_turn_substitutes_placeholder_written_without_accent(mocked_openrouter_structured):
+    """Régression bug réel #19 partie 2 (2026-08-03, trouvé en vérifiant le fix de la partie 1 en
+    conditions réelles) : le modèle écrit parfois "{{resultat}}" SANS l'accent — un match exact sur
+    "résultat" laissait fuiter la syntaxe technique brute telle quelle ("Que penses-tu de
+    {{resultat}} ?"), ni substituée ni nettoyée. Les deux mécanismes (substitution ET nettoyage de
+    repli) doivent reconnaître les deux orthographes."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+            {"action": "say_user", "text": "Que penses-tu de {{resultat}} ?"},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "bonjour"}],
+        {"identity_token": "tok-accent-manquant", "taken_pseudos": set()},
+    )
+    assert result["error"] is None
+    assert "{{resultat}}" not in result["replies"][0]
+    assert "{" not in result["replies"][0]
+    display = result["actions_log"][0]["result"]["display"]
+    assert display in result["replies"][0]
+
+
+@pytest.mark.anyio
 def test_substitute_placeholder_ignores_list_valued_entries():
     """Régression (bug réel signalé par Angelo avec capture d'écran, 2026-07-25) : un résultat
     dont une valeur est une LISTE (ex: l'ancien format {"candidates": [...]} de

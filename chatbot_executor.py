@@ -41,8 +41,16 @@ def build_system_prompt(base_prompt: str, context_block: str = "") -> str:
 # "**{{résultat}}**". Avant ce fix, un simple .replace("{{résultat}}", "") laissait les 2 paires de
 # "**" adjacentes, qui se collent visuellement en "****" une fois le mot retiré entre elles. Fix :
 # retirer le wrapping markdown/guillemets EN MÊME TEMPS que le token, pas seulement le token seul.
+#
+# "r[ée]sultat" (2026-08-03, bug réel #19 partie 2, trouvé en vérifiant le fix du bug #19 en
+# conditions réelles) : le modèle écrit parfois "{{resultat}}" SANS l'accent — un match exact sur
+# "résultat" laissait fuiter la syntaxe technique brute telle quelle vers l'utilisateur ("Que
+# penses-tu de {{resultat}} ?"), ni substituée ni nettoyée, dans les deux mécanismes (celui-ci et
+# _substitute_placeholder ci-dessous). Généralisé pour accepter les deux orthographes.
+_RESULT_PLACEHOLDER_RE = re.compile(r"\{\{r[ée]sultat\}\}", re.IGNORECASE)
 _WRAPPED_UNRESOLVED_PLACEHOLDER = re.compile(
-    r'\*\*\{\{résultat\}\}\*\*|«\{\{résultat\}\}»|"\{\{résultat\}\}"|\{\{résultat\}\}'
+    r'\*\*\{\{r[ée]sultat\}\}\*\*|«\{\{r[ée]sultat\}\}»|"\{\{r[ée]sultat\}\}"|\{\{r[ée]sultat\}\}',
+    re.IGNORECASE,
 )
 
 
@@ -114,12 +122,12 @@ def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
     True". Fix : exclure explicitement les booléens ET la clé "available" (champ de statut interne,
     jamais un mot à afficher) — ne garder que des valeurs de CONTENU réel (mot, couleur, jeton,
     résumé...)."""
-    if "{{résultat}}" not in text:
+    if not _RESULT_PLACEHOLDER_RE.search(text):
         return text
     value = _render_result_value(previous_result)
     if not value:
         return _strip_unresolved_placeholder(text)
-    return text.replace("{{résultat}}", value)
+    return _RESULT_PLACEHOLDER_RE.sub(lambda _m: value, text)
 
 
 # Bug réel #13 (2026-07-26, capture développeur : "L'assistant n'a pas pu répondre
