@@ -3824,7 +3824,7 @@ async def test_run_turn_strips_unresolved_placeholder_instead_of_leaking_it(mock
 
 @pytest.mark.anyio
 async def test_run_turn_substitutes_placeholder_written_without_accent(mocked_openrouter_structured):
-    """Régression bug réel #19 partie 2 (2026-08-03, trouvé en vérifiant le fix de la partie 1 en
+    """Régression bug réel #20 partie 2 (2026-08-03, trouvé en vérifiant le fix de la partie 1 en
     conditions réelles) : le modèle écrit parfois "{{resultat}}" SANS l'accent — un match exact sur
     "résultat" laissait fuiter la syntaxe technique brute telle quelle ("Que penses-tu de
     {{resultat}} ?"), ni substituée ni nettoyée. Les deux mécanismes (substitution ET nettoyage de

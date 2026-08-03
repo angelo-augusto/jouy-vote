@@ -42,7 +42,7 @@ def build_system_prompt(base_prompt: str, context_block: str = "") -> str:
 # "**" adjacentes, qui se collent visuellement en "****" une fois le mot retiré entre elles. Fix :
 # retirer le wrapping markdown/guillemets EN MÊME TEMPS que le token, pas seulement le token seul.
 #
-# "r[ée]sultat" (2026-08-03, bug réel #19 partie 2, trouvé en vérifiant le fix du bug #19 en
+# "r[ée]sultat" (2026-08-03, bug réel #20 partie 2, trouvé en vérifiant le fix du bug #20 en
 # conditions réelles) : le modèle écrit parfois "{{resultat}}" SANS l'accent — un match exact sur
 # "résultat" laissait fuiter la syntaxe technique brute telle quelle vers l'utilisateur ("Que
 # penses-tu de {{resultat}} ?"), ni substituée ni nettoyée, dans les deux mécanismes (celui-ci et
