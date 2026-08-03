@@ -3807,11 +3807,18 @@ async def test_run_turn_strips_unresolved_placeholder_instead_of_leaking_it(mock
     écrit parfois {{résultat}} sans avoir appelé l'action correspondante dans le même lot (il
     croit connaître la valeur depuis le contexte) — jamais laisser fuiter la syntaxe technique
     littérale vers l'utilisateur, même si la cause première (consigne de prompt) doit aussi être
-    renforcée séparément."""
+    renforcée séparément.
+
+    2 réponses identiques queue (depuis le fix bug #22, 2026-08-04) : ce cas précis (say_user seul,
+    rien à peek) déclenche désormais le réessai borné du bug #22 avant d'abandonner — le mock doit
+    donc pouvoir répondre 2 fois, pas juste 1."""
     import json
     import chatbot_executor
 
     calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [{"action": "say_user", "text": "Ton pseudo est {{résultat}}."}]
+    }))
     responses.append(json.dumps({
         "actions": [{"action": "say_user", "text": "Ton pseudo est {{résultat}}."}]
     }))
@@ -4096,6 +4103,86 @@ async def test_run_turn_does_not_force_bare_name_bubble_when_a_later_say_user_ci
     # say_user 2 cite bien le pseudo dans sa vraie phrase.
     assert display in result["replies"][1]
     assert "{{résultat}}" not in result["replies"][1]
+
+
+@pytest.mark.anyio
+async def test_run_turn_retries_when_say_user_references_result_with_no_action_anywhere_in_batch(mocked_openrouter_structured):
+    """Régression bug réel #22 (2026-08-04, signalé par Angelo : premier message d'une conversation
+    fraîche donnant une réponse d'accueil totalement incohérente, avec un trou en plein milieu
+    d'une phrase). Reproduit en trace sur production : le lot ne contenait qu'UN SEUL say_user
+    référençant "{{résultat}}", sans AUCUN propose_pseudo_candidates/propose_custom_pseudo nulle
+    part dans ce lot ni de résultat récupérable du tour précédent — viole la règle stricte déjà
+    documentée dans le prompt, mais le modèle ne la respecte pas toujours. Différent du bug #10
+    (action présente mais mal ordonnée, récupérable par le "peek" ciblé) : ici rien à peek, donc un
+    seul réessai borné (mêmes messages, nouvel appel) avant d'accepter le 2e résultat, même logique
+    que le réessai JSON invalide du bug #18."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "say_user", "text": "Je te propose une première idée : {{résultat}}. Ça te va ?"},
+        ]
+    }))
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+            {"action": "say_user", "text": "Je te propose une première idée : {{résultat}}. Ça te va ?"},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "bonjour"}],
+        {"identity_token": "tok-retry-batch", "taken_pseudos": set()},
+    )
+    assert result["error"] is None
+    assert len(calls) == 2  # 1er appel jeté (rien à peek), 2e appel utilisé
+    display = result["actions_log"][0]["result"]["display"]
+    assert display in result["replies"][0]
+    assert "{{résultat}}" not in result["replies"][0]
+
+
+@pytest.mark.anyio
+async def test_run_turn_gives_up_gracefully_after_one_failed_retry(mocked_openrouter_structured):
+    """Complément du test précédent (bug #22) : si le réessai unique échoue ENCORE (le modèle
+    persiste à référencer {{résultat}} sans action correspondante), on n'insiste pas indéfiniment —
+    le tour se termine normalement avec le texte du 1er essai proprement nettoyé (trou refermé par
+    _strip_unresolved_placeholder), pas une boucle infinie ni une erreur serveur. Le 2e essai,
+    toujours défaillant, n'est pas retenu (pas d'amélioration à en tirer)."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [{"action": "say_user", "text": "Je te propose une idée : {{résultat}}. Ça te va ?"}]
+    }))
+    responses.append(json.dumps({
+        "actions": [{"action": "say_user", "text": "Toujours pas d'action, désolé : {{résultat}}. Ça te va ?"}]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "bonjour"}],
+        {"identity_token": "tok-retry-echec", "taken_pseudos": set()},
+    )
+    assert result["error"] is None
+    assert len(calls) == 2
+    assert "{{résultat}}" not in result["replies"][0]
+    # Le réessai (toujours défaillant) n'est pas retenu : le texte du 1er essai est conservé.
+    assert "Toujours pas d'action" not in result["replies"][0]
+    assert "Je te propose une idée" in result["replies"][0]
+
+
+def test_batch_has_unresolvable_placeholder_ignores_carried_result_without_renderable_value():
+    """Unitaire direct : un carried_result non vide mais sans valeur affichable (ex: {"threads":
+    [...]}, uniquement des listes/structures composites) ne doit pas être compté comme un
+    "producteur de résultat" valide — sinon le garde-fou du bug #22 laisserait passer un lot qui
+    référence {{résultat}} sans rien à substituer réellement."""
+    import chatbot_executor
+
+    actions = [{"action": "say_user", "text": "Voici : {{résultat}}."}]
+    assert chatbot_executor._batch_has_unresolvable_placeholder(actions, {"threads": [{"id": 1}]}) is True
+    assert chatbot_executor._batch_has_unresolvable_placeholder(actions, {"display": "Renard bleu"}) is False
 
 
 @pytest.mark.anyio

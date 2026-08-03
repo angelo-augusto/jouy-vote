@@ -49,14 +49,21 @@ def build_system_prompt(base_prompt: str, context_block: str = "") -> str:
 # _substitute_placeholder ci-dessous). Généralisé pour accepter les deux orthographes.
 _RESULT_PLACEHOLDER_RE = re.compile(r"\{\{r[ée]sultat\}\}", re.IGNORECASE)
 _WRAPPED_UNRESOLVED_PLACEHOLDER = re.compile(
-    r'\*\*\{\{r[ée]sultat\}\}\*\*|«\{\{r[ée]sultat\}\}»|"\{\{r[ée]sultat\}\}"|\{\{r[ée]sultat\}\}',
+    r'\s*(?:\*\*\{\{r[ée]sultat\}\}\*\*|«\{\{r[ée]sultat\}\}»|"\{\{r[ée]sultat\}\}"|\{\{r[ée]sultat\}\})\s*',
     re.IGNORECASE,
 )
 
 
 def _strip_unresolved_placeholder(text: str) -> str:
-    text = _WRAPPED_UNRESOLVED_PLACEHOLDER.sub("", text)
-    return text.replace("  ", " ").strip()
+    # "\s*" autour du motif (bug #22, 2026-08-04, trouvé en reproduisant le trou signalé par
+    # Angelo) : le token isolé sur sa propre ligne ("... penses : \n\n{{résultat}}\n\nSi ça...")
+    # laissait, une fois retiré, une suite de retours à la ligne collés bout à bout — l'ancien
+    # ".replace('  ', ' ')" ne traitait que les doubles espaces littéraux, pas les sauts de ligne.
+    # Absorbe désormais l'espace/les retours à la ligne adjacents en même temps que le token, et
+    # les remplace par un unique espace (filet de secours si le réessai de _batch_has_unresolvable_
+    # placeholder n'a pas suffi à éviter ce cas).
+    text = _WRAPPED_UNRESOLVED_PLACEHOLDER.sub(" ", text)
+    return re.sub(r" {2,}", " ", text).strip()
 
 
 def _render_result_value(previous_result: dict | None) -> str:
@@ -87,6 +94,44 @@ def _render_result_value(previous_result: dict | None) -> str:
         if k not in ("text", "available", "display") and isinstance(v, (str, int, float)) and not isinstance(v, bool)
     ]
     return " ".join(scalar_values)
+
+
+def _batch_has_unresolvable_placeholder(actions: list, carried_result: dict | None) -> bool:
+    """Bug réel #22 (2026-08-04, signalé par Angelo : réponse d'accueil totalement incohérente,
+    un vrai trou en plein milieu d'une phrase — "Je te propose une première idée ... : [RIEN] Si ça
+    ne te convient pas..."). Reproduit en trace : le lot ne contenait qu'UN SEUL say_user, avec
+    "{{résultat}}" au milieu du texte, mais AUCUN propose_pseudo_candidates/propose_custom_pseudo
+    nulle part dans ce lot ni de résultat récupérable du tour précédent — viole la règle stricte
+    déjà documentée dans TOOLS_DESCRIPTION ("n'utilise {{résultat}} QUE si l'action correspondante
+    figure dans ce même lot"), mais le modèle ne la respecte pas toujours.
+
+    Différent du bug #10 (action présente mais dans le mauvais ordre — récupérable par le "peek"
+    ciblé quelques lignes plus bas dans run_turn) : ici, aucune action de ce type n'existe nulle
+    part dans le lot, rien à peek.
+
+    Doit rester COHÉRENT avec ce que le reste de run_turn sait réellement résoudre, sous peine de
+    déclencher un réessai inutile (et de faire planter les tests qui ne queue qu'UNE seule réponse
+    mock) sur des lots parfaitement valides : un say_user précédé d'une action non-say_user
+    QUELCONQUE (get_vote_token, get_or_assign_pseudo...) est résolu normalement par le flux
+    principal (previous_result mis à jour à chaque action exécutée) — SEULES les 2 actions pseudo
+    bénéficient en plus d'un "peek" qui les résout même placées APRÈS le say_user. D'où le parcours
+    dans l'ORDRE ci-dessous, plutôt qu'un simple "any" global sur tout le lot."""
+    pseudo_action_anywhere = any(
+        cmd.get("action") in ("propose_pseudo_candidates", "propose_custom_pseudo") for cmd in actions
+    )
+    has_producer_so_far = bool(carried_result and _render_result_value(carried_result))
+    for cmd in actions:
+        action = cmd.get("action")
+        if action == "say_user":
+            if (
+                _RESULT_PLACEHOLDER_RE.search(cmd.get("text", ""))
+                and not has_producer_so_far
+                and not pseudo_action_anywhere
+            ):
+                return True
+        else:
+            has_producer_so_far = True
+    return False
 
 
 def _substitute_placeholder(text: str, previous_result: dict | None) -> str:
@@ -259,6 +304,24 @@ def run_turn(
 
         if not actions:
             return _turn_result(replies, actions_log, "liste_actions_vide", trace_log)
+
+        if _batch_has_unresolvable_placeholder(actions, carried_result):
+            # Bug réel #22 (2026-08-04) : voir la docstring de _batch_has_unresolvable_placeholder.
+            # Réessai borné à 1 (mêmes messages, nouvel appel), même logique que le réessai JSON
+            # invalide du bug #18 juste au-dessus — donne au modèle une nouvelle chance de respecter
+            # sa propre consigne plutôt que de laisser un trou dans la phrase envoyée à
+            # l'utilisateur. Fait AVANT d'exécuter la moindre action de ce lot (aucun effet de bord
+            # à annuler si le réessai est déclenché).
+            log.warning("Lot avec {{résultat}} non résolvable détecté, réessai : %s", content[:300])
+            retry_content, _usage = call_openrouter(messages, response_format=RESPONSE_FORMAT, max_tokens=4096, model=model)
+            if retry_content is not None:
+                try:
+                    retry_data = json.loads(retry_content)
+                    retry_actions = retry_data.get("actions", []) if isinstance(retry_data, dict) else []
+                except json.JSONDecodeError:
+                    retry_actions = []
+                if retry_actions and not _batch_has_unresolvable_placeholder(retry_actions, carried_result):
+                    content, data, actions = retry_content, retry_data, retry_actions
 
         carried_result_in = carried_result
         previous_result: dict | None = carried_result
