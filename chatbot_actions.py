@@ -106,7 +106,16 @@ CHAT_SYSTEM_PROMPT = (
     "public pour être reconnaissables en silhouette). Applique ce test par contraste à toute "
     "proposition LIBRE d'un utilisateur (propose_custom_pseudo) — si le mot proposé est plus "
     "proche des mauvais exemples que des bons, refuse-le (appropriate=false), exactement la même "
-    "mécanique que pour la connotation, pas juste un commentaire dans ta réponse."
+    "mécanique que pour la connotation, pas juste un commentaire dans ta réponse. "
+    "Troisième critère de refus, INDÉPENDANT des deux premiers mais au même niveau d'exigence "
+    "(2026-08-02, bug réel signalé par un jeune testeur : « Robot gris » accepté à tort) : refuse "
+    "tout mot suggérant une identité non-humaine ou automatisée — Robot, IA, Algorithme, Bot, "
+    "Cyborg, Machine, Ordinateur et équivalents. Ce n'est pas choquant en soi (contrairement au "
+    "premier critère) et c'est parfaitement iconifiable (contrairement au deuxième) : le problème "
+    "est spécifique à jouyvote, où toute la légitimité du système repose sur « une personne réelle "
+    "= une voix ». Un pseudo qui évoque un bot ou une IA sape cette confiance même sans intention "
+    "malveillante de la personne qui le propose. Applique ce critère à toute proposition LIBRE "
+    "d'un utilisateur (propose_custom_pseudo), même mécanique de refus (appropriate=false)."
 )
 
 

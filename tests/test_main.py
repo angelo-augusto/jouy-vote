@@ -2607,6 +2607,19 @@ def test_chat_system_prompt_includes_iconifiable_rejection_criterion():
     assert "appropriate=false" in prompt
 
 
+def test_chat_system_prompt_includes_non_human_identity_rejection_criterion():
+    """Régression (2026-08-02, bug réel signalé par un jeune testeur) : « Robot gris » avait été
+    accepté à tort. Le prompt doit désormais rejeter (appropriate=false) tout mot suggérant une
+    identité non-humaine/automatisée, troisième critère indépendant de la connotation et de
+    l'iconifiabilité."""
+    import main as main_module
+
+    prompt = main_module.CHAT_SYSTEM_PROMPT
+    for word in ("Robot", "Algorithme", "Cyborg"):
+        assert word in prompt
+    assert "identité non-humaine" in prompt
+
+
 @pytest.mark.anyio
 async def test_pseudo_confirm_endpoint_requires_valid_session(client):
     resp = await client.post("/pseudo/confirm", json={"session_token": "fake", "word": "Renard", "color": "bleu"})
