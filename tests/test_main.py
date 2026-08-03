@@ -4047,6 +4047,126 @@ async def test_chat_delete_summary_invalid_session(client):
     assert resp.status_code == 401
 
 
+# ---------- Voix Admin/Mairie (2026-08-03, étape 2/6 : gestion des rôles) ----------
+
+@pytest.fixture
+async def admin_user(client):
+    """Compte de test avec role='admin' — bootstrap fait directement en base (comme en prod, où
+    le tout premier Admin est seedé manuellement, voir main.set_account_role pour le mécanisme
+    normal une fois un premier Admin en place)."""
+    body = {"nom": "TestAdmin", "adresse": "1 Rue Admin", "email": "admin@test.fr", "password": PASSWORD}
+    resp = await client.post("/register", json=body)
+    assert resp.status_code == 200
+    with main.db() as conn:
+        conn.execute("UPDATE identities SET role='admin' WHERE email='admin@test.fr'")
+    login = await client.post("/login", json={"email": "admin@test.fr", "password": PASSWORD})
+    assert login.status_code == 200
+    data = login.json()
+    assert data["role"] == "admin"
+    return data
+
+
+@pytest.mark.anyio
+async def test_login_returns_role_field_none_for_citizen(logged_in_user):
+    assert logged_in_user["role"] is None
+
+
+@pytest.mark.anyio
+async def test_admin_roles_list_rejects_citizen(client, logged_in_user):
+    resp = await client.post("/admin/roles/list", json={"session_token": logged_in_user["session_token"]})
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_admin_roles_list_rejects_invalid_session(client):
+    resp = await client.post("/admin/roles/list", json={"session_token": "fake"})
+    assert resp.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_admin_roles_list_allows_admin(client, admin_user):
+    resp = await client.post("/admin/roles/list", json={"session_token": admin_user["session_token"]})
+    assert resp.status_code == 200
+    accounts = resp.json()["accounts"]
+    assert any(a["email"] == "admin@test.fr" and a["role"] == "admin" for a in accounts)
+
+
+@pytest.mark.anyio
+async def test_admin_roles_set_rejects_citizen(client, logged_in_user):
+    resp = await client.post(
+        "/admin/roles/set",
+        json={"session_token": logged_in_user["session_token"], "target_email": "alice@test.fr", "role": "mairie"},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_admin_roles_set_grants_mairie(client, admin_user, registered_user):
+    resp = await client.post(
+        "/admin/roles/set",
+        json={
+            "session_token": admin_user["session_token"],
+            "target_email": "alice@test.fr", "role": "mairie",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["role"] == "mairie"
+    with main.db() as conn:
+        row = conn.execute("SELECT role FROM identities WHERE email='alice@test.fr'").fetchone()
+    assert row["role"] == "mairie"
+
+
+@pytest.mark.anyio
+async def test_admin_roles_set_revokes_role(client, admin_user, registered_user):
+    await client.post(
+        "/admin/roles/set",
+        json={"session_token": admin_user["session_token"], "target_email": "alice@test.fr", "role": "mairie"},
+    )
+    resp = await client.post(
+        "/admin/roles/set",
+        json={"session_token": admin_user["session_token"], "target_email": "alice@test.fr", "role": None},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["role"] is None
+
+
+@pytest.mark.anyio
+async def test_admin_roles_set_rejects_invalid_role(client, admin_user, registered_user):
+    resp = await client.post(
+        "/admin/roles/set",
+        json={"session_token": admin_user["session_token"], "target_email": "alice@test.fr", "role": "citoyen"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_admin_roles_set_rejects_unknown_email(client, admin_user):
+    resp = await client.post(
+        "/admin/roles/set",
+        json={"session_token": admin_user["session_token"], "target_email": "personne@test.fr", "role": "mairie"},
+    )
+    assert resp.status_code == 400
+
+
+def test_list_privileged_accounts_excludes_citizens():
+    import main as main_module
+
+    with main_module.db() as conn:
+        conn.execute("DELETE FROM identities WHERE email IN ('citoyen-role-test@test.fr', 'admin-role-test@test.fr')")
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, email, role) VALUES "
+            "('t-citoyen-role', 'h-citoyen-role', 'Citoyen', 'Adresse', 'citoyen-role-test@test.fr', NULL)"
+        )
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, email, role) VALUES "
+            "('t-admin-role', 'h-admin-role', 'AdminTest', 'Adresse', 'admin-role-test@test.fr', 'admin')"
+        )
+    accounts = main_module.list_privileged_accounts()
+    emails = {a["email"] for a in accounts}
+    assert "admin-role-test@test.fr" in emails
+    assert "citoyen-role-test@test.fr" not in emails
+
+
 @pytest.mark.anyio
 async def test_admin_key_not_set_prevents_start():
     saved = os.environ.pop("JOUY_ADMIN_KEY", None)

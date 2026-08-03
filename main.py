@@ -631,6 +631,16 @@ class LogoutRequest(BaseModel):
     session_token: str
 
 
+class AdminRolesListRequest(BaseModel):
+    session_token: str
+
+
+class AdminRolesSetRequest(BaseModel):
+    session_token: str
+    target_email: str
+    role: str | None = None
+
+
 class Vote(BaseModel):
     token: str
     question_id: int
@@ -1836,7 +1846,7 @@ def register(r: Registration):
 def login(req: LoginRequest):
     with db() as conn:
         row = conn.execute(
-            "SELECT token, nom, password_hash FROM identities WHERE email=?",
+            "SELECT token, nom, password_hash, role FROM identities WHERE email=?",
             (req.email,),
         ).fetchone()
     if not row or not row["password_hash"]:
@@ -1852,7 +1862,14 @@ def login(req: LoginRequest):
     # sans ça la page Voter serait cassée pour quasi tout le monde. Aucun pouvoir nouveau accordé
     # : l'utilisateur est déjà propriétaire légitime de ce token en s'étant authentifié par
     # mot de passe (c'est la clé primaire de sa propre ligne dans identities).
-    return {"session_token": session_token, "token": row["token"], "nom": row["nom"], "email": req.email}
+    # "role" (2026-08-03, voix Admin/Mairie) : None pour l'immense majorité des comptes (citoyen
+    # implicite) — sert au frontend UNIQUEMENT à savoir s'il faut afficher le lien "Rôles" dans la
+    # nav, jamais utilisé côté serveur comme preuve d'autorisation (chaque route Admin revérifie
+    # le rôle en base via _require_admin, le localStorage n'est qu'un affichage).
+    return {
+        "session_token": session_token, "token": row["token"], "nom": row["nom"],
+        "email": req.email, "role": row["role"],
+    }
 
 
 @app.post("/logout")
@@ -1860,6 +1877,28 @@ def logout(req: LogoutRequest):
     with db() as conn:
         conn.execute("UPDATE identities SET session_token=NULL WHERE session_token=?", (req.session_token,))
     return {"ok": True}
+
+
+@app.post("/admin/roles/list")
+def admin_roles_list(req: AdminRolesListRequest):
+    """Voix Admin/Mairie (2026-08-03, étape 2/6) : réservé aux comptes Admin — annuaire complet
+    (email, nom, téléphone, role) de tous les comptes Admin/Mairie, base de la page de gestion
+    des rôles. La restriction "un Mairie ne voit que la liste des Mairie" (étape 3, annuaires)
+    utilisera list_privileged_accounts() avec un filtrage différent, pas cette route (réservée
+    Admin seul)."""
+    _require_admin(req.session_token)
+    return {"accounts": list_privileged_accounts()}
+
+
+@app.post("/admin/roles/set")
+def admin_roles_set(req: AdminRolesSetRequest):
+    """SEUL endpoint qui modifie le rôle d'un compte — réservé Admin (voir _require_admin).
+    role=null retire tout privilège."""
+    _require_admin(req.session_token)
+    try:
+        return set_account_role(req.target_email, req.role)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/change-password")
@@ -1968,6 +2007,55 @@ def _require_identity(session_token: str) -> str:
     if not row:
         raise HTTPException(401, "Session invalide.")
     return row["token"]
+
+
+def _require_admin(session_token: str) -> str:
+    """Voix Admin/Mairie (2026-08-03) : comme _require_identity, mais exige en plus role='admin'
+    sur le compte — 403 (pas 401, la session EST valide) si un compte citoyen ou mairie tente
+    d'appeler une route réservée à l'Admin. Utilisé par toutes les routes /admin/roles/*."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT token, role FROM identities WHERE session_token=?", (session_token,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(401, "Session invalide.")
+    if row["role"] != "admin":
+        raise HTTPException(403, "Réservé aux comptes Admin.")
+    return row["token"]
+
+
+def list_privileged_accounts() -> list[dict]:
+    """Lecture pure : tous les comptes ayant un rôle Admin ou Mairie (email, nom, role) —
+    l'annuaire complet vu par un Admin (voir wiki themes:admin-mairie). Le filtrage "un compte
+    Mairie ne voit que les comptes Mairie, pas les coordonnées Admin" se fait à l'appelant
+    (endpoint), pas ici — cette fonction reste la source de vérité brute, réutilisée par
+    l'étape 3 (annuaires)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT email, nom, telephone, role FROM identities WHERE role IN ('admin', 'mairie') "
+            "ORDER BY role, nom"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_account_role(target_email: str, role: str | None) -> dict:
+    """SEUL point d'écriture du rôle d'un compte (2026-08-03) — appelé uniquement par un Admin
+    (voir _require_admin dans l'endpoint). role=None retire tout privilège (retour au citoyen
+    implicite). Pas de garde-fou "un Admin ne peut pas se retirer lui-même son propre rôle" —
+    volontairement simple pour l'instant (le bootstrap reste toujours possible à la main en base
+    si jamais plus aucun Admin n'existe, cas limite qui n'est pas apparu en usage réel)."""
+    if role not in (None, "admin", "mairie"):
+        raise ValueError("rôle invalide, doit être 'admin', 'mairie' ou absent")
+    target_email = target_email.strip()
+    with db() as conn:
+        row = conn.execute("SELECT token FROM identities WHERE email=?", (target_email,)).fetchone()
+        if row is None:
+            raise ValueError(f"aucun compte avec l'email {target_email}")
+        conn.execute("UPDATE identities SET role=? WHERE token=?", (role, row["token"]))
+        updated = conn.execute(
+            "SELECT email, nom, role FROM identities WHERE token=?", (row["token"],)
+        ).fetchone()
+    return dict(updated)
 
 
 @app.post("/chat")

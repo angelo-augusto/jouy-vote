@@ -220,6 +220,23 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   </details>
 </div>
 
+<div class="card hidden" id="pageRoles">
+  <h2>Gestion des rôles</h2>
+  <p class="info">Réservé aux comptes Admin. Voir la charte de rôles sur le wiki développement.</p>
+  <div id="rolesMsg" class="msg"></div>
+  <div id="rolesList"></div>
+  <hr>
+  <label>Email du compte</label>
+  <input type="email" id="rolesTargetEmail" placeholder="email@exemple.fr">
+  <label>Rôle à attribuer</label>
+  <select id="rolesTargetRole">
+    <option value="admin">Admin</option>
+    <option value="mairie">Mairie</option>
+    <option value="">Retirer le rôle (citoyen)</option>
+  </select>
+  <button class="btn-primary" id="rolesSetBtn">Appliquer</button>
+</div>
+
 <script>
 const API = '';
 
@@ -235,11 +252,12 @@ const ROUTES = {
   '/compte': 'Compte',
   '/forum': 'Forum',
   '/mon-activite': 'MonActivite',
+  '/admin/roles': 'Roles',
 };
 // "Forum" volontairement ABSENT de cette liste : page publique en lecture (2026-07-26, priorité 1
 // développeur), consultable sans compte — seule "MonActivite" (données propres à l'utilisateur
 // connecté) nécessite une session, comme le reste des pages ci-dessous.
-const AUTH_REQUIRED = ['Vote', 'Assistant', 'Parrainer', 'Compte', 'MonActivite', 'Forum'];
+const AUTH_REQUIRED = ['Vote', 'Assistant', 'Parrainer', 'Compte', 'MonActivite', 'Forum', 'Roles'];
 
 function isLoggedIn() {
   return !!localStorage.getItem('session_token');
@@ -298,6 +316,12 @@ function renderNav() {
       '<a data-link href="/login">Connexion</a>';
     return;
   }
+  // Lien "Rôles" (2026-08-03, voix Admin) : simple confort d'affichage, PAS une frontière de
+  // sécurité — un citoyen qui devine l'URL /admin/roles se heurte de toute façon au 403 serveur
+  // (_require_admin), ce lien n'existe que pour ne pas exposer une fonctionnalité inutile aux
+  // 99% de comptes qui n'y ont pas accès.
+  const rolesLink = localStorage.getItem('user_role') === 'admin'
+    ? '<a data-link href="/admin/roles">Rôles</a>' : '';
   nav.innerHTML =
     '<a data-link href="/">🏠 Accueil</a>' +
     '<a data-link href="/vote">Voter</a>' +
@@ -306,6 +330,7 @@ function renderNav() {
     '<a data-link href="/mon-activite">Mon activité</a>' +
     '<a data-link href="/parrainer">Parrainer</a>' +
     '<a data-link href="/compte">Mon compte</a>' +
+    rolesLink +
     '<span class="spacer"></span>' +
     '<a id="navLogoutLink">Déconnexion</a>';
   document.getElementById('navLogoutLink').addEventListener('click', logout);
@@ -344,6 +369,7 @@ function render() {
     resetVoteTokenDisplay();
     loadMyPseudoLogoStatus();
   }
+  else if (pageName === 'Roles') loadRolesPage();
 }
 
 // ---------- accueil ----------
@@ -368,6 +394,11 @@ async function login() {
     localStorage.setItem('user_nom', data.nom);
     localStorage.setItem('user_email', data.email);
     if (data.token) localStorage.setItem('user_token', data.token);
+    // "role" (2026-08-03, voix Admin/Mairie) : uniquement pour savoir s'il faut afficher le lien
+    // "Rôles" dans la nav — chaque route Admin revérifie le rôle côté serveur (_require_admin),
+    // ce localStorage n'a aucune valeur d'autorisation réelle.
+    if (data.role) localStorage.setItem('user_role', data.role);
+    else localStorage.removeItem('user_role');
     go('/compte');
   } catch (e) {
     showMsg('loginMsg', e.message, 'error');
@@ -424,6 +455,7 @@ async function logout() {
   localStorage.removeItem('user_nom');
   localStorage.removeItem('user_email');
   localStorage.removeItem('user_token');
+  localStorage.removeItem('user_role');
   go('/');
 }
 
@@ -1999,8 +2031,48 @@ document.getElementById('chatConfirmSaveBtn').addEventListener('click', confirmS
 document.getElementById('chatCancelSaveBtn').addEventListener('click', () => document.getElementById('chatSummaryProposal').classList.add('hidden'));
 document.getElementById('referralSubmitBtn').addEventListener('click', sendReferralInvite);
 document.getElementById('voteTokenToggleBtn').addEventListener('click', toggleVoteToken);
+// ---------- gestion des rôles (voix Admin, 2026-08-03) ----------
+async function loadRolesPage() {
+  const session_token = localStorage.getItem('session_token');
+  const listEl = document.getElementById('rolesList');
+  listEl.innerHTML = '<p class="info">Chargement…</p>';
+  try {
+    const data = await api('/admin/roles/list', { session_token });
+    if (data.accounts.length === 0) {
+      listEl.innerHTML = '<p class="info">Aucun compte Admin ou Mairie pour l\'instant.</p>';
+      return;
+    }
+    listEl.innerHTML = '';
+    for (const a of data.accounts) {
+      const p = document.createElement('p');
+      p.textContent = a.nom + ' (' + a.email + ') — ' + (a.role === 'admin' ? 'Admin' : 'Mairie');
+      listEl.appendChild(p);
+    }
+  } catch (e) {
+    // 403 attendu si l'utilisateur a perdu son rôle Admin entre-temps (autre onglet, autre
+    // Admin) — même page affichée à tous, la vraie barrière reste le serveur.
+    listEl.innerHTML = '';
+    showMsg('rolesMsg', e.message, 'error');
+  }
+}
+async function setAccountRole() {
+  const session_token = localStorage.getItem('session_token');
+  const target_email = document.getElementById('rolesTargetEmail').value.trim();
+  const roleValue = document.getElementById('rolesTargetRole').value;
+  const role = roleValue === '' ? null : roleValue;
+  if (!target_email) { showMsg('rolesMsg', 'Email manquant.', 'error'); return; }
+  try {
+    const data = await api('/admin/roles/set', { session_token, target_email, role });
+    showMsg('rolesMsg', data.nom + ' (' + data.email + ') a désormais le rôle : ' + (data.role || 'citoyen') + '.', 'success');
+    document.getElementById('rolesTargetEmail').value = '';
+    loadRolesPage();
+  } catch (e) {
+    showMsg('rolesMsg', e.message, 'error');
+  }
+}
 document.getElementById('changePasswordBtn').addEventListener('click', changePassword);
 document.getElementById('unsubscribeBtn').addEventListener('click', unsubscribe);
+document.getElementById('rolesSetBtn').addEventListener('click', setAccountRole);
 
 render();
 </script>
