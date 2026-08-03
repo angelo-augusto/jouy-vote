@@ -3993,6 +3993,44 @@ async def test_run_turn_does_not_force_repeat_citation_of_already_mentioned_pseu
 
 
 @pytest.mark.anyio
+async def test_run_turn_resolves_placeholder_in_second_say_user_of_same_batch(mocked_openrouter_structured):
+    """Régression (2026-08-03, signalé par Angelo en conditions réelles sur un "bonjour" en
+    conversation fraîche : "laisse-moi te proposer une première idée : [BLANC] tu peux
+    l'accepter..."). Variante du bug #7/#10 non couverte par leurs fixs : le modèle peut mettre
+    DEUX say_user dans le MÊME lot après une action (accueil + proposition, chacun référençant
+    {{résultat}}), pas juste un seul. Après avoir traité le 1er say_user, previous_result était
+    remis à None avant le 2e — donc son "{{résultat}}" n'avait plus rien à substituer et se
+    faisait retirer proprement (pas de fuite de syntaxe technique, mais un vrai trou dans la
+    phrase, pire pour l'utilisateur qu'une citation répétée). Fix : previous_result reste
+    disponible pour un {{résultat}} EXPLICITE dans un say_user suivant du même lot — cited_displays
+    (bug #11) continue de protéger contre une citation FORCÉE non désirée, ce n'est pas le même
+    mécanisme."""
+    import json
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({
+        "actions": [
+            {"action": "propose_pseudo_candidates", "index": 0, "appropriate": True},
+            {"action": "say_user", "text": "Bienvenue ! Laisse-moi te proposer une première idée : {{résultat}}."},
+            {"action": "say_user", "text": "Que penses-tu de {{résultat}} ? Tu peux l'accepter ou en demander une autre."},
+        ]
+    }))
+
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "bonjour"}],
+        {"identity_token": "tok-double-say-user", "taken_pseudos": set()},
+    )
+    assert result["error"] is None
+    assert "{{résultat}}" not in result["replies"][0]
+    assert "{{résultat}}" not in result["replies"][1]
+    # Le 2e say_user doit contenir le même nom de pseudo que le 1er, pas un trou vide.
+    display = result["actions_log"][0]["result"]["display"]
+    assert display in result["replies"][0]
+    assert display in result["replies"][1]
+
+
+@pytest.mark.anyio
 async def test_run_turn_forces_error_message_when_say_user_ignores_available_false(mocked_openrouter_structured):
     """Régression bug réel #12 (2026-07-25, trouvé EN RÉEL en testant propose_opinion, phase 3 du
     forum) : propose_opinion a renvoyé available=false + error="fil introuvable (ou pas encore

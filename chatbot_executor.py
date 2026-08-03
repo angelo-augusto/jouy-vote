@@ -365,7 +365,17 @@ def run_turn(
                     cited_displays.add(display_value)
                 replies.append(text)
                 actions_log.append({"action": action, "text": text})
-                previous_result = None
+                # PAS de "previous_result = None" ici (2026-08-03, bug réel signalé par Angelo :
+                # "laisse-moi te proposer une première idée : [BLANC] tu peux l'accepter...").
+                # Le modèle met parfois DEUX say_user dans le MÊME lot après une seule action
+                # (accueil + proposition), chacun avec son propre "{{résultat}}" — remettre
+                # previous_result à None après le 1er say_user privait le 2e de toute valeur à
+                # substituer, retirant proprement le token mais laissant un vrai trou dans la
+                # phrase ("de ? Tu peux l'accepter" au lieu de "de Nuage blanc ?"). En gardant
+                # previous_result, un {{résultat}} EXPLICITE dans un say_user suivant se résout
+                # normalement — cited_displays (bug #11) reste le garde-fou séparé qui empêche
+                # une citation FORCÉE non désirée sur un say_user de suivi qui n'a pas demandé de
+                # substitution, ces deux mécanismes ne se marchent pas dessus.
             else:
                 result = _run_action(fn, action, cmd, ctx)
                 actions_log.append({"action": action, "result": result})
