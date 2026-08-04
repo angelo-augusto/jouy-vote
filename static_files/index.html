@@ -365,7 +365,18 @@ async function api(path, body) {
     body: JSON.stringify(body),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.detail || 'Erreur serveur');
+  if (!res.ok) {
+    // Bug réel #23 (2026-08-04, signalé par Angelo : chat "bloqué" sans suite après une 1re
+    // réponse) : data.detail est une CHAÎNE pour une HTTPException (ex: "Session invalide."),
+    // mais une LISTE d'erreurs structurées pour un 422 de validation Pydantic (schéma du corps de
+    // requête invalide, ex: session_token devenu null) — new Error(liste) donnait un message
+    // technique illisible ("[object Object]") au lieu d'un texte présentable. Rejoint plutôt les
+    // messages de chaque erreur.
+    const detail = Array.isArray(data.detail)
+      ? data.detail.map(d => d.msg || JSON.stringify(d)).join(' ')
+      : data.detail;
+    throw new Error(detail || 'Erreur serveur');
+  }
   return data;
 }
 
@@ -688,6 +699,16 @@ async function sendChatMessage() {
   const message = input.value.trim();
   if (!message) return;
   const session_token = localStorage.getItem('session_token');
+  // Bug réel #23 (2026-08-04) : sans ce garde-fou (déjà présent ailleurs — unsubscribe/
+  // changePassword — mais jamais appliqué ici), un session_token devenu absent (ex: déconnexion
+  // dans un autre onglet, localStorage partagé sur la même origine) envoyait quand même la requête
+  // — 422 de validation Pydantic (session_token: null), avec un message d'erreur peu clair et la
+  // conversation qui semble juste "ne plus répondre". Détection en amont + redirection propre.
+  if (!session_token) {
+    go('/login');
+    showMsg('loginMsg', 'Ta session a expiré ou a été fermée ailleurs — reconnecte-toi.', 'error');
+    return;
+  }
   const historyBefore = chatHistory.slice();
   chatHistory.push({ role: 'user', content: message });
   chatPending = true;
@@ -1769,6 +1790,14 @@ function buildInlineReactWidget(contextRef, onReactionUpdate, targetLabel) {
     const message = input.value.trim();
     if (!message) return;
     const session_token = localStorage.getItem('session_token');
+    // Bug réel #23 (2026-08-04) : même garde-fou que sendChatMessage — session_token absent (ex:
+    // déconnexion dans un autre onglet, localStorage partagé) envoyait quand même la requête,
+    // 422 illisible plutôt qu'une redirection claire.
+    if (!session_token) {
+      go('/login');
+      showMsg('loginMsg', 'Ta session a expiré ou a été fermée ailleurs — reconnecte-toi.', 'error');
+      return;
+    }
     const historyBefore = chatHistory.slice();
     chatHistory.push({ role: 'user', content: message, contextRef });
     inlinePending = true;
