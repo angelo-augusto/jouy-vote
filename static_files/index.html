@@ -358,6 +358,14 @@ function clearAllMessages() {
   document.querySelectorAll('.msg').forEach(e => { e.className = 'msg'; e.textContent = ''; });
 }
 
+// Troncature d'AFFICHAGE du vote_token (2026-08-04, décidé le 02/08, calcul de collision
+// ~1.8e-6 pour 2000 votants, voir architecture-technique) : le hash complet (64 caractères hex)
+// reste stocké/calculé côté serveur — seule sa présentation à l'écran est raccourcie, pour ne
+// jamais afficher un identifiant plus long que nécessaire à la vérification individuelle.
+function truncateToken(t) {
+  return t ? t.slice(0, 10) : t;
+}
+
 async function api(path, body) {
   const res = await fetch(API + path, {
     method: 'POST',
@@ -640,7 +648,7 @@ async function castVote(questionId) {
   }
   try {
     const data = await api('/vote', { token, question_id: questionId, choix });
-    showMsg('voteMsg', 'Vote enregistré. Votre reçu (à conserver pour vérifier votre vote plus tard) : ' + data.vote_token, 'success');
+    showMsg('voteMsg', 'Vote enregistré. Votre reçu (à conserver pour vérifier votre vote plus tard) : ' + truncateToken(data.vote_token), 'success');
   } catch (e) {
     showMsg('voteMsg', e.message, 'error');
   }
@@ -2119,7 +2127,7 @@ async function toggleVoteToken() {
     try {
       const data = await api('/my-vote-token', { session_token });
       revealedVoteToken = data.vote_token;
-      value.textContent = revealedVoteToken;
+      value.textContent = truncateToken(revealedVoteToken);
       masked.classList.add('hidden');
       value.classList.remove('hidden');
       explain.classList.remove('hidden');
