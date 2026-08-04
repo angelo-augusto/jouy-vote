@@ -145,6 +145,15 @@ def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )"""
         )
+        # "options" (2026-08-04, faille A signalée par la revue Opus du 04/08) : liste JSON des
+        # réponses possibles pour cette question (ex: '["Oui", "Non"]") — avant ce champ, "choix"
+        # était un TEXT libre côté /vote, sans aucune validation serveur ("Oui"/"oui"/"Oui "
+        # devenaient 3 buckets distincts dans le tally). ALTER TABLE idempotent, même pattern que
+        # les autres migrations de ce fichier (voir threads.category plus haut).
+        try:
+            conn.execute("ALTER TABLE questions ADD COLUMN options TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.execute(
             """CREATE TABLE IF NOT EXISTS votes (
                 vote_token TEXT NOT NULL,
@@ -671,6 +680,9 @@ class NewQuestion(BaseModel):
     admin_key: str
     titre: str
     description: str = ""
+    # Faille A (revue Opus 04/08) : jeu de réponses fermé, obligatoire — plus de "choix" texte
+    # libre côté /vote. Validé dans create_question (>=2 options, non vides, distinctes).
+    options: list[str]
 
 
 class QuestionUpdate(BaseModel):
@@ -2765,19 +2777,29 @@ def unsubscribe(req: UnsubscribeRequest):
 def list_questions():
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, titre, description FROM questions WHERE active=1 ORDER BY id DESC"
+            "SELECT id, titre, description, options FROM questions WHERE active=1 ORDER BY id DESC"
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [
+        {"id": r["id"], "titre": r["titre"], "description": r["description"], "options": json.loads(r["options"])}
+        for r in rows
+    ]
 
 
 @app.post("/questions")
 def create_question(q: NewQuestion):
     if q.admin_key != ADMIN_KEY:
         raise HTTPException(403, "clé admin invalide")
+    # Faille A (revue Opus 04/08) : jeu de réponses fermé obligatoire — au moins 2 options non
+    # vides et distinctes une fois nettoyées, sinon /vote n'aurait rien de solide à valider.
+    cleaned_options = [o.strip() for o in q.options if o.strip()]
+    if len(cleaned_options) < 2:
+        raise HTTPException(400, "il faut au moins 2 options de réponse non vides")
+    if len(set(cleaned_options)) != len(cleaned_options):
+        raise HTTPException(400, "les options de réponse doivent être distinctes")
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO questions (titre, description) VALUES (?, ?)",
-            (q.titre, q.description),
+            "INSERT INTO questions (titre, description, options) VALUES (?, ?, ?)",
+            (q.titre, q.description, json.dumps(cleaned_options)),
         )
         return {"id": cur.lastrowid}
 
@@ -2805,6 +2827,19 @@ def vote(v: Vote):
         ).fetchone()
         if not exists:
             raise HTTPException(404, "jeton inconnu")
+        # Failles A/B (revue Opus 04/08) : /vote ne vérifiait ni l'existence de la question (pas
+        # de FK — foreign_keys off par défaut en SQLite) ni son statut actif, et acceptait
+        # n'importe quel "choix" en texte libre. Un `question_id` inexistant ou une question
+        # fermée était accepté silencieusement, restitué ensuite par /results.
+        question = conn.execute(
+            "SELECT active, options FROM questions WHERE id=?", (v.question_id,)
+        ).fetchone()
+        if not question:
+            raise HTTPException(404, "question introuvable")
+        if not question["active"]:
+            raise HTTPException(400, "cette question n'est plus ouverte au vote")
+        if v.choix not in json.loads(question["options"]):
+            raise HTTPException(400, "choix invalide pour cette question")
         already = conn.execute(
             "SELECT 1 FROM votes WHERE vote_token=? AND question_id=?",
             (vote_token, v.question_id),

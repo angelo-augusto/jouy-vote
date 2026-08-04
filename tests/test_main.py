@@ -40,7 +40,7 @@ def client():
 async def admin_question(client):
     resp = await client.post(
         "/questions",
-        json={"admin_key": ADMIN_KEY, "titre": "Test Question"},
+        json={"admin_key": ADMIN_KEY, "titre": "Test Question", "options": ["Oui", "Non"]},
     )
     data = resp.json()
     return data["id"]
@@ -481,7 +481,7 @@ async def test_join_does_not_link_identity_to_vote(client, admin_question):
 async def test_create_question_admin_key_accept(client):
     resp = await client.post(
         "/questions",
-        json={"admin_key": ADMIN_KEY, "titre": "Admin Question"},
+        json={"admin_key": ADMIN_KEY, "titre": "Admin Question", "options": ["Oui", "Non"]},
     )
     assert resp.status_code == 200
     assert "id" in resp.json()
@@ -491,16 +491,49 @@ async def test_create_question_admin_key_accept(client):
 async def test_create_question_admin_key_reject(client):
     resp = await client.post(
         "/questions",
-        json={"admin_key": "wrong-key", "titre": "Should not appear"},
+        json={"admin_key": "wrong-key", "titre": "Should not appear", "options": ["Oui", "Non"]},
     )
     assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_create_question_rejects_fewer_than_2_options(client):
+    """Régression faille A (revue Opus 04/08) : un jeu de réponses fermé nécessite au moins
+    2 options — sans quoi il n'y a rien à choisir."""
+    resp = await client.post(
+        "/questions",
+        json={"admin_key": ADMIN_KEY, "titre": "Une seule option", "options": ["Oui"]},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_create_question_rejects_blank_and_duplicate_options(client):
+    resp = await client.post(
+        "/questions",
+        json={"admin_key": ADMIN_KEY, "titre": "Options vides", "options": ["Oui", "  ", ""]},
+    )
+    assert resp.status_code == 400
+    resp = await client.post(
+        "/questions",
+        json={"admin_key": ADMIN_KEY, "titre": "Options dupliquées", "options": ["Oui", "Oui"]},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_list_questions_includes_options(client, admin_question):
+    resp = await client.get("/questions")
+    assert resp.status_code == 200
+    question = next(q for q in resp.json() if q["id"] == admin_question)
+    assert question["options"] == ["Oui", "Non"]
 
 
 @pytest.mark.anyio
 async def test_patch_question_deactivate(client):
     resp = await client.post(
         "/questions",
-        json={"admin_key": ADMIN_KEY, "titre": "To deactivate"},
+        json={"admin_key": ADMIN_KEY, "titre": "To deactivate", "options": ["Oui", "Non"]},
     )
     qid = resp.json()["id"]
 
@@ -513,6 +546,40 @@ async def test_patch_question_deactivate(client):
     questions = await client.get("/questions")
     ids = [q["id"] for q in questions.json()]
     assert qid not in ids
+
+
+@pytest.mark.anyio
+async def test_vote_rejects_choix_not_in_options(client, admin_question, registered_user):
+    """Régression faille A (revue Opus 04/08) : avant validation serveur, "Oui", "oui", "Oui "
+    créaient 3 buckets distincts dans le tally — n'importe quel texte libre était accepté."""
+    token = registered_user["token"]
+    resp = await client.post(
+        "/vote", json={"token": token, "question_id": admin_question, "choix": "Peut-être"}
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_vote_rejects_unknown_question_id(client, registered_user):
+    """Régression faille B (revue Opus 04/08) : /vote ne vérifiait pas que la question existe
+    (pas de FK — foreign_keys off par défaut en SQLite)."""
+    token = registered_user["token"]
+    resp = await client.post(
+        "/vote", json={"token": token, "question_id": 999999, "choix": "Oui"}
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_vote_rejects_inactive_question(client, admin_question, registered_user):
+    """Régression faille B (revue Opus 04/08) : /vote ne vérifiait pas questions.active — on
+    pouvait voter sur une question fermée."""
+    await client.patch(f"/questions/{admin_question}", json={"admin_key": ADMIN_KEY, "active": False})
+    token = registered_user["token"]
+    resp = await client.post(
+        "/vote", json={"token": token, "question_id": admin_question, "choix": "Oui"}
+    )
+    assert resp.status_code == 400
 
 
 @pytest.fixture

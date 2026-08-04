@@ -609,7 +609,14 @@ async function loadVoteQuestions() {
         <h3>${q.titre}</h3>
         ${q.description ? '<p class="info">' + q.description + '</p>' : ''}
         <label>Votre choix</label>
-        <input type="text" id="voteChoix${q.id}" placeholder="Oui / Non / ...">
+        <div id="voteChoix${q.id}">
+          ${q.options.map(o => `
+            <label style="display:block; font-weight:normal; margin:.2em 0;">
+              <input type="radio" name="voteChoix${q.id}" value="${o.replace(/"/g, '&quot;')}">
+              ${o}
+            </label>
+          `).join('')}
+        </div>
         <button class="btn-primary" onclick="castVote(${q.id})">Voter</button>
         <button class="btn-link" onclick="loadResults(${q.id})">Voir les résultats vérifiables</button>
         <div id="voteResult${q.id}" style="margin-top:.6em; font-size:.85em;"></div>
@@ -621,12 +628,16 @@ async function loadVoteQuestions() {
 }
 async function castVote(questionId) {
   const token = localStorage.getItem('user_token');
-  const choix = document.getElementById('voteChoix' + questionId).value.trim();
+  const checked = document.querySelector('input[name="voteChoix' + questionId + '"]:checked');
+  const choix = checked ? checked.value : '';
   if (!token) {
     showMsg('voteMsg', "Votre jeton de vote n'est pas disponible sur cet appareil — reconnectez-vous pour le récupérer.", 'error');
     return;
   }
-  if (!choix) return;
+  if (!choix) {
+    showMsg('voteMsg', 'Choisis une réponse avant de voter.', 'error');
+    return;
+  }
   try {
     const data = await api('/vote', { token, question_id: questionId, choix });
     showMsg('voteMsg', 'Vote enregistré. Votre reçu (à conserver pour vérifier votre vote plus tard) : ' + data.vote_token, 'success');
