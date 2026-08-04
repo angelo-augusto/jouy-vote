@@ -2867,8 +2867,14 @@ def results(question_id: int):
         ).fetchall()
         # Liste complète (vote_token, choix), pas juste le total agrégé : vérifiabilité
         # individuelle (principe Helios) — n'importe qui peut recompter et un électeur peut
-        # retrouver sa propre ligne via le vote_token reçu à l'issue de /vote. Aucun risque pour
-        # l'anonymat : le jeton ne permet pas de remonter à l'identité (voir compute_vote_token).
+        # retrouver sa propre ligne via le vote_token reçu à l'issue de /vote. Aucun risque de
+        # remonter à l'identité (le jeton ne permet pas ça, voir compute_vote_token) — MAIS
+        # (revue Opus 04/08, faille C) vote_token est STABLE par identité pour TOUTES les
+        # questions, donc quiconque recoupe plusieurs /results peut reconstruire le profil de
+        # vote complet d'un électeur (même jeton d'une question à l'autre). Décision d'Angelo
+        # (04/08) : garder le jeton global en connaissance de ce risque plutôt que dériver un
+        # jeton distinct par question (ce qui casserait le "reçu unique" par personne) — pas un
+        # oubli, un arbitrage assumé. Voir [[themes:anonymat]] pour la documentation complète.
         detail = conn.execute(
             "SELECT vote_token, choix FROM votes WHERE question_id=? ORDER BY vote_token",
             (question_id,),
