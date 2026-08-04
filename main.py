@@ -5,6 +5,7 @@ l'anonymat du vote tout en gardant une vérification de résidence déclarative.
 """
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -118,8 +119,13 @@ def hash_password(password: str) -> str:
 
 
 def check_password(password: str, stored: str) -> bool:
+    # Faille F (revue Opus 04/08) : comparaison à temps constant plutôt que == — un hex compté
+    # caractère par caractère par == peut en théorie fuiter un timing exploitable, même si le
+    # signal réel est marginal sur un hash SHA256 déjà uniformément distribué. Correction par
+    # principe, pas suite à un incident constaté.
     salt, h = stored.split(':', 1)
-    return hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100_000).hex() == h
+    computed = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100_000).hex()
+    return hmac.compare_digest(computed, h)
 
 
 def init_db():
