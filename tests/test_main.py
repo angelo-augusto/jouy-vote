@@ -29,6 +29,11 @@ def reset_db():
         conn.execute("DELETE FROM questions")
         conn.execute("DELETE FROM identities")
         conn.execute("DELETE FROM pseudos")
+        # rate_limit_events (2026-08-04, faille E) : sans ce reset, tous les tests d'un même run
+        # partagent la même "IP" (ASGITransport n'a pas de vrai client réseau) et s'accumulent
+        # dans la même fenêtre glissante — le 6e test à appeler /register dans la session finirait
+        # par se faire jeter en 429, alors que le test lui-même n'a rien fait d'anormal.
+        conn.execute("DELETE FROM rate_limit_events")
 
 
 @pytest.fixture
@@ -80,6 +85,42 @@ async def test_register_double_rejected(client):
     resp2 = await client.post("/register", json=body)
     assert resp2.status_code == 409
     assert "déjà inscrite" in resp2.json().get("detail", "")
+
+
+@pytest.mark.anyio
+async def test_register_double_rejected_with_whitespace_variant(client):
+    """Régression faille D (revue Opus 04/08) : "Jean Dupont" / "Jean  Dupont" (double espace) /
+    "Jean Dupont " (espace de fin) produisaient 3 hashes DIFFÉRENTS avec l'ancien .strip().lower()
+    seul — contournement trivial de l'UNIQUE sur identity_hash."""
+    body1 = {"nom": "Jean Dupont", "adresse": "1 Rue de la Mairie", "email": "jean1@test.fr", "password": PASSWORD}
+    resp1 = await client.post("/register", json=body1)
+    assert resp1.status_code == 200
+    body2 = {"nom": "Jean  Dupont ", "adresse": " 1  Rue de la Mairie", "email": "jean2@test.fr", "password": PASSWORD}
+    resp2 = await client.post("/register", json=body2)
+    assert resp2.status_code == 409
+
+
+@pytest.mark.anyio
+async def test_register_double_rejected_with_punctuation_and_accent_variant(client):
+    """Même faille D : "Jean-Dupont" vs "Jean Dupont" (ponctuation), "Léa" vs "Lea" (accent) ne
+    doivent pas non plus contourner l'UNIQUE."""
+    body1 = {"nom": "Léa Martin", "adresse": "2 Rue Neuve", "email": "lea1@test.fr", "password": PASSWORD}
+    resp1 = await client.post("/register", json=body1)
+    assert resp1.status_code == 200
+    body2 = {"nom": "Lea, Martin!", "adresse": "2, Rue Neuve.", "email": "lea2@test.fr", "password": PASSWORD}
+    resp2 = await client.post("/register", json=body2)
+    assert resp2.status_code == 409
+
+
+def test_normalize_identity_field_collapses_whitespace_punctuation_and_accents():
+    """Unitaire direct sur la fonction de normalisation elle-même."""
+    from main import _normalize_identity_field
+
+    assert _normalize_identity_field("Jean Dupont") == _normalize_identity_field("Jean  Dupont ")
+    assert _normalize_identity_field("Jean-Dupont") == _normalize_identity_field("Jean Dupont")
+    assert _normalize_identity_field("Léa") == _normalize_identity_field("Lea")
+    # des noms réellement différents ne doivent PAS être confondus (pas de sur-normalisation)
+    assert _normalize_identity_field("Jean Dupont") != _normalize_identity_field("Jean Dupond")
 
 
 @pytest.mark.anyio
@@ -4747,16 +4788,28 @@ async def test_mairie_directory_endpoint_allows_admin_account(client, admin_user
 
 @pytest.mark.anyio
 async def test_admin_key_not_set_prevents_start():
+    """2026-08-04 : `importlib.reload(main)` mute le module `main` EN PLACE — le reload est
+    interrompu par l'exception attendue juste APRÈS avoir recalculé `main.ADMIN_KEY = None`
+    (depuis l'env var retirée, ligne "ADMIN_KEY = os.environ.get(...)" avant le raise) : sans
+    restauration explicite, main.ADMIN_KEY reste à None pour TOUS les tests suivants du même run.
+    Bug d'isolation latent, resté invisible tant qu'aucun test après celui-ci dans le fichier
+    n'exerçait de comportement dépendant d'ADMIN_KEY — exposé par les nouveaux tests de
+    rate-limiting ajoutés en fin de fichier (test_vote_rate_limited, via le fixture admin_question
+    qui poste sur /questions avec ADMIN_KEY). Restauration CIBLÉE de l'attribut plutôt qu'un 2e
+    `importlib.reload(main)` complet : un reload ré-exécute tout le module, y compris son
+    éventuelle init de DB, et risquerait de perturber la connexion `:memory:` partagée par le
+    reste de la suite — un simple `main.ADMIN_KEY = saved` suffit, c'est la seule chose que le
+    reload avorté a modifiée qui compte pour les tests suivants."""
     saved = os.environ.pop("JOUY_ADMIN_KEY", None)
     try:
         import importlib
-        import sys
 
         with pytest.raises(RuntimeError, match="JOUY_ADMIN_KEY"):
             importlib.reload(main)
     finally:
         if saved:
             os.environ["JOUY_ADMIN_KEY"] = saved
+            main.ADMIN_KEY = saved
 
 
 # ---------- scope des outils par contexte (revue Opus 04/08) ----------
@@ -4854,3 +4907,65 @@ async def test_chat_v2_scopes_onboarding_tools_when_no_pseudo_confirmed(client, 
     assert resp.status_code == 200
     expected = chatbot_actions.build_response_format(chatbot_actions.ONBOARDING_ACTIONS)
     assert captured["response_format"] == expected
+
+
+# ---------- rate-limiting anti-abus (faille E, revue Opus 04/08) ----------
+
+def test_client_ip_prefers_cf_connecting_ip_header():
+    """Unitaire direct : derrière le tunnel Cloudflare, request.client.host serait l'IP interne
+    du tunnel, jamais celle du visiteur — l'en-tête CF-Connecting-IP doit primer."""
+    from unittest.mock import MagicMock
+
+    from main import _client_ip
+
+    req = MagicMock()
+    req.headers = {"CF-Connecting-IP": "203.0.113.9", "X-Forwarded-For": "198.51.100.1"}
+    assert _client_ip(req) == "203.0.113.9"
+
+    req2 = MagicMock()
+    req2.headers = {"X-Forwarded-For": "198.51.100.1, 10.0.0.1"}
+    assert _client_ip(req2) == "198.51.100.1"
+
+    req3 = MagicMock()
+    req3.headers = {}
+    req3.client.host = "127.0.0.1"
+    assert _client_ip(req3) == "127.0.0.1"
+
+
+@pytest.mark.anyio
+async def test_login_rate_limited_after_repeated_attempts(client, registered_user):
+    """Régression faille E : aucun frein sur /login avant ce fix — brute-force de mot de passe
+    non limité côté appli."""
+    for _ in range(10):
+        await client.post("/login", json={"email": "alice@test.fr", "password": "wrong"})
+    resp = await client.post("/login", json={"email": "alice@test.fr", "password": PASSWORD})
+    assert resp.status_code == 429
+
+
+@pytest.mark.anyio
+async def test_login_rate_limit_is_per_ip_not_global(client, registered_user):
+    """Une IP différente (en-tête CF-Connecting-IP distinct) ne doit pas être bloquée par les
+    tentatives d'une autre — sinon un seul abuseur pourrait bloquer TOUT le monde."""
+    headers_a = {"CF-Connecting-IP": "203.0.113.1"}
+    headers_b = {"CF-Connecting-IP": "203.0.113.2"}
+    for _ in range(10):
+        await client.post("/login", json={"email": "alice@test.fr", "password": "wrong"}, headers=headers_a)
+    resp = await client.post("/login", json={"email": "alice@test.fr", "password": PASSWORD}, headers=headers_b)
+    assert resp.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_forgot_password_rate_limited(client):
+    for _ in range(5):
+        await client.post("/forgot-password", json={"email": "personne@test.fr"})
+    resp = await client.post("/forgot-password", json={"email": "personne@test.fr"})
+    assert resp.status_code == 429
+
+
+@pytest.mark.anyio
+async def test_vote_rate_limited(client, admin_question, registered_user):
+    token = registered_user["token"]
+    for _ in range(20):
+        await client.post("/vote", json={"token": "jeton-inconnu", "question_id": admin_question, "choix": "Oui"})
+    resp = await client.post("/vote", json={"token": token, "question_id": admin_question, "choix": "Oui"})
+    assert resp.status_code == 429

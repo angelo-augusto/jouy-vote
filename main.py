@@ -11,13 +11,14 @@ import re
 import secrets
 import sqlite3
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -385,6 +386,18 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_admin_intervention_debate_token ON admin_intervention_requests(debate_token)"
         )
+        # rate_limit_events (2026-08-04, faille E revue Opus) : brute-force/spam anti-abus sur
+        # /login, /register, /vote, /forgot-password — endpoints AVANT authentification, donc pas
+        # de debate_token/identité utilisable comme clé (contrairement à bug_reports/admin_
+        # intervention_requests ci-dessus, déjà rate-limités par identité) — clé par IP à la place.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS rate_limit_events (
+                ip TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_ip_endpoint ON rate_limit_events(ip, endpoint)")
     with db() as conn:
         # Type explicite par colonne (pas juste TEXT pour tout) : ADD COLUMN ne s'applique que
         # si la colonne n'existe pas encore, donc ceci ne corrige que les tables qui n'ont
@@ -691,8 +704,29 @@ class QuestionUpdate(BaseModel):
     active: bool
 
 
+def _normalize_identity_field(s: str) -> str:
+    """Faille D (revue Opus 04/08) : "Jean Dupont" / "Jean  Dupont" (double espace) / "Jean
+    Dupont " (espace de fin) produisaient 3 hashes DIFFÉRENTS avec le simple .strip().lower()
+    d'origine — contournement trivial de la contrainte UNIQUE sur identity_hash. Normalisation
+    renforcée : décomposition Unicode NFKD + retrait des accents (homoglyphes/variantes
+    diacritiques ne créent plus 2 identités), retrait de la ponctuation ("Jean-Dupont" ==
+    "Jean Dupont"), espaces multiples réduits à un seul. Correctif PARTIEL et assumé comme tel
+    (Opus) : ne règle pas le Sybil sur des noms réellement différents — seul le parrainage social
+    (voir themes:representation) fait rempart contre ça, cette fonction ne fait que fermer les
+    contournements purement typographiques."""
+    s = unicodedata.normalize("NFKD", s.strip().lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    # Ponctuation remplacée par un ESPACE, pas retirée (2026-08-04, trouvé en écrivant le test
+    # dédié) : un retrait pur collait les mots ("Jean-Dupont" -> "jeandupont"), ne matchant plus
+    # "Jean Dupont" -> "jean dupont" — la ponctuation doit se comporter comme un séparateur de
+    # mots, pas disparaître silencieusement.
+    s = re.sub(r"[^\w\s]", " ", s, flags=re.UNICODE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def compute_identity_hash(nom: str, adresse: str) -> str:
-    raw = f"{nom.strip().lower()}|{adresse.strip().lower()}"
+    raw = f"{_normalize_identity_field(nom)}|{_normalize_identity_field(adresse)}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -1523,6 +1557,42 @@ BUG_REPORT_RATE_LIMIT = 3
 ADMIN_INTERVENTION_RATE_LIMIT = 3
 
 
+def _client_ip(request: Request) -> str:
+    """Faille E (revue Opus 04/08) : IP réelle du visiteur, à utiliser comme clé de rate-limit sur
+    les endpoints AVANT authentification (pas de debate_token disponible à ce stade). Le service
+    tourne derrière un tunnel Cloudflare (voir infra) — request.client.host serait l'IP interne du
+    tunnel, pas celle du visiteur, d'où la préférence pour l'en-tête que Cloudflare y injecte.
+    Repli sur X-Forwarded-For (1er maillon) puis request.client.host si l'un ou l'autre manque
+    (ex: appel direct en local/tests, sans passer par le tunnel)."""
+    cf_ip = request.headers.get("CF-Connecting-IP")
+    if cf_ip:
+        return cf_ip
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "inconnu"
+
+
+def _enforce_rate_limit(request: Request, endpoint: str, limit: int, window_minutes: int = 15) -> None:
+    """Faille E (revue Opus 04/08) : aucun rate-limit n'existait sur /login, /register, /vote,
+    /forgot-password — brute-force de mot de passe et énumération non freinés côté appli. Même
+    principe que _recent_reports_count (compte glissant en base, pas un compteur en mémoire — ce
+    dernier ne survivrait pas à un redémarrage et se comporterait mal avec plusieurs workers),
+    mais clé par (IP, endpoint) plutôt que par identité, puisque ces 4 endpoints s'exécutent AVANT
+    toute authentification. Enregistre la tentative EN MÊME TEMPS que la vérification (pas après)
+    pour que même une tentative qui échoue plus loin dans l'endpoint compte dans la fenêtre —
+    sinon un mot de passe systématiquement faux ne serait jamais compté."""
+    ip = _client_ip(request)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM rate_limit_events WHERE ip=? AND endpoint=? AND created_at >= datetime('now', ?)",
+            (ip, endpoint, f"-{window_minutes} minutes"),
+        ).fetchone()
+        if row["cnt"] >= limit:
+            raise HTTPException(429, "Trop de tentatives récentes, réessaie dans quelques minutes.")
+        conn.execute("INSERT INTO rate_limit_events (ip, endpoint) VALUES (?, ?)", (ip, endpoint))
+
+
 def submit_bug_report(identity_token: str, description: str) -> dict:
     """SEUL point d'écriture + d'envoi réel pour un signalement de bug — appelé DIRECTEMENT par
     l'action LLM report_bug (chatbot_actions.py), pas via un clic de confirmation utilisateur.
@@ -1867,7 +1937,12 @@ def wiki_home_content():
 
 
 @app.post("/register")
-def register(r: Registration):
+def register(r: Registration, request: Request):
+    # limit=15 (pas 5) : un parrain qui invite jusqu'à REFERRAL_MAX=5 filleuls peut voir tous ses
+    # filleuls s'inscrire en rafale depuis le MÊME réseau (ex: session d'inscription en personne,
+    # tout le monde chez la même personne) — marge confortable au-delà des 5+1 (soi-même) minimum
+    # légitime, tout en restant loin d'un volume d'abus automatisé.
+    _enforce_rate_limit(request, "register", limit=15)
     # Le lien de parrainage EST le déclencheur d'inscription (pas une validation a posteriori
     # d'un compte déjà créé) : un invite_token valide, non consommé, dont l'email correspond
     # exactement, est requis tant que les inscriptions ne sont pas rouvertes globalement
@@ -1912,7 +1987,8 @@ def register(r: Registration):
 
 
 @app.post("/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
+    _enforce_rate_limit(request, "login", limit=10)
     with db() as conn:
         row = conn.execute(
             "SELECT token, nom, password_hash, role FROM identities WHERE email=?",
@@ -2730,7 +2806,8 @@ def chat_delete_summary(summary_id: int, req: ChatDeleteSummaryRequest):
 
 
 @app.post("/forgot-password")
-def forgot_password(req: ForgotPasswordRequest):
+def forgot_password(req: ForgotPasswordRequest, request: Request):
+    _enforce_rate_limit(request, "forgot-password", limit=5)
     # Réponse strictement identique que l'email existe ou non, et le token n'apparaît JAMAIS
     # dans la réponse HTTP (contrairement à l'ancienne version) : seul un envoi par email au
     # titulaire du compte donne accès au lien de réinitialisation.
@@ -2835,7 +2912,8 @@ def update_question(question_id: int, q: QuestionUpdate):
 
 
 @app.post("/vote")
-def vote(v: Vote):
+def vote(v: Vote, request: Request):
+    _enforce_rate_limit(request, "vote", limit=20)
     vote_token = compute_vote_token(v.token)
     with db() as conn:
         exists = conn.execute(
