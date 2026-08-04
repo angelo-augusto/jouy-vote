@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 
 from chatbot_llm import call_openrouter
 
@@ -1240,6 +1241,129 @@ l'utilisateur.
 # dur du style "parmi les 8" qui devient faux dès qu'on ajoute une couleur — bug réel constaté le
 # jour même où "gris" a été ajouté, cf commentaire sur PSEUDO_COLORS).
 TOOLS_DESCRIPTION = TOOLS_DESCRIPTION.replace("__PALETTE_COULEURS__", ", ".join(PSEUDO_COLORS))
+
+# Scope des outils par contexte (2026-08-04, revue Opus indépendante — analyse-opus-prompt-
+# 2026-08-04) : TOOLS_DESCRIPTION fait ~5760 tokens, TOUJOURS envoyés en entier quelle que soit
+# la situation (choisir un pseudo se paie les 3 outils RAG conseil municipal, les règles de
+# réaction forum, etc. — 0 signal utile, que du bruit). Identifié comme cause probable des bugs
+# #18/#20/#21/#22 : le modèle low-cost doit distinguer la bonne action parmi 19, avec des règles
+# enfouies dans un mur de texte. Recommandation Opus explicitement suivie : NE PAS forker la
+# persona (CHAT_SYSTEM_PROMPT) par situation — un comportement dupliqué qui DÉRIVE de l'original
+# est déjà arrivé une fois dans ce projet (voir commentaire plus haut sur mcp_chatbot_executor.py)
+# et l'anonymat/l'auto-identification doivent rester identiques PARTOUT. Seule la liste d'OUTILS
+# varie, pour des situations déduites de l'ÉTAT (existing_pseudo, context_opinion_id/...), jamais
+# de l'intention devinée — zéro risque de mauvais routage.
+#
+# Découpage MÉCANIQUE de TOOLS_DESCRIPTION par décalage dans le texte ORIGINAL (jamais retapé,
+# jamais reformulé) : zéro risque de divergence de contenu entre la version complète (toujours
+# utilisée si aucun scope n'est demandé) et les versions restreintes.
+def _split_tools_description(text: str) -> tuple[str, dict[str, str]]:
+    bullet_re = re.compile(r"^- (\w+)\(", re.MULTILINE)
+    cut_points: list[tuple[int, str]] = [(m.start(), "action:" + m.group(1)) for m in bullet_re.finditer(text)]
+    # Paragraphes transversaux (ne commencent pas par "- nom(", cité une seule fois chacun dans
+    # le texte original) — rattachés à une clé spéciale, réinjectés séparément selon les actions
+    # en scope (voir build_tools_description).
+    special_markers = [
+        ("_forum_note", "Ces 5 actions forum"),
+        ("_bug14_rule", "Bug réel #14 (2026-07-26"),
+        ("_summary_disambig", "Au 2e tour de cette même séquence"),
+        ("_no_invent_detail", "Enfin, ne JAMAIS inventer"),
+        ("_pseudo_important", "IMPORTANT sur ces 2 actions pseudo"),
+        ("_pseudo_display", "Le résultat de ces 2 actions contient aussi"),
+        ("_button_reappear", "Bug réel signalé par le développeur (2026-07-25)"),
+        ("_placeholder_universal", "Pour référencer dans un say_user"),
+    ]
+    for key, marker in special_markers:
+        cut_points.append((text.index(marker), key))
+    cut_points.sort()
+    header = text[: cut_points[0][0]]
+    blocks = {
+        key: text[start : cut_points[i + 1][0] if i + 1 < len(cut_points) else len(text)]
+        for i, (start, key) in enumerate(cut_points)
+    }
+    return header, blocks
+
+
+_TOOLS_HEADER, _TOOLS_BLOCKS = _split_tools_description(TOOLS_DESCRIPTION)
+
+# 2 situations déterminées par l'état (main.py), pas par l'intention — voir analyse-opus-prompt-
+# 2026-08-04 pour le détail. Le cas par défaut ("assistance générale") garde le jeu complet :
+# l'utilisateur peut basculer conseil municipal <-> forum <-> pseudo sans prévenir, un classifieur
+# d'intention ajouterait un 2e appel modèle (latence + nouveau mode de panne), déconseillé vu la
+# faiblesse du modèle actuel.
+# report_bug/request_admin_intervention ajoutées aux 2 scopes ci-dessous en plus de la table
+# minimale de l'analyse Opus (khadasbot, 2026-08-04) : ce sont les 2 seules actions "échappatoire"
+# du chatbot (signaler un problème technique, demander une intervention humaine) — les retirer
+# d'un scope reviendrait à priver le modèle de cette action précisément aux 2 moments (onboarding,
+# réaction forum) où les bugs récents (#20-#23) se sont concentrés. Coût négligeable (~350 tokens
+# à eux deux) au regard du bénéfice.
+ONBOARDING_ACTIONS = {
+    "say_user", "propose_pseudo_candidates", "propose_custom_pseudo", "get_or_assign_pseudo",
+    "list_summaries", "report_bug", "request_admin_intervention",
+}
+FORUM_REACTION_ACTIONS = {
+    "say_user", "get_thread", "propose_reaction", "propose_remarque",
+    "report_bug", "request_admin_intervention",
+}
+
+
+def build_tools_description(action_names: set[str] | None = None) -> str:
+    """Reconstruit TOOLS_DESCRIPTION en ne gardant que les blocs pertinents pour `action_names`.
+    `None` (défaut) renvoie TOOLS_DESCRIPTION tel quel, bit pour bit — même comportement
+    qu'aujourd'hui pour tout appelant qui ne scope pas explicitement."""
+    if action_names is None:
+        return TOOLS_DESCRIPTION
+    parts = [_TOOLS_HEADER]
+    for name in ACTIONS:  # ordre du dict ACTIONS = ordre d'origine des bullets dans le texte
+        key = "action:" + name
+        if name in action_names and key in _TOOLS_BLOCKS:
+            parts.append(_TOOLS_BLOCKS[key])
+    forum_actions = {"list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque"}
+    draft_actions = forum_actions | {"propose_pseudo_candidates", "propose_custom_pseudo", "propose_summary"}
+    pseudo_actions = {"propose_pseudo_candidates", "propose_custom_pseudo"}
+    if forum_actions & action_names:
+        parts.append(_TOOLS_BLOCKS["_forum_note"])
+    if draft_actions & action_names:
+        parts.append(_TOOLS_BLOCKS["_bug14_rule"])
+    if "propose_summary" in action_names:
+        parts.append(_TOOLS_BLOCKS["_summary_disambig"])
+    if "propose_opinion" in action_names:
+        parts.append(_TOOLS_BLOCKS["_no_invent_detail"])
+    if pseudo_actions & action_names:
+        parts.append(_TOOLS_BLOCKS["_pseudo_important"])
+        parts.append(_TOOLS_BLOCKS["_pseudo_display"])
+    # Règle du bouton de confirmation + règle {{résultat}} : universelles, toujours incluses même
+    # scopé — le mécanisme de substitution (voir chatbot_executor._substitute_placeholder)
+    # s'applique à N'IMPORTE QUELLE action, pas seulement au pseudo (l'exemple dans le texte est
+    # juste illustratif).
+    parts.append(_TOOLS_BLOCKS["_button_reappear"])
+    parts.append(_TOOLS_BLOCKS["_placeholder_universal"])
+    return "".join(parts)
+
+
+def build_actions_json_schema(action_names: set[str] | None = None) -> dict:
+    """Même principe que build_tools_description, mais pour le schéma JSON strict (response_
+    format) — restreint aussi structurellement les actions que le modèle PEUT émettre, pas
+    seulement celles qu'on lui décrit en prose."""
+    if action_names is None:
+        return ACTIONS_JSON_SCHEMA
+    variants = [
+        v for v in ACTIONS_JSON_SCHEMA["properties"]["actions"]["items"]["anyOf"]
+        if v["properties"]["action"]["const"] in action_names
+    ]
+    return {
+        "type": "object",
+        "properties": {"actions": {"type": "array", "minItems": 1, "items": {"anyOf": variants}}},
+        "required": ["actions"],
+        "additionalProperties": False,
+    }
+
+
+def build_response_format(action_names: set[str] | None = None) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "actions_list", "strict": True, "schema": build_actions_json_schema(action_names)},
+    }
 
 # Bloc de contexte "Nouveau, sans pseudo" — adapté du laïus validé (wiki laius-onboarding,
 # 2026-07-25, "esprit du texte, pas mot pour mot"). Injecté par main.py /chat/v2 tant qu'AUCUN

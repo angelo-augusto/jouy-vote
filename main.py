@@ -24,8 +24,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from chatbot_actions import (
-    ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, ONBOARDING_NEW_USER_CONTEXT_BLOCK,
-    PSEUDO_COLORS, RESERVED_CATEGORIES, _agree_pseudo_display, compute_debate_token,
+    ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, FORUM_REACTION_ACTIONS,
+    ONBOARDING_ACTIONS, ONBOARDING_NEW_USER_CONTEXT_BLOCK, PSEUDO_COLORS, RESERVED_CATEGORIES,
+    _agree_pseudo_display, build_response_format, compute_debate_token,
 )
 from chatbot_executor import build_system_prompt, run_turn
 import pseudo_logo_gen
@@ -2404,7 +2405,19 @@ def chat_v2(req: ChatRequest):
     )
     if element_block:
         context_block = f"{context_block}\n\n{element_block}".strip()
-    system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block)
+    # Scope des outils par contexte (2026-08-04, revue Opus indépendante, voir chatbot_actions.
+    # build_tools_description) : 2 situations déduites de l'ÉTAT, pas de l'intention devinée — le
+    # widget "Réagir" (élément forum ciblé) prime sur l'onboarding si les deux signaux sont
+    # présents en même temps (cas marginal : naviguer le Forum avant d'avoir choisi de pseudo),
+    # car c'est le signal le plus précis des deux. "assistance générale" (aucun des deux signaux)
+    # garde le jeu complet, inchangé.
+    if element_block:
+        action_scope = FORUM_REACTION_ACTIONS
+    elif not existing_pseudo:
+        action_scope = ONBOARDING_ACTIONS
+    else:
+        action_scope = None
+    system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block, action_names=action_scope)
     conversation_messages = [{"role": m.role, "content": m.content} for m in req.history[-20:]]
     conversation_messages.append({"role": "user", "content": req.message})
     with db() as conn:
@@ -2446,7 +2459,10 @@ def chat_v2(req: ChatRequest):
         "get_conseil_municipal_document_fn": get_conseil_municipal_document_pv,
     }
     trace_requested = bool(req.admin_key) and req.admin_key == ADMIN_KEY
-    result = run_turn(system_prompt, conversation_messages, ctx, trace=trace_requested)
+    result = run_turn(
+        system_prompt, conversation_messages, ctx,
+        trace=trace_requested, response_format=build_response_format(action_scope),
+    )
     if result["error"] == "llm_indisponible":
         raise HTTPException(503, "Le chatbot est momentanément indisponible.")
     return result

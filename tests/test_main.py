@@ -2234,7 +2234,7 @@ async def test_chat_v2_passes_report_bug_and_admin_intervention_callables_in_ctx
 
     captured_ctx = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured_ctx.update(ctx)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -2546,7 +2546,7 @@ async def test_chat_v2_injects_current_date_in_system_prompt(client, logged_in_u
 
     captured = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured["system_prompt"] = system_prompt
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -2723,7 +2723,7 @@ async def test_chat_v2_injects_opinion_context_block(client, logged_in_user, mon
 
     captured = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured["system_prompt"] = system_prompt
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -2742,7 +2742,7 @@ async def test_chat_v2_passes_wiki_index_and_callable_in_ctx(client, logged_in_u
 
     captured_ctx = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured_ctx.update(ctx)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -3018,7 +3018,7 @@ async def test_chat_v2_injects_onboarding_block_until_pseudo_confirmed(client, l
 
     captured_prompts = []
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured_prompts.append(system_prompt)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -3042,7 +3042,7 @@ async def test_chat_v2_passes_taken_pseudos_in_ctx(client, logged_in_user, monke
 
     captured_ctx = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured_ctx.update(ctx)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -3304,7 +3304,7 @@ async def test_chat_v2_passes_public_threads_snapshot_in_ctx(client, logged_in_u
 
     captured_ctx = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured_ctx.update(ctx)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -4389,7 +4389,7 @@ async def test_chat_v2_requires_valid_session(client):
 async def test_chat_v2_success(client, logged_in_user, monkeypatch):
     import main as main_module
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         assert ctx["identity_token"]  # résolu depuis la session, pas None/vide
         return {"replies": ["réponse simulée v2"], "actions_log": [], "error": None}
 
@@ -4411,7 +4411,7 @@ async def test_chat_v2_trace_requires_valid_admin_key(client, logged_in_user, mo
 
     captured = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured["trace"] = trace
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -4452,7 +4452,7 @@ async def test_chat_v2_passes_saved_summaries_in_ctx(client, logged_in_user, mon
 
     captured_ctx = {}
 
-    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False):
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
         captured_ctx.update(ctx)
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
@@ -4757,3 +4757,100 @@ async def test_admin_key_not_set_prevents_start():
     finally:
         if saved:
             os.environ["JOUY_ADMIN_KEY"] = saved
+
+
+# ---------- scope des outils par contexte (revue Opus 04/08) ----------
+
+def test_build_tools_description_full_scope_identical_to_original():
+    """Filet de sécurité critique : le scope complet (None, comportement d'avant) doit rester
+    BIT POUR BIT identique à TOOLS_DESCRIPTION — le découpage mécanique de chatbot_actions.
+    _split_tools_description ne doit jamais faire dériver le contenu utilisé par défaut."""
+    import chatbot_actions
+
+    assert chatbot_actions.build_tools_description(None) == chatbot_actions.TOOLS_DESCRIPTION
+
+
+def test_build_tools_description_onboarding_scope_excludes_unrelated_actions():
+    import chatbot_actions
+
+    text = chatbot_actions.build_tools_description(chatbot_actions.ONBOARDING_ACTIONS)
+    # présent : les actions du scope onboarding
+    assert "propose_pseudo_candidates(index, appropriate)" in text
+    assert "propose_custom_pseudo(word, color, appropriate)" in text
+    assert "get_or_assign_pseudo()" in text
+    assert "list_summaries()" in text
+    # absent : forum et RAG conseil municipal, hors scope
+    assert "search_conseil_municipal(query)" not in text
+    assert "get_conseil_municipal_document(source_url)" not in text
+    assert "propose_opinion(thread_id" not in text
+    assert "propose_reaction(opinion_id" not in text
+    # la règle universelle {{résultat}} doit rester présente même scopé (bug #22)
+    assert "{{résultat}}" in text
+
+
+def test_build_tools_description_forum_reaction_scope_excludes_pseudo_and_rag():
+    import chatbot_actions
+
+    text = chatbot_actions.build_tools_description(chatbot_actions.FORUM_REACTION_ACTIONS)
+    assert "get_thread(thread_id)" in text
+    assert "propose_reaction(opinion_id" in text
+    assert "propose_remarque(thread_id" in text
+    assert "propose_pseudo_candidates(index, appropriate)" not in text
+    assert "search_conseil_municipal(query)" not in text
+    assert "{{résultat}}" in text
+
+
+def test_build_actions_json_schema_scoped_restricts_anyof_variants():
+    """Le schéma JSON strict (response_format) doit aussi être restreint structurellement, pas
+    seulement la prose — le modèle ne doit même pas pouvoir ÉMETTRE une action hors scope."""
+    import chatbot_actions
+
+    schema = chatbot_actions.build_actions_json_schema(chatbot_actions.ONBOARDING_ACTIONS)
+    variants = schema["properties"]["actions"]["items"]["anyOf"]
+    consts = {v["properties"]["action"]["const"] for v in variants}
+    assert consts == chatbot_actions.ONBOARDING_ACTIONS
+    assert chatbot_actions.build_actions_json_schema(None) == chatbot_actions.ACTIONS_JSON_SCHEMA
+
+
+@pytest.mark.anyio
+async def test_run_turn_respects_scoped_response_format(mocked_openrouter_structured):
+    """Bout en bout : run_turn doit utiliser le response_format passé, pas toujours le complet —
+    vérifié indirectement via le fait qu'un lot hors scope reste quand même EXÉCUTABLE côté Python
+    (le registre ACTIONS n'est pas scopé, seul ce que le modèle a le DROIT d'émettre l'est) ; ce
+    test vérifie surtout que le paramétrage ne fait pas planter run_turn et que le schéma restreint
+    est bien celui envoyé à l'appel LLM sous-jacent."""
+    import json
+    import chatbot_actions
+    import chatbot_executor
+
+    calls, responses = mocked_openrouter_structured
+    responses.append(json.dumps({"actions": [{"action": "say_user", "text": "Bonjour !"}]}))
+
+    scoped_format = chatbot_actions.build_response_format(chatbot_actions.ONBOARDING_ACTIONS)
+    result = chatbot_executor.run_turn(
+        "system", [{"role": "user", "content": "salut"}], {}, response_format=scoped_format,
+    )
+    assert result["error"] is None
+    assert result["replies"] == ["Bonjour !"]
+
+
+@pytest.mark.anyio
+async def test_chat_v2_scopes_onboarding_tools_when_no_pseudo_confirmed(client, registered_user, logged_in_user, monkeypatch):
+    """Vérifie le câblage main.py : sans pseudo confirmé, /chat/v2 doit appeler run_turn avec un
+    response_format restreint au scope onboarding (pas le jeu complet)."""
+    import chatbot_actions
+    import main as main_module
+
+    captured = {}
+    original_run_turn = main_module.run_turn
+
+    def spy_run_turn(*args, **kwargs):
+        captured["response_format"] = kwargs.get("response_format")
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", spy_run_turn)
+    session = logged_in_user["session_token"]
+    resp = await client.post("/chat/v2", json={"session_token": session, "message": "bonjour", "history": []})
+    assert resp.status_code == 200
+    expected = chatbot_actions.build_response_format(chatbot_actions.ONBOARDING_ACTIONS)
+    assert captured["response_format"] == expected

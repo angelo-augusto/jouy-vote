@@ -10,7 +10,7 @@ import json
 import logging
 import re
 
-from chatbot_actions import ACTIONS, RESPONSE_FORMAT, TOOLS_DESCRIPTION
+from chatbot_actions import ACTIONS, RESPONSE_FORMAT, TOOLS_DESCRIPTION, build_tools_description
 from chatbot_llm import call_openrouter
 
 log = logging.getLogger("chatbot_executor")
@@ -24,11 +24,15 @@ dehors de ce format, même pour parler à l'utilisateur — utilise say_user pou
 de la liste."""
 
 
-def build_system_prompt(base_prompt: str, context_block: str = "") -> str:
+def build_system_prompt(base_prompt: str, context_block: str = "", action_names: set[str] | None = None) -> str:
     """Assemble le system prompt dans l'ordre retenu (wiki themes:prompt-chatbot) : identité/
     règles (base_prompt) → outils → bloc de contexte situationnel (vide pour le POC, socle
-    statique) → rappel de format en tout dernier."""
-    parts = [base_prompt.strip(), TOOLS_DESCRIPTION.strip()]
+    statique) → rappel de format en tout dernier.
+
+    "action_names" (2026-08-04, revue Opus, voir chatbot_actions.build_tools_description) :
+    restreint la description d'outils à ce sous-ensemble d'actions selon le contexte (onboarding,
+    réaction forum...) — None (défaut) garde le comportement d'avant, jeu complet."""
+    parts = [base_prompt.strip(), build_tools_description(action_names).strip()]
     if context_block:
         parts.append(context_block.strip())
     parts.append(FORMAT_REMINDER)
@@ -237,6 +241,7 @@ def run_turn(
     model: str | None = None,
     max_iterations: int = MAX_ITERATIONS,
     trace: bool = False,
+    response_format: dict | None = None,
 ) -> dict:
     """Exécute un tour complet (potentiellement plusieurs allers-retours LLM si une action non-
     parole termine un lot). ctx : contexte métier (identity_token, history...) passé tel quel à
@@ -250,7 +255,13 @@ def run_turn(
     d'un dict par itération LLM avec la complétion brute (avant parsing), les actions parsées, et
     l'état de carried_result en entrée/sortie d'itération. Réservé à un usage interne/debug (gate
     admin côté main.py, jamais exposé par défaut) — coûte un peu de mémoire/sérialisation, donc pas
-    calculé si non demandé."""
+    calculé si non demandé.
+
+    "response_format" (2026-08-04, revue Opus) : None (défaut) garde le schéma JSON complet
+    (RESPONSE_FORMAT, 19 actions) — passer le résultat de chatbot_actions.build_response_format
+    (même sous-ensemble d'actions que le system_prompt via build_system_prompt) pour restreindre
+    structurellement ce que le modèle peut émettre, pas seulement la prose qui le décrit."""
+    response_format = response_format or RESPONSE_FORMAT
     messages = [{"role": "system", "content": system_prompt}] + conversation_messages
     replies: list[str] = []
     actions_log: list[dict] = []
@@ -274,7 +285,7 @@ def run_turn(
     cited_displays: set[str] = set()
 
     for _iteration in range(max_iterations):
-        content, _usage = call_openrouter(messages, response_format=RESPONSE_FORMAT, max_tokens=4096, model=model)
+        content, _usage = call_openrouter(messages, response_format=response_format, max_tokens=4096, model=model)
         if content is None:
             return _turn_result(replies, actions_log, "llm_indisponible", trace_log)
 
@@ -292,7 +303,7 @@ def run_turn(
             # (mêmes messages, nouvel appel) avant d'abandonner, même logique bornée que
             # pseudo_logo_gen.MAX_DRAW_ATTEMPTS.
             log.warning("Réponse LLM non-JSON, réessai : %s", content[:300])
-            content, _usage = call_openrouter(messages, response_format=RESPONSE_FORMAT, max_tokens=4096, model=model)
+            content, _usage = call_openrouter(messages, response_format=response_format, max_tokens=4096, model=model)
             if content is None:
                 return _turn_result(replies, actions_log, "llm_indisponible", trace_log)
             try:
@@ -313,7 +324,7 @@ def run_turn(
             # l'utilisateur. Fait AVANT d'exécuter la moindre action de ce lot (aucun effet de bord
             # à annuler si le réessai est déclenché).
             log.warning("Lot avec {{résultat}} non résolvable détecté, réessai : %s", content[:300])
-            retry_content, _usage = call_openrouter(messages, response_format=RESPONSE_FORMAT, max_tokens=4096, model=model)
+            retry_content, _usage = call_openrouter(messages, response_format=response_format, max_tokens=4096, model=model)
             if retry_content is not None:
                 try:
                     retry_data = json.loads(retry_content)
