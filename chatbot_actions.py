@@ -175,7 +175,12 @@ PSEUDO_WORDS = [
 # les couleurs précédentes (argenté, carmin, ambre...) jugées trop compliquées pour un public
 # général. "gris" ajouté ensuite (même jour) à la demande du développeur. Table pseudos vide en
 # prod au moment de ces changements, aucune migration requise.
-PSEUDO_COLORS = ["rouge", "orange", "jaune", "vert", "bleu", "violet", "blanc", "noir", "gris"]
+# "blanc" retiré (2026-08-04, retour direct Angelo, testé en réel — "Fleur blanche" invisible) :
+# le logo est une silhouette noire posée en masque CSS, remplie avec la couleur du pseudo comme
+# fond (voir buildColoredLogoElement, static_files/index.html) — blanc (#f5f5f5) sur le fond clair
+# de l'appli devient quasi invisible. Un pseudo déjà en blanc (aucun en prod à ce jour) resterait
+# affiché tel quel, juste plus proposé pour les nouveaux (même logique que le retrait de "Banane").
+PSEUDO_COLORS = ["rouge", "orange", "jaune", "vert", "bleu", "violet", "noir", "gris"]
 
 # Catégories fixes du forum (2026-07-27, décision développeur via angelobot, design posé le
 # 27/07 et confirmé le 29/07) — liste fermée, jamais générée à la volée par le LLM : clé stable

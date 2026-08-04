@@ -2625,14 +2625,14 @@ def test_element_context_block_includes_author_pseudo_for_opinion():
     import main as main_module
 
     author_identity = "identity-context-author-pseudo-1"
-    main_module.confirm_pseudo(author_identity, "Falaise", "blanc")
+    main_module.confirm_pseudo(author_identity, "Falaise", "gris")
     thread = main_module.create_thread("Fil pour contexte pseudo auteur")
     main_module.publish_thread(thread["thread_id"])
     opinion = main_module.create_opinion(thread["thread_id"], author_identity, "Corps de test")
     main_module.publish_opinion(opinion["opinion_id"])
 
     block = main_module._element_context_block(opinion["opinion_id"], None)
-    assert "Falaise blanche" in block
+    assert "Falaise grise" in block
 
 
 def test_element_context_block_includes_author_pseudo_for_remarque():
