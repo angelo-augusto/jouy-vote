@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import random
 import re
 
 from chatbot_llm import call_openrouter
@@ -285,6 +286,42 @@ def generate_pseudo_candidates(identity_token: str, n: int) -> list[dict]:
             seen.add(key)
             candidates.append(pseudo)
         index += 1
+    return candidates
+
+
+def random_available_pseudo_candidates(taken_pseudos: set[tuple[str, str]], n: int = 3) -> list[dict]:
+    """Bug réel #24 (2026-08-04/05, signalé par Angelo en testant en direct) : demander au modèle
+    de faire appel à une action pour générer UN candidat à la fois, puis de suivre lui-même l'index
+    déjà essayé d'un tour à l'autre, le fait boucler indéfiniment sur les 2 mêmes candidats sans
+    jamais avancer (il ne voit dans l'historique que sa propre prose passée, jamais l'action
+    structurée qu'il a appelée — un modèle low-cost se perd à re-déduire un état depuis du texte
+    libre). Fix structurel : le SERVEUR tire n combinaisons DISPONIBLES au hasard et les injecte
+    déjà prêtes dans le contexte (voir build_onboarding_context_block) — le modèle n'a plus besoin
+    de suivre ni de déduire aucun état, seulement de LIRE des faits déjà donnés et de proposer, via
+    propose_custom_pseudo, celui que la personne retient.
+
+    Contrairement à generate_pseudo_candidates (déterministe par identité, toujours les mêmes "n
+    premières" de la séquence pour un utilisateur donné, utile pour un rappel stable au sein d'UN
+    même tour), ce tirage est volontairement ALÉATOIRE et RENOUVELÉ à chaque appel — si tout est
+    rejeté, le tour suivant reconstruit le contexte et tire 3 NOUVELLES propositions plutôt que de
+    rejouer les mêmes.
+
+    Mots DISTINCTS entre les n suggestions (pas juste des paires distinctes) : un tirage purement
+    aléatoire sur l'ensemble des paires peut retomber 2 fois sur le même mot avec 2 couleurs
+    différentes ("Voiture verte, Voiture bleue") — moins naturel comme "3 vraies idées" que 3 mots
+    différents."""
+    words = list(PSEUDO_WORDS)
+    random.shuffle(words)
+    candidates: list[dict] = []
+    for word in words:
+        if len(candidates) >= n:
+            break
+        colors = list(PSEUDO_COLORS)
+        random.shuffle(colors)
+        for color in colors:
+            if (word, color) not in taken_pseudos:
+                candidates.append({"word": word, "color": color, "display": _agree_pseudo_display(word, color)})
+                break
     return candidates
 
 
@@ -1302,8 +1339,14 @@ _TOOLS_HEADER, _TOOLS_BLOCKS = _split_tools_description(TOOLS_DESCRIPTION)
 # d'un scope reviendrait à priver le modèle de cette action précisément aux 2 moments (onboarding,
 # réaction forum) où les bugs récents (#20-#23) se sont concentrés. Coût négligeable (~350 tokens
 # à eux deux) au regard du bénéfice.
+# "propose_pseudo_candidates" retirée du scope onboarding (2026-08-05, bug réel #24) : les 3
+# exemples sont désormais injectés tout faits dans le contexte (voir build_onboarding_context_
+# block) — plus besoin de cette action pour proposer un pseudo, propose_custom_pseudo(word, color)
+# suffit pour n'importe quel choix (un des 3 exemples ou une idée personnelle). L'action elle-même
+# n'est pas supprimée du registre (reste valide si un autre contexte l'utilise un jour), juste
+# hors du scope de prompt onboarding.
 ONBOARDING_ACTIONS = {
-    "say_user", "propose_pseudo_candidates", "propose_custom_pseudo", "get_or_assign_pseudo",
+    "say_user", "propose_custom_pseudo", "get_or_assign_pseudo",
     "list_summaries", "report_bug", "request_admin_intervention",
 }
 FORUM_REACTION_ACTIONS = {
@@ -1375,7 +1418,16 @@ def build_response_format(action_names: set[str] | None = None) -> dict:
 # pseudo n'est confirmé pour cette identité (voir get_existing_pseudo) — reste actif sur autant
 # de tours que nécessaire, pas seulement le 1er appel : pas d'education_state pour cette passe,
 # donc pas de suivi fin "quel point déjà couvert", juste ce signal binaire simple.
-ONBOARDING_NEW_USER_CONTEXT_BLOCK = """\
+#
+# Point 1 (pseudo) réécrit en fonction (2026-08-05, bug réel #24, voir random_available_pseudo_
+# candidates) : les 3 suggestions sont maintenant tirées côté SERVEUR à chaque appel et injectées
+# ici toutes faites, plutôt que de faire dépendre le modèle d'un index qu'il doit suivre lui-même
+# d'un tour à l'autre. Reconstruit le texte à CHAQUE appel — jamais une constante figée, puisque
+# les 3 exemples changent à chaque tirage.
+def build_onboarding_context_block(pseudo_suggestions: list[dict]) -> str:
+    examples_text = ", ".join(c["display"] for c in pseudo_suggestions)
+    palette_text = ", ".join(PSEUDO_COLORS)
+    return f"""\
 CONTEXTE — Premier contact, aucun pseudo confirmé pour cette personne pour l'instant.
 
 C'est probablement la toute première conversation de cette personne sur jouyvote.fr (ou elle a
@@ -1385,14 +1437,20 @@ cours magistral, pose des questions, laisse-la réagir :
 
 1. Pseudo. Explique qu'un pseudonyme stable (un mot + une couleur) va lui être attribué, que
    c'est CE pseudo — et lui seul — qui apparaît dans les débats/opinions/témoignages publiés,
-   jamais son nom réel. N'énonce pas d'exemple de mot+couleur précis toi-même à ce stade — la
-   vraie 1re proposition viendra de l'action ci-dessous, pas d'un exemple inventé. Tâtonnez
-   ensemble : propose UNE idée à la fois avec
-   propose_pseudo_candidates(index=0), laisse-la réagir via le bouton qui apparaît pour cette
-   proposition précise. Si elle ne l'aime pas, rappelle avec index+1 pour une autre idée — ou si
-   elle préfère proposer elle-même un mot et une couleur, utilise propose_custom_pseudo à la
-   place. Continuez ainsi sur autant de tours que nécessaire jusqu'à ce qu'une proposition lui
-   plaise.
+   jamais son nom réel. Demande-lui D'ABORD si elle a déjà une idée de mot + couleur (couleur à
+   choisir parmi : {palette_text}) — laisse-la proposer la sienne en priorité, ce sera un VRAI
+   choix plutôt qu'une proposition à prendre ou à laisser. Si elle n'a pas d'idée, propose-lui à
+   titre d'exemple ces 3 pseudos actuellement libres : {examples_text} (mentionne-les comme des
+   EXEMPLES parmi lesquels choisir, pas une seule proposition imposée). IMPORTANT : dans CE
+   premier message, contente-toi de poser la question et/ou d'énoncer les 3 exemples en texte —
+   n'appelle PAS encore propose_custom_pseudo à ce stade, tu ne sais pas encore ce qu'elle va
+   choisir. Ce n'est qu'UNE FOIS qu'elle a répondu avec un mot+couleur précis (un des 3 exemples
+   ci-dessus ou une idée qui lui est propre) que tu appelles propose_custom_pseudo(word, color,
+   appropriate) — dans le tour qui suit sa réponse — pour vérifier sa disponibilité et faire
+   apparaître le bouton de confirmation. N'utilise jamais propose_pseudo_candidates, qui n'a plus
+   lieu d'être ici (les 3 exemples ci-dessus sont déjà garantis disponibles). Si elle rejette tout,
+   dis-le simplement : de nouveaux exemples seront proposés au prochain message (le contexte se
+   renouvelle automatiquement).
 
 2. Anonymat et conséquences d'un dévoilement. Personne — pas même les administrateurs — n'a accès
    à l'identité réelle derrière un pseudo dans l'usage normal ; toi-même ne connais jamais son nom,

@@ -4828,15 +4828,17 @@ def test_build_tools_description_onboarding_scope_excludes_unrelated_actions():
 
     text = chatbot_actions.build_tools_description(chatbot_actions.ONBOARDING_ACTIONS)
     # présent : les actions du scope onboarding
-    assert "propose_pseudo_candidates(index, appropriate)" in text
     assert "propose_custom_pseudo(word, color, appropriate)" in text
     assert "get_or_assign_pseudo()" in text
     assert "list_summaries()" in text
-    # absent : forum et RAG conseil municipal, hors scope
+    # absent : forum et RAG conseil municipal, hors scope, ET propose_pseudo_candidates (retirée
+    # du scope onboarding le 2026-08-05, bug réel #24 — les 3 exemples sont désormais injectés
+    # tout faits dans le contexte, plus besoin de cette action ici).
     assert "search_conseil_municipal(query)" not in text
     assert "get_conseil_municipal_document(source_url)" not in text
     assert "propose_opinion(thread_id" not in text
     assert "propose_reaction(opinion_id" not in text
+    assert "propose_pseudo_candidates(index, appropriate)" not in text
     # la règle universelle {{résultat}} doit rester présente même scopé (bug #22)
     assert "{{résultat}}" in text
 
@@ -4969,3 +4971,94 @@ async def test_vote_rate_limited(client, admin_question, registered_user):
         await client.post("/vote", json={"token": "jeton-inconnu", "question_id": admin_question, "choix": "Oui"})
     resp = await client.post("/vote", json={"token": token, "question_id": admin_question, "choix": "Oui"})
     assert resp.status_code == 429
+
+
+# ---------- 3 suggestions de pseudo aléatoires (bug réel #24, 2026-08-05) ----------
+
+def test_random_available_pseudo_candidates_returns_n_distinct_words():
+    """Régression bug réel #24 (Angelo, 04-05/08) : le modèle bouclait sur les 2 mêmes candidats
+    en devant suivre lui-même un index d'un tour à l'autre. Le serveur tire désormais n
+    combinaisons DISPONIBLES au hasard, avec des MOTS distincts entre elles (pas juste des paires
+    distinctes — "Voiture verte, Voiture bleue" serait moins un vrai choix que 3 mots différents)."""
+    import chatbot_actions
+
+    candidates = chatbot_actions.random_available_pseudo_candidates(set(), n=3)
+    assert len(candidates) == 3
+    words = [c["word"] for c in candidates]
+    assert len(set(words)) == 3  # 3 mots distincts
+    for c in candidates:
+        assert c["color"] in chatbot_actions.PSEUDO_COLORS
+        assert c["display"]  # forme accordée non vide
+
+
+def test_random_available_pseudo_candidates_excludes_taken():
+    import chatbot_actions
+
+    all_combos = {
+        (w, c) for w in chatbot_actions.PSEUDO_WORDS for c in chatbot_actions.PSEUDO_COLORS
+    }
+    only_free = next(iter(all_combos))
+    taken = all_combos - {only_free}  # ne laisse qu'UNE seule combinaison disponible
+    candidates = chatbot_actions.random_available_pseudo_candidates(taken, n=3)
+    assert len(candidates) == 1
+    assert (candidates[0]["word"], candidates[0]["color"]) == only_free
+
+
+def test_random_available_pseudo_candidates_never_repeats_across_calls_deterministically():
+    """Contrairement à generate_pseudo_candidates (déterministe par identité), 2 appels
+    consécutifs avec le même taken_pseudos ne doivent PAS produire systématiquement le même
+    résultat — sinon on retombe dans le biais "toujours les mêmes 3 premiers" que ce fix corrige."""
+    import chatbot_actions
+
+    results = {
+        tuple(c["word"] for c in chatbot_actions.random_available_pseudo_candidates(set(), n=3))
+        for _ in range(20)
+    }
+    assert len(results) > 1  # au moins une variation sur 20 tirages
+
+
+def test_build_onboarding_context_block_mentions_examples_and_custom_pseudo_only():
+    import chatbot_actions
+
+    suggestions = [
+        {"word": "Renard", "color": "orange", "display": "Renard orange"},
+        {"word": "Voiture", "color": "vert", "display": "Voiture verte"},
+        {"word": "Nuage", "color": "bleu", "display": "Nuage bleu"},
+    ]
+    block = chatbot_actions.build_onboarding_context_block(suggestions)
+    assert "Renard orange" in block
+    assert "Voiture verte" in block
+    assert "Nuage bleu" in block
+    assert "propose_custom_pseudo" in block
+    # "propose_pseudo_candidates" est mentionnée UNE fois pour dire explicitement de ne plus
+    # l'utiliser ("jamais propose_pseudo_candidates...") — pas absente du texte, mais jamais
+    # présentée comme l'outil à appeler.
+    assert "jamais propose_pseudo_candidates" in block
+    assert "Premier contact" in block
+
+
+@pytest.mark.anyio
+async def test_chat_v2_onboarding_context_includes_random_suggestions(client, logged_in_user, monkeypatch):
+    """Vérifie le câblage main.py : sans pseudo confirmé, le system_prompt doit contenir les 3
+    suggestions renvoyées par random_available_pseudo_candidates pour CE tour précis."""
+    import chatbot_actions
+    import main as main_module
+
+    captured_prompts = []
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
+        captured_prompts.append(system_prompt)
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    fixed_suggestions = [
+        {"word": "Galaxie", "color": "violet", "display": "Galaxie violette"},
+        {"word": "Trompette", "color": "rouge", "display": "Trompette rouge"},
+        {"word": "Cygne", "color": "gris", "display": "Cygne gris"},
+    ]
+    monkeypatch.setattr(main_module, "random_available_pseudo_candidates", lambda taken, n=3: fixed_suggestions)
+
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "bonjour"})
+    assert "Galaxie violette" in captured_prompts[0]
+    assert "Trompette rouge" in captured_prompts[0]
+    assert "Cygne gris" in captured_prompts[0]

@@ -27,8 +27,9 @@ from pydantic import BaseModel
 
 from chatbot_actions import (
     ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, FORUM_REACTION_ACTIONS,
-    ONBOARDING_ACTIONS, ONBOARDING_NEW_USER_CONTEXT_BLOCK, PSEUDO_COLORS, RESERVED_CATEGORIES,
-    _agree_pseudo_display, build_response_format, compute_debate_token,
+    ONBOARDING_ACTIONS, PSEUDO_COLORS, RESERVED_CATEGORIES,
+    _agree_pseudo_display, build_onboarding_context_block, build_response_format,
+    compute_debate_token, random_available_pseudo_candidates,
 )
 from chatbot_executor import build_system_prompt, run_turn
 import pseudo_logo_gen
@@ -2474,9 +2475,23 @@ def chat_v2(req: ChatRequest):
     chatbot_executor.py/chatbot_actions.py)."""
     identity_token = _require_identity(req.session_token)
     existing_pseudo = get_existing_pseudo(identity_token)
+    with db() as conn:
+        summary_rows = conn.execute(
+            "SELECT id, summary, created_at FROM chat_summaries WHERE owner_token=? ORDER BY created_at DESC",
+            (identity_token,),
+        ).fetchall()
+        taken_rows = conn.execute("SELECT word, color FROM pseudos").fetchall()
+    taken_pseudos = {(r["word"], r["color"]) for r in taken_rows}
     # Bloc actif tant qu'aucun pseudo n'est confirmé — sur autant de tours que nécessaire (pas de
-    # education_state pour cette passe, donc pas de suivi plus fin que ce signal binaire).
-    context_block = "" if existing_pseudo else ONBOARDING_NEW_USER_CONTEXT_BLOCK
+    # education_state pour cette passe, donc pas de suivi plus fin que ce signal binaire). Bug réel
+    # #24 (2026-08-04/05, Angelo) : 3 exemples tirés au hasard RECALCULÉS à chaque appel (pas une
+    # constante figée) — voir chatbot_actions.random_available_pseudo_candidates/
+    # build_onboarding_context_block, le modèle n'a plus besoin de suivre un état lui-même.
+    if existing_pseudo:
+        context_block = ""
+    else:
+        pseudo_suggestions = random_available_pseudo_candidates(taken_pseudos)
+        context_block = build_onboarding_context_block(pseudo_suggestions)
     # Date du jour (2026-07-26, manque trouvé par Angelo en réel : "tu sais quel jour on est ?" ->
     # "je n'ai pas accès à l'heure actuelle") — toujours injectée, indépendamment de l'onboarding,
     # utile aussi pour raisonner sur list_conseil_municipal_seances ("y a-t-il eu un conseil
@@ -2502,18 +2517,12 @@ def chat_v2(req: ChatRequest):
     system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block, action_names=action_scope)
     conversation_messages = [{"role": m.role, "content": m.content} for m in req.history[-20:]]
     conversation_messages.append({"role": "user", "content": req.message})
-    with db() as conn:
-        summary_rows = conn.execute(
-            "SELECT id, summary, created_at FROM chat_summaries WHERE owner_token=? ORDER BY created_at DESC",
-            (identity_token,),
-        ).fetchall()
-        taken_rows = conn.execute("SELECT word, color FROM pseudos").fetchall()
     ctx = {
         "identity_token": identity_token,
         "history": conversation_messages,
         "summaries": [dict(r) for r in summary_rows],
         "pseudo": existing_pseudo,
-        "taken_pseudos": {(r["word"], r["color"]) for r in taken_rows},
+        "taken_pseudos": taken_pseudos,
         # Forum phase 2 (2026-07-25) : snapshot des fils/opinions PUBLIÉS pour list_threads/
         # get_thread — voir get_public_forum_snapshot pour la justification anonymat (jamais un
         # brouillon, jamais de corrélation privé↔privé).

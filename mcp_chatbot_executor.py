@@ -18,8 +18,8 @@ import time
 from mcp.server.fastmcp import FastMCP
 
 from chatbot_actions import (
-    CHAT_SYSTEM_PROMPT, ONBOARDING_NEW_USER_CONTEXT_BLOCK, compute_debate_token, compute_vote_token,
-    derive_pseudo,
+    CHAT_SYSTEM_PROMPT, build_onboarding_context_block, compute_debate_token, compute_vote_token,
+    derive_pseudo, random_available_pseudo_candidates,
 )
 from chatbot_executor import build_system_prompt, run_turn
 
@@ -134,11 +134,12 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
         history_json: historique de conversation précédent, JSON d'une liste de
             {"role": "user"|"assistant", "content": "..."} (vide par défaut).
         has_pseudo: False (défaut) simule un nouvel utilisateur SANS pseudo confirmé — déclenche
-            le bloc de contexte onboarding (laïus + propose_pseudo_candidates attendu). True
-            simule un utilisateur qui a déjà confirmé un pseudo (pas de bloc onboarding,
-            get_or_assign_pseudo renvoie une vraie valeur).
+            le bloc de contexte onboarding (laïus + 3 exemples tirés au hasard parmi les
+            combinaisons libres, propose_custom_pseudo attendu — voir bug réel #24). True simule un
+            utilisateur qui a déjà confirmé un pseudo (pas de bloc onboarding, get_or_assign_pseudo
+            renvoie une vraie valeur).
         taken_pseudos_json: JSON d'une liste de [word, color] déjà "pris" par d'autres identités
-            de test, pour observer le cas "déjà pris" via propose_pseudo_candidates/
+            de test — exclus à la fois du tirage des 3 exemples et du résultat "déjà pris" de
             propose_custom_pseudo (vide par défaut).
     """
     import json
@@ -152,7 +153,9 @@ def run_chat_turn(user_message: str, history_json: str = "[]", has_pseudo: bool 
     except (json.JSONDecodeError, TypeError, ValueError):
         taken_pseudos = set()
 
-    context_block = "" if has_pseudo else ONBOARDING_NEW_USER_CONTEXT_BLOCK
+    context_block = "" if has_pseudo else build_onboarding_context_block(
+        random_available_pseudo_candidates(taken_pseudos)
+    )
     # Date du jour (2026-07-26) : dupliqué ici plutôt qu'importé de main.current_date_block() —
     # importer main.py chargerait ses effets de bord au niveau module (ex: ADMIN_KEY qui lève si
     # absent), justement ce que ce serveur MCP évite volontairement (voir docstring du fichier).
