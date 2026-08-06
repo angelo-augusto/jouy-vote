@@ -110,6 +110,15 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
 <div class="card hidden" id="pageAssistant">
   <h2>💬 Assistant</h2>
   <p class="info">Rien de cet échange n'est conservé, sauf si vous demandez explicitement de sauvegarder un résumé.</p>
+  <!-- Bouton "Réveiller l'assistant" (2026-08-06, demande Angelo suite à un retour terrain :
+       une page vide avec juste une zone de saisie ne dit à personne ce qu'il peut faire ici).
+       Message d'accueil ENTIÈREMENT côté frontend (pseudo/logo déjà connus via /pseudo/mine +
+       PSEUDO_WORD_LOGOS, liste de possibilités fixe) plutôt qu'un aller-retour LLM : format
+       garanti à chaque clic, coût nul, jamais de variation surprenante du modèle low-cost sur un
+       contenu purement structurel. Voir wakeUpAssistant. Volontairement PAS ajouté à chatHistory
+       (ni envoyé au LLM) : ce n'est pas un tour de conversation réel, juste un repère d'accueil. -->
+  <button class="btn-link" id="wakeAssistantBtn" style="margin-bottom:.6em;">🔔 Réveiller l'assistant</button>
+  <div id="assistantWelcome" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#e3f2fd; border-radius:4px;"></div>
   <!-- Robot idle/loading (2026-07-30, ajusté 2026-07-31 suite à un bug signalé par Angelo : il
        restait dans une barre fixe au-dessus du cadre, séparé de l'endroit où la réponse allait
        s'afficher) — rendu maintenant DANS #chatMessages, comme dernière ligne, juste après le
@@ -712,6 +721,57 @@ function renderChatMessages() {
     '<span style="vertical-align:middle;">' + (chatPending ? "L'assistant réfléchit…" : '') + '</span></p>';
   el.innerHTML = html;
   el.scrollTop = el.scrollHeight;
+}
+// Liste fixe des possibilités (2026-08-06) : reflète les capacités réelles du chatbot (voir
+// chatbot_actions.ACTIONS) — à tenir à jour si une nouvelle famille d'actions apparaît, mais
+// volontairement un texte simple plutôt qu'une génération dynamique depuis la liste d'actions
+// techniques (qui ne serait pas lisible telle quelle pour un citoyen).
+const ASSISTANT_POSSIBILITIES = [
+  'choisir ou changer votre pseudonyme (jamais votre nom réel)',
+  'comprendre comment voter sur une question ouverte',
+  'publier une opinion, un témoignage ou un argumentaire sur le Forum',
+  'réagir à une opinion déjà publiée par quelqu\'un d\'autre',
+  'poser une question sur une décision du conseil municipal',
+  'signaler un problème ou demander l\'intervention d\'un administrateur',
+];
+async function wakeUpAssistant() {
+  const box = document.getElementById('assistantWelcome');
+  const session_token = localStorage.getItem('session_token');
+  if (!session_token) { go('/login'); return; }
+  box.innerHTML = '';
+  box.classList.remove('hidden');
+  const greetingLine = document.createElement('p');
+  greetingLine.style.cssText = 'margin:0 0 .5em; display:flex; align-items:center; gap:.5em;';
+  box.appendChild(greetingLine);
+  try {
+    const pseudo = await api('/pseudo/mine', { session_token });
+    if (pseudo.word) {
+      await loadPseudoWordLogos();
+      const logoFile = PSEUDO_WORD_LOGOS[pseudo.word];
+      if (logoFile) {
+        greetingLine.appendChild(buildColoredLogoElement('/pseudo_logos_data/' + logoFile, pseudo.color, 2));
+      }
+      const text = document.createElement('strong');
+      text.textContent = 'Bonjour ' + pseudo.display + ' !';
+      greetingLine.appendChild(text);
+    } else {
+      greetingLine.textContent = 'Bonjour !';
+    }
+  } catch (e) {
+    greetingLine.textContent = 'Bonjour !';
+  }
+  const question = document.createElement('p');
+  question.style.margin = '0 0 .4em';
+  question.innerHTML = '<strong>Que puis-je faire pour vous ?</strong>';
+  box.appendChild(question);
+  const list = document.createElement('ul');
+  list.style.cssText = 'margin:0; padding-left:1.4em;';
+  for (const item of ASSISTANT_POSSIBILITIES) {
+    const li = document.createElement('li');
+    li.textContent = item;
+    list.appendChild(li);
+  }
+  box.appendChild(list);
 }
 async function sendChatMessage() {
   const input = document.getElementById('chatInput');
@@ -2197,6 +2257,7 @@ document.getElementById('forgotBackBtn').addEventListener('click', () => go('/lo
 document.getElementById('resetSubmitBtn').addEventListener('click', resetPassword);
 document.getElementById('registerSubmitBtn').addEventListener('click', register);
 document.getElementById('chatSendBtn').addEventListener('click', sendChatMessage);
+document.getElementById('wakeAssistantBtn').addEventListener('click', wakeUpAssistant);
 document.getElementById('chatSaveBtn').addEventListener('click', proposeSaveChatSummary);
 document.getElementById('chatConfirmSaveBtn').addEventListener('click', confirmSaveChatSummary);
 document.getElementById('chatCancelSaveBtn').addEventListener('click', () => document.getElementById('chatSummaryProposal').classList.add('hidden'));
