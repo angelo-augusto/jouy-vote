@@ -28,8 +28,8 @@ from pydantic import BaseModel
 from chatbot_actions import (
     ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, FORUM_REACTION_ACTIONS,
     ONBOARDING_ACTIONS, PSEUDO_COLORS, RESERVED_CATEGORIES,
-    _agree_pseudo_display, build_onboarding_context_block, build_response_format,
-    compute_debate_token, random_available_pseudo_candidates,
+    _agree_pseudo_display, build_onboarding_context_block, build_pseudo_rechoice_context_block,
+    build_response_format, compute_debate_token, random_available_pseudo_candidates,
 )
 from chatbot_executor import build_system_prompt, run_turn
 import pseudo_logo_gen
@@ -2487,10 +2487,16 @@ def chat_v2(req: ChatRequest):
     # #24 (2026-08-04/05, Angelo) : 3 exemples tirés au hasard RECALCULÉS à chaque appel (pas une
     # constante figée) — voir chatbot_actions.random_available_pseudo_candidates/
     # build_onboarding_context_block, le modèle n'a plus besoin de suivre un état lui-même.
+    # Bug réel connexe (2026-08-06, Angelo) : ce fix n'était branché QUE sur l'onboarding — un
+    # rechoix explicite (pseudo déjà confirmé) retombait sur l'ancien mécanisme un-par-un. Même
+    # principe étendu ici : 3 alternatives déjà calculées, fournies même quand un pseudo existe
+    # déjà, à ne mentionner QUE si l'utilisateur demande explicitement à changer (voir
+    # build_pseudo_rechoice_context_block).
+    pseudo_suggestions = random_available_pseudo_candidates(taken_pseudos)
     if existing_pseudo:
-        context_block = ""
+        current_display = _agree_pseudo_display(existing_pseudo["word"], existing_pseudo["color"])
+        context_block = build_pseudo_rechoice_context_block(current_display, pseudo_suggestions)
     else:
-        pseudo_suggestions = random_available_pseudo_candidates(taken_pseudos)
         context_block = build_onboarding_context_block(pseudo_suggestions)
     # Date du jour (2026-07-26, manque trouvé par Angelo en réel : "tu sais quel jour on est ?" ->
     # "je n'ai pas accès à l'heure actuelle") — toujours injectée, indépendamment de l'onboarding,

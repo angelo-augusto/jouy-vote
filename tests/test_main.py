@@ -5062,3 +5062,59 @@ async def test_chat_v2_onboarding_context_includes_random_suggestions(client, lo
     assert "Galaxie violette" in captured_prompts[0]
     assert "Trompette rouge" in captured_prompts[0]
     assert "Cygne gris" in captured_prompts[0]
+
+
+# ---------- Rechoix de pseudo déjà confirmé (bug réel connexe, 2026-08-06) ----------
+
+def test_build_pseudo_rechoice_context_block_mentions_current_and_alternatives():
+    """Bug réel signalé par Angelo (2026-08-06) : le fix des 3 suggestions aléatoires n'était
+    branché que sur l'onboarding — un rechoix explicite (pseudo déjà confirmé) retombait sur
+    l'ancien mécanisme un-par-un (propose_pseudo_candidates avec index), pile le pattern qui
+    causait la boucle infinie du bug #24 à l'origine."""
+    import chatbot_actions
+
+    suggestions = [
+        {"word": "Renard", "color": "orange", "display": "Renard orange"},
+        {"word": "Voiture", "color": "vert", "display": "Voiture verte"},
+        {"word": "Nuage", "color": "bleu", "display": "Nuage bleu"},
+    ]
+    block = chatbot_actions.build_pseudo_rechoice_context_block("Hibou vert", suggestions)
+    assert "Hibou vert" in block
+    assert "Renard orange" in block
+    assert "Voiture verte" in block
+    assert "Nuage bleu" in block
+    assert "propose_custom_pseudo" in block
+    assert "JAMAIS propose_pseudo_candidates" in block
+    assert "JAMAIS ce sujet de toi-même" in block
+
+
+@pytest.mark.anyio
+async def test_chat_v2_rechoice_context_includes_random_suggestions_when_pseudo_confirmed(client, logged_in_user, monkeypatch):
+    """Vérifie le câblage main.py côté rechoix : un pseudo déjà confirmé ne doit plus donner un
+    context_block vide — les 3 nouvelles alternatives renvoyées par
+    random_available_pseudo_candidates pour CE tour doivent apparaître dans le system_prompt,
+    exactement comme pour l'onboarding."""
+    import main as main_module
+
+    identity_token = main_module._require_identity(logged_in_user["session_token"])
+    main_module.confirm_pseudo(identity_token, "Hibou", "vert")
+
+    captured_prompts = []
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
+        captured_prompts.append(system_prompt)
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+    fixed_suggestions = [
+        {"word": "Galaxie", "color": "violet", "display": "Galaxie violette"},
+        {"word": "Trompette", "color": "rouge", "display": "Trompette rouge"},
+        {"word": "Cygne", "color": "gris", "display": "Cygne gris"},
+    ]
+    monkeypatch.setattr(main_module, "random_available_pseudo_candidates", lambda taken, n=3: fixed_suggestions)
+
+    await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "je veux changer de pseudo"})
+    assert "Hibou vert" in captured_prompts[0]
+    assert "Galaxie violette" in captured_prompts[0]
+    assert "Trompette rouge" in captured_prompts[0]
+    assert "Cygne gris" in captured_prompts[0]

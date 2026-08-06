@@ -358,7 +358,7 @@ def get_vote_token(params: dict, ctx: dict) -> dict:
 
 def get_or_assign_pseudo(params: dict, ctx: dict) -> dict:
     """Lecture pure : le pseudo (mot+couleur) DÉJÀ CONFIRMÉ par l'utilisateur est fourni via
-    ctx["pseudo"] (None si pas encore choisi — voir propose_pseudo_candidates dans ce cas).
+    ctx["pseudo"] (None si pas encore choisi — voir propose_custom_pseudo dans ce cas).
     Aucun write ici, jamais : l'écriture réelle se fait UNIQUEMENT dans confirm_pseudo (main.py),
     déclenchée par un clic utilisateur explicite sur une des propositions — même barrière que
     save_summary. Le nom de l'action reste 'get_or_assign_pseudo' (compat historique du mandat),
@@ -366,7 +366,7 @@ def get_or_assign_pseudo(params: dict, ctx: dict) -> dict:
     LLM ne peut plus déclencher d'attribution lui-même, seulement la lire une fois faite."""
     pseudo = ctx.get("pseudo")
     if not pseudo:
-        return {"error": "pas encore de pseudo confirmé — utilise propose_pseudo_candidates"}
+        return {"error": "pas encore de pseudo confirmé — utilise propose_custom_pseudo"}
     result = dict(pseudo)
     result.setdefault("display", _agree_pseudo_display(result["word"], result["color"]))
     return result
@@ -1050,12 +1050,13 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   ton à employer. Si le candidat est approprié mais déjà pris, ou si l'utilisateur ne l'aime pas,
   rappelle cette action avec index+1. TOUJOURS la même séquence pour un même utilisateur
   (déterministe), donc index=0 avec appropriate=true redonnera toujours la même 1re idée. Tu ne
-  peux PAS choisir ni confirmer à sa place. Rechoix libre (2026-07-25) : si l'utilisateur a déjà
-  un pseudo confirmé mais demande EXPLICITEMENT à en changer, tu PEUX rappeler cette action —
-  reconfirmer un nouveau pseudo REMPLACE l'ancien (rien ne t'empêche techniquement de le
-  proposer). Mais n'initie JAMAIS ça de toi-même : ne propose un nouveau pseudo à quelqu'un qui en
-  a déjà un que s'il en fait clairement la demande, jamais en supposant qu'il pourrait vouloir
-  changer (vérifie d'abord avec get_or_assign_pseudo si tu n'es pas sûr qu'il en a déjà un).
+  peux PAS choisir ni confirmer à sa place. N'UTILISE JAMAIS cette action pour un rechoix de
+  pseudo déjà confirmé (2026-08-06, fix bug réel) : dans ce cas, 3 exemples déjà disponibles sont
+  fournis directement dans le contexte (voir le bloc CONTEXTE — Pseudo déjà confirmé) — utilise
+  propose_custom_pseudo pour le mot+couleur finalement choisi, exactement comme pour un premier
+  choix. N'initie JAMAIS un rechoix de toi-même : ne propose un nouveau pseudo à quelqu'un qui en
+  a déjà un que s'il en fait clairement la demande (vérifie d'abord avec get_or_assign_pseudo si
+  tu n'es pas sûr qu'il en a déjà un).
 - propose_custom_pseudo(word, color, appropriate) : même mécanisme, mais pour un pseudo proposé
   par l'UTILISATEUR lui-même (pas une idée générée) — utilise cette action quand il te suggère un
   mot et une couleur de son choix. "color" doit être une des couleurs de la palette suivante :
@@ -1474,4 +1475,34 @@ cours magistral, pose des questions, laisse-la réagir :
 
 Objectif : qu'elle reparte en ayant VRAIMENT compris ces 4 points, pas juste survolé un pavé.
 Vocabulaire : jamais le mot "token" envers l'utilisateur — dire "jeton personnel" ou "code secret".
+"""
+
+
+def build_pseudo_rechoice_context_block(current_display: str, pseudo_suggestions: list[dict]) -> str:
+    """Bug réel (2026-08-06, Angelo) : le fix des 3 suggestions aléatoires (bug #24) n'était
+    branché QUE sur l'onboarding (aucun pseudo confirmé) — dès qu'un pseudo est déjà confirmé,
+    main.py envoyait un context_block vide, et un rechoix explicite retombait sur l'ancien
+    mécanisme un-par-un (propose_pseudo_candidates avec index), pile le pattern qui causait la
+    boucle infinie à l'origine. Ce bloc réutilise exactement le même principe que
+    build_onboarding_context_block : des faits déjà calculés, injectés à chaque tour, pas un état
+    à faire suivre au modèle — mais SANS le laïus d'accueil complet (déjà fait, pseudo déjà
+    confirmé), et à mentionner UNIQUEMENT si l'utilisateur demande explicitement à changer, jamais
+    de sa propre initiative."""
+    examples_text = ", ".join(c["display"] for c in pseudo_suggestions)
+    palette_text = ", ".join(PSEUDO_COLORS)
+    return f"""\
+CONTEXTE — Pseudo déjà confirmé pour cette personne : {current_display}.
+
+N'aborde JAMAIS ce sujet de toi-même. Mais SI (et seulement si) elle demande explicitement à
+changer de pseudo, tu as déjà de quoi répondre sans appeler la moindre action de proposition :
+demande-lui d'abord si elle a une idée de mot + couleur à elle (couleur à choisir parmi :
+{palette_text}), et si elle n'a pas d'idée, propose-lui à titre d'exemple ces 3 pseudos
+actuellement libres : {examples_text}. N'appelle PAS encore d'action à ce stade, contente-toi de
+poser la question et/ou d'énoncer les 3 exemples en texte. Ce n'est qu'UNE FOIS qu'elle a répondu
+avec un mot+couleur précis (un des 3 exemples ci-dessus ou une idée qui lui est propre) que tu
+appelles propose_custom_pseudo(word, color, appropriate) pour vérifier sa disponibilité et faire
+apparaître le bouton de confirmation — reconfirmer un nouveau pseudo REMPLACE l'ancien.
+N'utilise JAMAIS propose_pseudo_candidates, qui n'a plus lieu d'être : les 3 exemples ci-dessus
+sont déjà garantis disponibles. Si elle rejette tout, dis-le simplement : de nouveaux exemples
+seront proposés au prochain message (le contexte se renouvelle automatiquement).
 """
