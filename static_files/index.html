@@ -272,6 +272,15 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
     <option value="">Retirer le rôle (citoyen)</option>
   </select>
   <button class="btn-primary" id="rolesSetBtn">Appliquer</button>
+  <hr>
+  <!-- Signalements (2026-08-10, demande Angelo relayée par angelobot, maquette
+       themes:maquette-tracabilite-signalements) : bug_reports + admin_intervention_requests
+       fusionnés, répondre = envoie un message privé au citoyen ET marque le signalement traité,
+       même geste. -->
+  <h3 style="margin-top:0;">Signalements</h3>
+  <p class="info">Bugs signalés et demandes d'intervention — répondre envoie un message privé au citoyen concerné et marque le signalement comme traité.</p>
+  <div id="signalementsMsg" class="msg"></div>
+  <div id="signalementsList"></div>
 </div>
 
 <div class="card hidden" id="pagePublier">
@@ -2512,6 +2521,62 @@ async function loadRolesPage() {
     listEl.innerHTML = '';
     showMsg('rolesMsg', e.message, 'error');
   }
+  loadSignalements();
+}
+// Signalements (2026-08-10, demande Angelo relayée par angelobot) : liste fusionnée bug_reports/
+// admin_intervention_requests (voir main.py list_pending_signalements) — répondre déclenche
+// resolve_signalement (message privé + status='traite' dans le même geste serveur).
+const SIGNALEMENT_TYPE_LABELS = { bug: 'Bug', intervention: 'Intervention admin' };
+async function loadSignalements() {
+  const session_token = localStorage.getItem('session_token');
+  const listEl = document.getElementById('signalementsList');
+  listEl.innerHTML = '<p class="info">Chargement…</p>';
+  try {
+    const data = await api('/admin/signalements/list', { session_token });
+    const pending = data.signalements.filter(s => s.status !== 'traite');
+    if (pending.length === 0) {
+      listEl.innerHTML = '<p class="info">Aucun signalement en attente.</p>';
+      return;
+    }
+    listEl.innerHTML = '';
+    pending.forEach(s => listEl.appendChild(renderSignalement(s)));
+  } catch (e) {
+    listEl.innerHTML = '';
+    showMsg('signalementsMsg', e.message, 'error');
+  }
+}
+function renderSignalement(s) {
+  const block = document.createElement('div');
+  block.className = 'question-block';
+  const header = document.createElement('p');
+  header.style.cssText = 'margin:0 0 .4em; font-weight:600;';
+  header.textContent = (SIGNALEMENT_TYPE_LABELS[s.type] || s.type) + ' · ' + new Date(s.created_at).toLocaleString('fr-FR');
+  block.appendChild(header);
+  const body = document.createElement('p');
+  body.textContent = s.description;
+  block.appendChild(body);
+  const textarea = document.createElement('textarea');
+  textarea.rows = 2;
+  textarea.placeholder = 'Réponse au citoyen (message privé)…';
+  textarea.style.cssText = 'width:100%; padding:.5em; border:1px solid #ccc; border-radius:4px; font-family:inherit; font-size:.9em; margin:.4em 0;';
+  block.appendChild(textarea);
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.textContent = 'Répondre (marque traité)';
+  btn.addEventListener('click', async () => {
+    const body = textarea.value.trim();
+    if (!body) { showMsg('signalementsMsg', 'Réponse vide.', 'error'); return; }
+    const session_token = localStorage.getItem('session_token');
+    try {
+      await api('/admin/signalements/reply', { session_token, kind: s.type, report_id: s.id, body });
+      showMsg('signalementsMsg', 'Réponse envoyée, signalement marqué traité.', 'success');
+      loadSignalements();
+    } catch (e) {
+      showMsg('signalementsMsg', e.message, 'error');
+    }
+  });
+  block.appendChild(btn);
+  return block;
 }
 async function setAccountRole() {
   const session_token = localStorage.getItem('session_token');

@@ -399,6 +399,15 @@ def init_db():
             )"""
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bug_reports_debate_token ON bug_reports(debate_token)")
+        # "status" (2026-08-09/10, maquette themes:maquette-tracabilite-signalements, go Angelo) :
+        # NULL/'en_cours'/'traite' — pas de contrainte CHECK (même tolérance que "role"/"voice"
+        # ailleurs, la validité est garantie côté Python, jamais par la DB seule). Migration
+        # ajoutée juste après la création de la table, pas dans la boucle column_types plus bas
+        # (réservée aux colonnes de "identities") — même pattern que "category" sur threads.
+        try:
+            conn.execute("ALTER TABLE bug_reports ADD COLUMN status TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.execute(
             """CREATE TABLE IF NOT EXISTS admin_intervention_requests (
                 request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -410,6 +419,10 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_admin_intervention_debate_token ON admin_intervention_requests(debate_token)"
         )
+        try:
+            conn.execute("ALTER TABLE admin_intervention_requests ADD COLUMN status TEXT")
+        except sqlite3.OperationalError:
+            pass
         # rate_limit_events (2026-08-04, faille E revue Opus) : brute-force/spam anti-abus sur
         # /login, /register, /vote, /forgot-password — endpoints AVANT authentification, donc pas
         # de debate_token/identité utilisable comme clé (contrairement à bug_reports/admin_
@@ -716,6 +729,17 @@ class AdminRolesSetRequest(BaseModel):
     session_token: str
     target_email: str
     role: str | None = None
+
+
+class AdminSignalementsListRequest(BaseModel):
+    session_token: str
+
+
+class AdminSignalementReplyRequest(BaseModel):
+    session_token: str
+    kind: str
+    report_id: int
+    body: str
 
 
 class MairieDirectoryRequest(BaseModel):
@@ -1466,11 +1490,10 @@ def publish_remarque(remarque_id: int) -> dict:
     return {"remarque_id": remarque_id, "status": "published"}
 
 
-def send_admin_message(recipient_identity_token: str, body: str) -> dict:
-    """SEULE exception au principe "chatbot = passage obligé" — message direct administration→
-    citoyen, jamais via le chatbot comme intermédiaire (voir init_db pour la justification
-    anonymat : admin_identity est fixe et publique, recipient_debate_token reste peppé)."""
-    recipient_debate_token = compute_debate_token(recipient_identity_token)
+def _write_admin_message(recipient_debate_token: str, body: str) -> dict:
+    """Écriture bas niveau, factorisée entre send_admin_message (part d'un identity_token, cas
+    général) et resolve_signalement (part d'un debate_token DÉJÀ connu depuis la ligne d'un
+    signalement — jamais besoin, ni possible, de le faire repasser par compute_debate_token)."""
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO admin_messages (recipient_debate_token, body) VALUES (?, ?)",
@@ -1478,6 +1501,59 @@ def send_admin_message(recipient_identity_token: str, body: str) -> dict:
         )
         message_id = cur.lastrowid
     return {"message_id": message_id, "recipient_debate_token": recipient_debate_token, "body": body}
+
+
+def send_admin_message(recipient_identity_token: str, body: str) -> dict:
+    """SEULE exception au principe "chatbot = passage obligé" — message direct administration→
+    citoyen, jamais via le chatbot comme intermédiaire (voir init_db pour la justification
+    anonymat : admin_identity est fixe et publique, recipient_debate_token reste peppé)."""
+    return _write_admin_message(compute_debate_token(recipient_identity_token), body)
+
+
+_SIGNALEMENT_TABLES = {"bug": ("bug_reports", "report_id"), "intervention": ("admin_intervention_requests", "request_id")}
+
+
+def list_pending_signalements() -> list[dict]:
+    """Réservé Admin (voir /admin/signalements/list) — fusionne bug_reports et
+    admin_intervention_requests dans une seule liste avec un badge "type" par ligne (maquette
+    themes:maquette-tracabilite-signalements, go Angelo 2026-08-09/10, choix : fusion plutôt que
+    2 listes séparées). "debate_token" est inclus comme identifiant OPAQUE, jamais réversible vers
+    une identité réelle — utile uniquement pour répondre (voir resolve_signalement), jamais
+    destiné à être affiché tel quel côté UI."""
+    with db() as conn:
+        items = []
+        for kind, (table, id_col) in _SIGNALEMENT_TABLES.items():
+            rows = conn.execute(
+                f"SELECT {id_col} AS id, debate_token, description, status, created_at FROM {table} "
+                "ORDER BY created_at DESC"
+            ).fetchall()
+            items.extend({
+                "type": kind, "id": r["id"], "debate_token": r["debate_token"],
+                "description": r["description"], "status": r["status"], "created_at": r["created_at"],
+            } for r in rows)
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    return items
+
+
+def resolve_signalement(kind: str, report_id: int, reply_body: str) -> dict:
+    """Réservé Admin (voir /admin/signalements/reply) : répond à UN signalement précis (jamais un
+    debate_token arbitraire fourni par l'appelant — toujours celui DÉJÀ présent sur la ligne
+    ciblée par kind+report_id) et marque le signalement 'traite' dans le même geste (go Angelo :
+    répondre = ce qui boucle la traçabilité, pas une action séparée)."""
+    if not reply_body.strip():
+        raise ValueError("réponse vide")
+    entry = _SIGNALEMENT_TABLES.get(kind)
+    if entry is None:
+        raise ValueError("type de signalement invalide")
+    table, id_col = entry
+    with db() as conn:
+        row = conn.execute(f"SELECT debate_token FROM {table} WHERE {id_col}=?", (report_id,)).fetchone()
+        if row is None:
+            raise ValueError("signalement introuvable")
+    message = _write_admin_message(row["debate_token"], reply_body)
+    with db() as conn:
+        conn.execute(f"UPDATE {table} SET status='traite' WHERE {id_col}=?", (report_id,))
+    return {"message_id": message["message_id"], "status": "traite"}
 
 
 def get_public_forum_snapshot() -> list[dict]:
@@ -2317,6 +2393,28 @@ def admin_roles_set(req: AdminRolesSetRequest):
     _require_admin(req.session_token)
     try:
         return set_account_role(req.target_email, req.role)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/admin/signalements/list")
+def admin_signalements_list(req: AdminSignalementsListRequest):
+    """Réservé Admin (voir _require_admin) — liste fusionnée bug_reports/admin_intervention_
+    requests (voir list_pending_signalements). "debate_token" retiré de la réponse : inutile côté
+    UI (la réponse cible kind+id, voir /admin/signalements/reply), jamais affiché en clair même
+    si techniquement non réversible."""
+    _require_admin(req.session_token)
+    return {"signalements": [{k: v for k, v in item.items() if k != "debate_token"} for item in list_pending_signalements()]}
+
+
+@app.post("/admin/signalements/reply")
+def admin_signalements_reply(req: AdminSignalementReplyRequest):
+    """SEUL endpoint qui répond à un signalement — réservé Admin. Envoie un message privé au
+    citoyen à l'origine du signalement (via son debate_token déjà connu, jamais fourni par
+    l'appelant) et marque le signalement 'traite' (voir resolve_signalement)."""
+    _require_admin(req.session_token)
+    try:
+        return resolve_signalement(req.kind, req.report_id, req.body)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

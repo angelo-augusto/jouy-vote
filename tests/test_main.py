@@ -5093,6 +5093,138 @@ async def test_admin_roles_set_rejects_unknown_email(client, admin_user):
     assert resp.status_code == 400
 
 
+# ---------- Signalements : liste fusionnée + réponse admin (2026-08-10, go Angelo) ----------
+
+def test_list_pending_signalements_merges_bug_reports_and_interventions():
+    import main as main_module
+
+    debate_token = main_module.compute_debate_token("identity-signalement-merge-test")
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+        conn.execute("DELETE FROM admin_intervention_requests WHERE debate_token=?", (debate_token,))
+    try:
+        main_module.submit_bug_report("identity-signalement-merge-test", "Un bug technique")
+        main_module.submit_admin_intervention_request("identity-signalement-merge-test", "Besoin d'aide")
+
+        items = main_module.list_pending_signalements()
+        mine = [i for i in items if i["debate_token"] == debate_token]
+        types = {i["type"] for i in mine}
+        assert types == {"bug", "intervention"}
+        assert all(i["status"] is None for i in mine)
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+            conn.execute("DELETE FROM admin_intervention_requests WHERE debate_token=?", (debate_token,))
+
+
+def test_resolve_signalement_sends_message_and_marks_treated():
+    """2026-08-10 (go Angelo) : répondre à un signalement envoie un vrai message admin au
+    debate_token DÉJÀ présent sur la ligne (jamais un paramètre arbitraire) et marque
+    status='traite' dans le même geste."""
+    import main as main_module
+
+    identity_token = "identity-signalement-resolve-test"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+        conn.execute("DELETE FROM admin_messages WHERE recipient_debate_token=?", (debate_token,))
+    try:
+        main_module.submit_bug_report(identity_token, "Un bug precis a corriger")
+        with main.db() as conn:
+            report_id = conn.execute(
+                "SELECT report_id FROM bug_reports WHERE debate_token=?", (debate_token,)
+            ).fetchone()["report_id"]
+        result = main_module.resolve_signalement("bug", report_id, "Corrigé, merci !")
+        assert result["status"] == "traite"
+
+        with main.db() as conn:
+            row = conn.execute("SELECT status FROM bug_reports WHERE report_id=?", (report_id,)).fetchone()
+            assert row["status"] == "traite"
+            msg = conn.execute(
+                "SELECT body FROM admin_messages WHERE recipient_debate_token=?", (debate_token,)
+            ).fetchone()
+            assert msg["body"] == "Corrigé, merci !"
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+            conn.execute("DELETE FROM admin_messages WHERE recipient_debate_token=?", (debate_token,))
+
+
+def test_resolve_signalement_rejects_unknown_id_or_empty_body():
+    import main as main_module
+
+    with pytest.raises(ValueError, match="introuvable"):
+        main_module.resolve_signalement("bug", 999999999, "réponse")
+    with pytest.raises(ValueError, match="invalide"):
+        main_module.resolve_signalement("autre_chose", 1, "réponse")
+
+
+@pytest.mark.anyio
+async def test_admin_signalements_list_rejects_citizen(client, logged_in_user):
+    resp = await client.post("/admin/signalements/list", json={"session_token": logged_in_user["session_token"]})
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_admin_signalements_list_excludes_debate_token(client, admin_user):
+    """debate_token ne doit jamais quitter le serveur vers ce endpoint — la réponse cible
+    kind+report_id, pas un identifiant brut affiché côté UI."""
+    import main as main_module
+
+    debate_token = main_module.compute_debate_token("identity-signalement-endpoint-test")
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+    try:
+        main_module.submit_bug_report("identity-signalement-endpoint-test", "Bug via endpoint test")
+        resp = await client.post("/admin/signalements/list", json={"session_token": admin_user["session_token"]})
+        assert resp.status_code == 200
+        data = resp.json()["signalements"]
+        assert len(data) > 0
+        assert all("debate_token" not in item for item in data)
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+
+
+@pytest.mark.anyio
+async def test_admin_signalements_reply_endpoint_end_to_end(client, admin_user):
+    import main as main_module
+
+    identity_token = "identity-signalement-reply-endpoint"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_intervention_requests WHERE debate_token=?", (debate_token,))
+        conn.execute("DELETE FROM admin_messages WHERE recipient_debate_token=?", (debate_token,))
+    try:
+        main_module.submit_admin_intervention_request(identity_token, "J'ai besoin d'aide")
+        with main.db() as conn:
+            request_id = conn.execute(
+                "SELECT request_id FROM admin_intervention_requests WHERE debate_token=?", (debate_token,)
+            ).fetchone()["request_id"]
+        resp = await client.post(
+            "/admin/signalements/reply",
+            json={
+                "session_token": admin_user["session_token"], "kind": "intervention",
+                "report_id": request_id, "body": "On s'en occupe",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "traite"
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_intervention_requests WHERE debate_token=?", (debate_token,))
+            conn.execute("DELETE FROM admin_messages WHERE recipient_debate_token=?", (debate_token,))
+
+
+@pytest.mark.anyio
+async def test_admin_signalements_reply_rejects_citizen(client, logged_in_user):
+    resp = await client.post(
+        "/admin/signalements/reply",
+        json={"session_token": logged_in_user["session_token"], "kind": "bug", "report_id": 1, "body": "test"},
+    )
+    assert resp.status_code == 403
+
+
 def test_list_privileged_accounts_excludes_citizens():
     import main as main_module
 
