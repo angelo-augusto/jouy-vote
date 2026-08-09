@@ -438,6 +438,33 @@ def propose_custom_pseudo(params: dict, ctx: dict) -> dict:
     return _availability_with_content_gate(word, color, params.get("appropriate", True), ctx)
 
 
+def check_pseudo_availability(params: dict, ctx: dict) -> dict:
+    """Lecture pure (2026-08-09, demande Angelo) : le choix de pseudo se fait normalement via la
+    planche de logos (grille aléatoire, jamais via ce chatbot — voir GENERAL_ACTIONS/
+    ONBOARDING_ACTIONS) — mais un mot précis demandé par l'utilisateur ("Dragon rouge est
+    disponible ?") peut ne pas apparaître sur la planche courante (tirage aléatoire d'un
+    sous-ensemble). Cette action vérifie un (word, color) EXACT contre la banque + la disponibilité
+    réelle (ni confirmé, ni réservé par quelqu'un d'autre — voir ctx["pseudo_availability_grid"],
+    injecté par main.py depuis get_pseudo_grid), SANS jamais réserver ni confirmer quoi que ce
+    soit — si available=true, le frontend affiche le MÊME bouton "Proposer ce pseudo" que sur la
+    planche, qui déclenche la MÊME réservation+confirmation, jamais un chemin d'écriture distinct.
+    Aucun jugement de contenu à faire ici (contrairement à l'ancien propose_custom_pseudo) : tous
+    les mots de la banque sont déjà pré-approuvés par Angelo en amont."""
+    word_input = (params.get("word") or "").strip()
+    color = (params.get("color") or "").strip().lower()
+    if not word_input:
+        return {"available": False, "error": "mot manquant"}
+    if color not in PSEUDO_COLORS:
+        return {"available": False, "error": f"couleur non valide, choisis parmi : {', '.join(PSEUDO_COLORS)}"}
+    grid = ctx.get("pseudo_availability_grid") or {}
+    canonical = next((w for w in grid if w.lower() == word_input.lower()), None)
+    if canonical is None:
+        return {"available": False, "word": word_input, "color": color, "error": "mot absent de la banque de logos, ou plus aucune couleur libre pour ce mot"}
+    if color not in grid[canonical]:
+        return {"available": False, "word": canonical, "color": color, "error": "cette couleur précise n'est plus libre pour ce mot"}
+    return {"available": True, "word": canonical, "color": color}
+
+
 def list_summaries(params: dict, ctx: dict) -> dict:
     """Lecture pure : les résumés déjà sauvegardés sont fournis via ctx["summaries"] (chargés en
     amont par l'appelant — main.py fait la requête DB, mcp_chatbot_executor.py passe une liste
@@ -788,6 +815,7 @@ ACTIONS = {
     "get_or_assign_pseudo": get_or_assign_pseudo,
     "propose_pseudo_candidates": propose_pseudo_candidates,
     "propose_custom_pseudo": propose_custom_pseudo,
+    "check_pseudo_availability": check_pseudo_availability,
     "list_threads": list_threads,
     "get_thread": get_thread,
     "propose_opinion": propose_opinion,
@@ -876,6 +904,16 @@ ACTIONS_JSON_SCHEMA = {
                             "appropriate": {"type": "boolean"},
                         },
                         "required": ["action", "word", "color", "appropriate"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "check_pseudo_availability"},
+                            "word": {"type": "string"},
+                            "color": {"type": "string"},
+                        },
+                        "required": ["action", "word", "color"],
                         "additionalProperties": False,
                     },
                     {
@@ -1094,6 +1132,18 @@ Outils disponibles (à utiliser via une action dans la liste "actions") :
   sur le bouton de confirmation) n'existe, et se fait immanquablement confondre avec lui ("le
   dessin n'est pas de la bonne couleur" alors qu'aucun dessin n'a encore été fait). Emojis
   génériques (😊, 👍...) toujours permis, uniquement ceux qui illustrent le mot choisi sont interdits.
+- check_pseudo_availability(word, color) : le choix de pseudo se fait normalement par une planche
+  de logos déjà colorisés affichée directement à l'écran (jamais par toi) — utilise CETTE action
+  UNIQUEMENT si l'utilisateur te demande explicitement si un mot+couleur PRÉCIS est disponible
+  alors qu'il ne le trouve pas sur la planche actuelle (tirage aléatoire d'un sous-ensemble, un mot
+  peut ne pas y figurer sans être indisponible pour autant). "color" doit être une des couleurs de
+  la palette suivante : __PALETTE_COULEURS__. Aucun jugement de contenu à faire (contrairement à
+  l'ancien mécanisme retiré) : tous les mots proposables viennent d'une banque déjà entièrement
+  pré-approuvée. Si available=true, dis-le simplement et laisse le bouton "Proposer ce pseudo"
+  apparaître côté frontend (jamais toi qui l'affirmes confirmé) — n'énonce jamais un mot+couleur
+  avant d'avoir réellement appelé cette action dans le MÊME lot et lu son résultat. N'INITIE JAMAIS
+  cette vérification de toi-même : uniquement en réponse à une question explicite sur un mot
+  précis, jamais pour suggérer ou négocier un pseudo.
 - list_threads() : renvoie la liste des fils de discussion du Forum déjà PUBLIÉS (titre + résumé
   seulement, pas les opinions à l'intérieur — utilise get_thread pour le détail). Aucun paramètre.
 - get_thread(thread_id) : renvoie le détail complet d'un fil (titre, résumé, et la liste de ses
@@ -1368,6 +1418,7 @@ _TOOLS_HEADER, _TOOLS_BLOCKS = _split_tools_description(TOOLS_DESCRIPTION)
 # pertinentes pour un utilisateur sans pseudo (résumés, signalement).
 ONBOARDING_ACTIONS = {
     "say_user", "list_summaries", "report_bug", "request_admin_intervention",
+    "check_pseudo_availability",
 }
 FORUM_REACTION_ACTIONS = {
     "say_user", "get_thread", "propose_reaction", "propose_remarque",

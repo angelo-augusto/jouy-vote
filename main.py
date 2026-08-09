@@ -2682,6 +2682,10 @@ def chat_v2(req: ChatRequest):
         "summaries": [dict(r) for r in summary_rows],
         "pseudo": existing_pseudo,
         "taken_pseudos": taken_pseudos,
+        # check_pseudo_availability (2026-08-09) : même source de vérité que la planche/grille
+        # frontend (/pseudo/grid) — un mot n'y apparaît que s'il existe dans la banque ET qu'au
+        # moins une couleur est encore libre (ni confirmée, ni réservée par quelqu'un d'autre).
+        "pseudo_availability_grid": get_pseudo_grid(identity_token)["grid"],
         # Forum phase 2 (2026-07-25) : snapshot des fils/opinions PUBLIÉS pour list_threads/
         # get_thread — voir get_public_forum_snapshot pour la justification anonymat (jamais un
         # brouillon, jamais de corrélation privé↔privé).
@@ -3212,6 +3216,21 @@ for _route in _SPA_ROUTES:
         methods=["GET"],
         include_in_schema=False,
     )
+
+# Anti-cache sur les logos de pseudo (2026-08-09, bug réel signalé par Angelo : le dragon corrigé
+# côté serveur restait affiché rogné dans son navigateur) : contrairement à static_files/ (contenu
+# figé au build de l'image), les fichiers de _PSEUDO_LOGO_DIR sont RÉGÉNÉRABLES en place — un mot
+# peut être recadré/corrigé sans jamais changer de nom de fichier (voir wiki pseudo-logo-banque,
+# corrections Dragon/Ancre/Cactus/Girafe). Sans Cache-Control, StaticFiles renvoie seulement
+# Last-Modified/ETag, insuffisant pour empêcher un navigateur de servir une version mise en cache
+# sans même revalider — no-cache force une revalidation à chaque chargement (pas un no-store : un
+# fichier inchangé reste un 304 quasi gratuit, seul un fichier réellement modifié est re-téléchargé).
+@app.middleware("http")
+async def _pseudo_logos_no_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/pseudo_logos_data/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 app.mount("/static_files", StaticFiles(directory="static_files"), name="static")
 app.mount("/pseudo_logos_data", StaticFiles(directory=_PSEUDO_LOGO_DIR), name="pseudo_logos_data")

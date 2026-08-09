@@ -132,6 +132,13 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
     <p class="info" style="margin:0 0 .5em;">Choisis ton pseudonyme (jamais ton nom réel) :</p>
     <div id="assistantPseudoGridContainer"></div>
   </div>
+  <!-- Vérification ponctuelle d'un pseudo précis (2026-08-09, demande Angelo) : quand l'utilisateur
+       demande explicitement au chatbot si un mot+couleur précis est libre alors qu'il n'apparaît
+       pas sur la planche aléatoire actuelle — voir check_pseudo_availability. Réutilise la MÊME
+       réservation+confirmation que la planche (reservePseudoChoice), jamais un chemin distinct. -->
+  <div id="pseudoAvailabilityProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
+    <div id="pseudoAvailabilityCandidate"></div>
+  </div>
   <div id="opinionProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
     <p class="info" style="margin:0 0 .5em;">Brouillon d'opinion pour le Forum :</p>
     <div id="opinionCandidate"></div>
@@ -819,6 +826,7 @@ async function sendChatMessage() {
     if (data.error) {
       showMsg('chatMsg', "L'assistant n'a pas pu répondre correctement, réessaie.", 'error');
     }
+    renderPseudoAvailabilityProposal(data.actions_log);
     renderOpinionProposal(data.actions_log);
     renderReactionProposal(data.actions_log);
     renderRemarqueProposal(data.actions_log);
@@ -872,14 +880,13 @@ function drawPseudoBoard(container, board, session_token, onConfirmed) {
   for (const { word, color, file } of board) {
     const tile = document.createElement('button');
     tile.type = 'button';
+    // Pas de texte sous le logo (2026-08-09, demande Angelo : "les logos sont parlants tout
+    // seuls") — le mot reste accessible via title (info-bulle au survol), pas affiché en dur.
+    tile.title = word;
     tile.style.cssText = 'text-align:center; border:1px solid #eee; border-radius:4px; padding:.4em; background:white; cursor:pointer;';
-    const logo = buildColoredLogoElement('/pseudo_logos_data/' + file, color, 2.2);
-    logo.style.cssText += 'display:block; margin:0 auto .3em;';
+    const logo = buildColoredLogoElement('/pseudo_logos_data/' + file, color, 2.6);
+    logo.style.cssText += 'display:block; margin:0 auto;';
     tile.appendChild(logo);
-    const label = document.createElement('div');
-    label.textContent = word;
-    label.style.cssText = 'font-size:.75em;';
-    tile.appendChild(label);
     tile.addEventListener('click', () => reservePseudoChoice(word, color, file, container, session_token, onConfirmed));
     gridEl.appendChild(tile);
   }
@@ -936,6 +943,46 @@ async function reservePseudoChoice(word, color, logoFile, container, session_tok
   });
   container.appendChild(confirmBtn);
   container.appendChild(cancelBtn);
+}
+// Vérification ponctuelle d'un pseudo précis via le chatbot (2026-08-09, demande Angelo) : le
+// choix de pseudo passe normalement par la planche, jamais par une réponse du LLM — mais si
+// l'utilisateur demande explicitement si un mot+couleur précis est libre (absent de la planche
+// aléatoire actuelle), check_pseudo_availability répond en lecture seule et ce bouton déclenche
+// la MÊME réservation+confirmation qu'un clic sur la planche (reservePseudoChoice), jamais un
+// chemin d'écriture distinct.
+function renderPseudoAvailabilityProposal(actionsLog) {
+  const box = document.getElementById('pseudoAvailabilityProposal');
+  const container = document.getElementById('pseudoAvailabilityCandidate');
+  if (!actionsLog) {
+    box.classList.add('hidden');
+    return;
+  }
+  const found = [...actionsLog].reverse().find(a =>
+    a.action === 'check_pseudo_availability' && a.result && a.result.available === true
+  );
+  if (!found) {
+    box.classList.add('hidden');
+    return;
+  }
+  const { word, color } = found.result;
+  const session_token = localStorage.getItem('session_token');
+  const logoFile = PSEUDO_WORD_LOGOS[word];
+  container.innerHTML = '';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex; align-items:center; gap:.6em; margin-bottom:.5em;';
+  if (logoFile) row.appendChild(buildColoredLogoElement('/pseudo_logos_data/' + logoFile, color, 2.5));
+  const label = document.createElement('span');
+  label.textContent = word + ' (' + color + ') est disponible.';
+  row.appendChild(label);
+  container.appendChild(row);
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.textContent = 'Proposer ce pseudo';
+  btn.addEventListener('click', () => {
+    reservePseudoChoice(word, color, logoFile, container, session_token, () => box.classList.add('hidden'));
+  });
+  container.appendChild(btn);
+  box.classList.remove('hidden');
 }
 // Section "Mon compte" (2026-08-09, réécrite pour la grille) : contrairement à l'ancienne
 // version, reste VISIBLE même sans pseudo confirmé — c'est maintenant le point d'entrée principal

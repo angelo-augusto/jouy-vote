@@ -1130,6 +1130,30 @@ def test_propose_custom_pseudo_action_checks_availability():
     assert result_ok["display"] == "Loup bleu"
 
 
+def test_check_pseudo_availability_finds_word_case_insensitive_and_checks_color():
+    """2026-08-09 (demande Angelo) : vérifie un (word, color) précis contre la grille de
+    disponibilité (ctx["pseudo_availability_grid"], mot -> couleurs libres) — insensible à la
+    casse sur le mot (l'utilisateur peut écrire 'dragon' en minuscule), renvoie le mot CANONIQUE
+    tel qu'il existe dans la banque."""
+    import chatbot_actions
+
+    ctx = {"pseudo_availability_grid": {"Dragon": ["rouge", "bleu"], "Chat": ["vert"]}}
+    result = chatbot_actions.check_pseudo_availability({"word": "dragon", "color": "rouge"}, ctx)
+    assert result == {"available": True, "word": "Dragon", "color": "rouge"}
+
+
+def test_check_pseudo_availability_rejects_taken_color_or_unknown_word():
+    import chatbot_actions
+
+    ctx = {"pseudo_availability_grid": {"Dragon": ["bleu"]}}
+    taken_color = chatbot_actions.check_pseudo_availability({"word": "Dragon", "color": "rouge"}, ctx)
+    assert taken_color["available"] is False
+    unknown_word = chatbot_actions.check_pseudo_availability({"word": "Licorne", "color": "bleu"}, ctx)
+    assert unknown_word["available"] is False
+    invalid_color = chatbot_actions.check_pseudo_availability({"word": "Dragon", "color": "turquoise"}, ctx)
+    assert invalid_color["available"] is False
+
+
 def test_propose_custom_pseudo_content_gate_blocks_button_regardless_of_technical_validity():
     """Régression (bug réel signalé par le développeur avec capture d'écran, 2026-07-25,
     'étoile noir') : le texte de l'assistant disait 'je refuse par prudence' mais le bouton de
@@ -1437,6 +1461,30 @@ def test_random_pseudo_board_respects_size_and_pins_my_reservation():
                 ",".join("?" * len(words))
             ), tuple(words))
         _cleanup_word_logos(words)
+
+
+@pytest.mark.anyio
+async def test_pseudo_logos_data_served_with_no_cache_header(client):
+    """Régression (2026-08-09, bug réel signalé par Angelo) : un logo corrigé sur disque
+    (même nom de fichier, contenu changé) restait affiché rogné dans son navigateur — le mount
+    StaticFiles ne renvoyait aucun Cache-Control, laissant le navigateur mettre en cache sans
+    revalider. Verrouille la présence de l'en-tête sur ce mount précis."""
+    import main as main_module
+    import os
+
+    word = "MotCacheTest"
+    filename = main_module._slugify_word(word) + ".png"
+    path = os.path.join(main_module._PSEUDO_LOGO_DIR, filename)
+    os.makedirs(main_module._PSEUDO_LOGO_DIR, exist_ok=True)
+    # Contenu arbitraire : StaticFiles sert le fichier tel quel, seul le header nous intéresse ici.
+    with open(path, "wb") as f:
+        f.write(b"contenu factice pour ce test, peu importe qu'il ne soit pas un vrai PNG")
+    try:
+        resp = await client.get(f"/pseudo_logos_data/{filename}")
+        assert resp.status_code == 200
+        assert resp.headers.get("cache-control") == "no-cache"
+    finally:
+        os.remove(path)
 
 
 @pytest.mark.anyio
@@ -5228,6 +5276,41 @@ async def test_chat_v2_no_longer_offers_pseudo_choice_without_pseudo(client, log
     await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "bonjour"})
     assert "propose_custom_pseudo(word, color, appropriate)" not in captured_prompts[0]
     assert "get_or_assign_pseudo()" not in captured_prompts[0]
+
+
+@pytest.mark.anyio
+async def test_chat_v2_offers_check_pseudo_availability_with_real_grid_in_ctx(client, logged_in_user, monkeypatch):
+    """2026-08-09 (demande Angelo) : check_pseudo_availability doit rester exposée au LLM (mot
+    précis absent de la planche aléatoire courante) même sans pseudo confirmé, ET ctx["
+    pseudo_availability_grid"] doit refléter la vraie disponibilité DB (mot déjà pris exclu)."""
+    import main as main_module
+
+    words = ["MotDispoChatTest"]
+    _seed_word_logos(words)
+    other_identity = "identity-dispo-chat-test-other"
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(other_identity),))
+    try:
+        main_module.confirm_pseudo(other_identity, "MotDispoChatTest", "rouge")
+
+        captured = {}
+
+        def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
+            captured["system_prompt"] = system_prompt
+            captured["ctx"] = ctx
+            return {"replies": ["ok"], "actions_log": [], "error": None}
+
+        monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+        await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "bonjour"})
+
+        assert "check_pseudo_availability(word, color)" in captured["system_prompt"]
+        grid = captured["ctx"]["pseudo_availability_grid"]
+        assert "rouge" not in grid["MotDispoChatTest"]
+        assert "bleu" in grid["MotDispoChatTest"]
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(other_identity),))
+        _cleanup_word_logos(words)
 
 
 # ---------- Rechoix de pseudo déjà confirmé (bug réel connexe, 2026-08-06) ----------
