@@ -802,6 +802,18 @@ ACTIONS = {
     "list_conseil_municipal_seances": list_conseil_municipal_seances,
 }
 
+# Scope "assistance générale" (2026-08-09, décision Angelo) : remplace l'ancien action_scope=None
+# (jeu complet, y compris les 3 actions pseudo) une fois qu'un utilisateur a un pseudo confirmé.
+# Le choix de pseudo est retiré ENTIÈREMENT du chatbot — get_or_assign_pseudo/
+# propose_pseudo_candidates/propose_custom_pseudo restent définies et dans ACTIONS (dette de
+# nettoyage identifiée, pas supprimées) mais ne doivent plus jamais être atteignables par le LLM,
+# quel que soit l'état pseudo de l'utilisateur — build_tools_description/build_actions_json_schema
+# exclut automatiquement leur prose ET leur variante de schéma JSON pour ce scope (même mécanisme
+# générique que ONBOARDING_ACTIONS/FORUM_REACTION_ACTIONS ci-dessous, juste un ensemble plus large).
+GENERAL_ACTIONS = set(ACTIONS.keys()) - {
+    "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
+}
+
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
 # niveau de l'API, pas seulement par consigne de prompt (correction demandée par la revue Opus).
 ACTIONS_JSON_SCHEMA = {
@@ -1347,15 +1359,15 @@ _TOOLS_HEADER, _TOOLS_BLOCKS = _split_tools_description(TOOLS_DESCRIPTION)
 # d'un scope reviendrait à priver le modèle de cette action précisément aux 2 moments (onboarding,
 # réaction forum) où les bugs récents (#20-#23) se sont concentrés. Coût négligeable (~350 tokens
 # à eux deux) au regard du bénéfice.
-# "propose_pseudo_candidates" retirée du scope onboarding (2026-08-05, bug réel #24) : les 3
-# exemples sont désormais injectés tout faits dans le contexte (voir build_onboarding_context_
-# block) — plus besoin de cette action pour proposer un pseudo, propose_custom_pseudo(word, color)
-# suffit pour n'importe quel choix (un des 3 exemples ou une idée personnelle). L'action elle-même
-# n'est pas supprimée du registre (reste valide si un autre contexte l'utilise un jour), juste
-# hors du scope de prompt onboarding.
+# Choix de pseudo retiré ENTIÈREMENT du chatbot (2026-08-09, décision Angelo) : remplacé par la
+# grille de logos + réservation (voir main.py /pseudo/grid, /pseudo/reserve, frontend
+# renderPseudoGridPicker) — plus jamais de négociation par le LLM, qu'il s'agisse du 1er choix ou
+# d'un rechoix. propose_pseudo_candidates/propose_custom_pseudo/get_or_assign_pseudo restent
+# définies ci-dessous (dette de nettoyage identifiée, pas supprimées ici) mais ne sont plus dans
+# AUCUN scope exposé au LLM — ONBOARDING_ACTIONS ne garde que les actions utilitaires encore
+# pertinentes pour un utilisateur sans pseudo (résumés, signalement).
 ONBOARDING_ACTIONS = {
-    "say_user", "propose_custom_pseudo", "get_or_assign_pseudo",
-    "list_summaries", "report_bug", "request_admin_intervention",
+    "say_user", "list_summaries", "report_bug", "request_admin_intervention",
 }
 FORUM_REACTION_ACTIONS = {
     "say_user", "get_thread", "propose_reaction", "propose_remarque",

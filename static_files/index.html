@@ -125,9 +125,12 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
        dernier message : toujours visible (idle par défaut), animé pendant le traitement, à
        l'endroit exact où la réponse va apparaître. Voir renderChatMessages/chatPending. -->
   <div id="chatMessages" style="max-height:280px; overflow-y:auto; border:1px solid #eee; border-radius:4px; padding:.6em; margin-bottom:.6em; font-size:.9em;"></div>
-  <div id="pseudoProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
-    <p class="info" style="margin:0 0 .5em;">Choisissez votre pseudonyme (jamais votre nom réel) :</p>
-    <div id="pseudoCandidates"></div>
+  <!-- Grille de logos + réservation (2026-08-09) : remplace l'ancienne proposition de pseudo par
+       le chatbot — affichée par wakeUpAssistant quand l'utilisateur n'a pas encore de
+       pseudonyme, jamais déclenchée par une réponse du LLM. Voir renderPseudoGridPicker. -->
+  <div id="assistantPseudoPicker" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
+    <p class="info" style="margin:0 0 .5em;">Choisis ton pseudonyme (jamais ton nom réel) :</p>
+    <div id="assistantPseudoGridContainer"></div>
   </div>
   <div id="opinionProposal" class="hidden" style="margin-bottom:.6em; padding:.8em; background:#f8f9fa; border-radius:4px;">
     <p class="info" style="margin:0 0 .5em;">Brouillon d'opinion pour le Forum :</p>
@@ -205,8 +208,9 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   </div>
   <hr>
   <div id="compteLogoSection" class="hidden">
-    <label>Logo de mon pseudo</label>
+    <label>Mon pseudonyme</label>
     <div id="compteLogoStatus" style="margin:.4em 0;"></div>
+    <div id="comptePseudoGridContainer" class="hidden" style="margin-top:.6em;"></div>
   </div>
   <hr id="compteLogoHr" class="hidden">
   <div id="compteMairieDirectorySection" class="hidden">
@@ -727,7 +731,6 @@ function renderChatMessages() {
 // volontairement un texte simple plutôt qu'une génération dynamique depuis la liste d'actions
 // techniques (qui ne serait pas lisible telle quelle pour un citoyen).
 const ASSISTANT_POSSIBILITIES = [
-  'choisir ou changer votre pseudonyme (jamais votre nom réel)',
   'comprendre comment voter sur une question ouverte',
   'publier une opinion, un témoignage ou un argumentaire sur le Forum',
   'réagir à une opinion déjà publiée par quelqu\'un d\'autre',
@@ -743,6 +746,8 @@ async function wakeUpAssistant() {
   const greetingLine = document.createElement('p');
   greetingLine.style.cssText = 'margin:0 0 .5em; display:flex; align-items:center; gap:.5em;';
   box.appendChild(greetingLine);
+  const pickerBox = document.getElementById('assistantPseudoPicker');
+  pickerBox.classList.add('hidden');
   try {
     const pseudo = await api('/pseudo/mine', { session_token });
     if (pseudo.word) {
@@ -755,7 +760,9 @@ async function wakeUpAssistant() {
       text.textContent = 'Bonjour ' + pseudo.display + ' !';
       greetingLine.appendChild(text);
     } else {
-      greetingLine.textContent = 'Bonjour !';
+      greetingLine.textContent = 'Bonjour ! Tu n\'as pas encore de pseudonyme.';
+      pickerBox.classList.remove('hidden');
+      renderPseudoGridPicker('assistantPseudoGridContainer', () => wakeUpAssistant());
     }
   } catch (e) {
     greetingLine.textContent = 'Bonjour !';
@@ -812,7 +819,6 @@ async function sendChatMessage() {
     if (data.error) {
       showMsg('chatMsg', "L'assistant n'a pas pu répondre correctement, réessaie.", 'error');
     }
-    renderPseudoCandidates(data.actions_log);
     renderOpinionProposal(data.actions_log);
     renderReactionProposal(data.actions_log);
     renderRemarqueProposal(data.actions_log);
@@ -823,218 +829,163 @@ async function sendChatMessage() {
     renderChatMessages();
   }
 }
-// Choix collaboratif du pseudo (mandat angelobot 2026-07-25, tâtonnement tour après tour) :
-// propose_pseudo_candidates/propose_custom_pseudo sont des actions LECTURE SEULE côté LLM (jamais
-// d'écriture) — le vrai commit passe uniquement par /pseudo/confirm, déclenché ici par un clic
-// explicite. Pas de liste figée : un seul bouton pour LA proposition la plus récente de ce tour.
-function renderPseudoCandidates(actionsLog) {
-  const box = document.getElementById('pseudoProposal');
-  const list = document.getElementById('pseudoCandidates');
-  if (!actionsLog) {
-    box.classList.add('hidden');
+// Grille de logos + réservation (2026-08-09, décision Angelo) : remplace ENTIÈREMENT l'ancienne
+// négociation par chatbot (propose_pseudo_candidates/propose_custom_pseudo + génération de logo
+// à la demande) — voir wiki pseudo-logo-banque pour l'historique. Le mot ET le logo viennent
+// maintenant tous les deux de la banque pré-générée et validée (/pseudo/logos), zéro appel LLM,
+// zéro génération d'image à ce stade. Réservation de 3 min posée dès le clic sur une couleur
+// (voir main.py reserve_pseudo_slot/RESERVATION_TTL_SECONDS) pour éviter que 2 personnes
+// confirment le même pseudo pendant qu'une des deux hésite encore — /pseudo/confirm reste le
+// SEUL point d'écriture définitive, inchangé.
+async function renderPseudoGridPicker(containerId, onConfirmed) {
+  const container = document.getElementById(containerId);
+  const session_token = localStorage.getItem('session_token');
+  container.innerHTML = '<p class="info">Chargement de la grille…</p>';
+  await loadPseudoWordLogos();
+  let data;
+  try {
+    data = await api('/pseudo/grid', { session_token });
+  } catch (e) {
+    container.innerHTML = '<p class="info">Impossible de charger la grille de pseudonymes, réessaie plus tard.</p>';
     return;
   }
-  const proposeAction = [...actionsLog].reverse().find(a =>
-    (a.action === 'propose_pseudo_candidates' || a.action === 'propose_custom_pseudo') &&
-    a.result && a.result.available === true
-  );
-  if (!proposeAction) {
-    box.classList.add('hidden');
+  drawPseudoGrid(container, data.grid, session_token, onConfirmed);
+}
+function drawPseudoGrid(container, grid, session_token, onConfirmed) {
+  container.innerHTML = '';
+  const words = Object.keys(grid).sort((a, b) => a.localeCompare(b, 'fr'));
+  if (words.length === 0) {
+    container.innerHTML = '<p class="info">Aucun pseudonyme disponible pour le moment.</p>';
     return;
   }
-  const { word, color, display } = proposeAction.result;
-  showPseudoProposalButton(word, color, display || (word + ' ' + color));
-  box.classList.remove('hidden');
+  const gridEl = document.createElement('div');
+  gridEl.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fill, minmax(84px, 1fr)); gap:.6em; max-height:360px; overflow-y:auto; padding:.4em;';
+  for (const word of words) {
+    const cell = document.createElement('div');
+    cell.style.cssText = 'text-align:center; border:1px solid #eee; border-radius:4px; padding:.4em;';
+    const logoFile = PSEUDO_WORD_LOGOS[word];
+    if (logoFile) {
+      const preview = buildColoredLogoElement('/pseudo_logos_data/' + logoFile, 'gris', 2.4);
+      preview.style.cssText += 'display:block; margin:0 auto .3em;';
+      cell.appendChild(preview);
+    }
+    const label = document.createElement('div');
+    label.textContent = word;
+    label.style.cssText = 'font-size:.8em; margin-bottom:.3em;';
+    cell.appendChild(label);
+    const swatches = document.createElement('div');
+    swatches.style.cssText = 'display:flex; flex-wrap:wrap; gap:.25em; justify-content:center;';
+    for (const color of grid[word]) {
+      const dot = document.createElement('button');
+      dot.type = 'button';
+      dot.title = color;
+      dot.style.cssText =
+        'width:1.1em; height:1.1em; border-radius:50%; border:1px solid rgba(0,0,0,.2); cursor:pointer; padding:0; ' +
+        'background:' + (PSEUDO_COLOR_HEX[color] || '#757575') + ';';
+      dot.addEventListener('click', () => reservePseudoChoice(word, color, logoFile, container, session_token, onConfirmed));
+      swatches.appendChild(dot);
+    }
+    cell.appendChild(swatches);
+    gridEl.appendChild(cell);
+  }
+  container.appendChild(gridEl);
 }
-// "display" = forme accordée grammaticalement (ex. "Clairière verte") — word/color restent la
-// forme canonique envoyée telle quelle à /pseudo/confirm, inchangée par l'accord d'affichage.
-function showPseudoProposalButton(word, color, displayText) {
-  const list = document.getElementById('pseudoCandidates');
-  list.innerHTML = '';
-  const btn = document.createElement('button');
-  btn.className = 'btn-primary';
-  btn.textContent = displayText;
-  btn.addEventListener('click', () => askPseudoConfirmation(word, color, displayText));
-  list.appendChild(btn);
-}
-// Flux en 4 étapes (2026-08-03, refonte suite au bug "Robot gris" — Stefano avait pu confirmer
-// un pseudo sans JAMAIS voir de bouton ni de logo, le clic "Oui, confirmer" étant cliquable dès
-// l'entrée dans cette étape, avant même que la génération du logo ait démarré ou fini) :
-// (0) filtres texte déjà appliqués en amont (appropriate/iconifiable/identité non-humaine) ;
-// (1) ce texte question ci-dessous = proposition texte seul, déjà validée par le clic qui a
-// mené ici ; (2) génération + validation vision du logo, AUCUN bouton affiché tant que ce n'est
-// pas terminé (succès ou échec) ; (3) le bouton final n'apparaît qu'à ce moment-là, avec
-// l'icône réellement générée à côté si elle existe. "Annuler" reste disponible pendant toute
-// la génération pour ne pas bloquer un utilisateur qui change d'avis.
-function askPseudoConfirmation(word, color, displayText) {
-  const list = document.getElementById('pseudoCandidates');
-  list.innerHTML = '';
+async function reservePseudoChoice(word, color, logoFile, container, session_token, onConfirmed) {
+  container.innerHTML = '<p class="info">Réservation en cours…</p>';
+  try {
+    await api('/pseudo/reserve', { session_token, word, color });
+  } catch (e) {
+    container.innerHTML = '<p class="msg error">' + e.message + '</p>';
+    setTimeout(() => renderPseudoGridPicker(container.id, onConfirmed), 1500);
+    return;
+  }
+  container.innerHTML = '';
   const question = document.createElement('p');
   question.className = 'info';
   question.style.margin = '0 0 .5em';
-  question.textContent = 'Confirmer définitivement « ' + displayText + ' » comme pseudonyme ?';
-  const logoPreviewEl = document.createElement('div');
-  logoPreviewEl.style.cssText = 'margin:.4em 0;';
-  const loadingEl = document.createElement('p');
-  loadingEl.className = 'info';
-  loadingEl.style.margin = '.3em 0';
-  loadingEl.textContent = 'Génération de ton logo en cours…';
-  logoPreviewEl.appendChild(loadingEl);
+  question.textContent = 'Confirmer ce pseudonyme ?';
+  container.appendChild(question);
+  const previewRow = document.createElement('div');
+  previewRow.style.cssText = 'display:flex; align-items:center; gap:.6em; margin-bottom:.6em;';
+  if (logoFile) previewRow.appendChild(buildColoredLogoElement('/pseudo_logos_data/' + logoFile, color, 3));
+  const label = document.createElement('strong');
+  label.textContent = word + ' (' + color + ')';
+  previewRow.appendChild(label);
+  container.appendChild(previewRow);
+  // Pas les classes .msg/.error habituelles (spécificité CSS ".msg.error" > ".hidden", le message
+  // resterait visible malgré classList.add('hidden'), même piège déjà rencontré sur stanceErrorEl
+  // plus haut) — gestion directe via style.display.
+  const errorP = document.createElement('p');
+  errorP.style.cssText = 'display:none; font-size:.85em; margin:.4em 0; color:#721c24;';
+  container.appendChild(errorP);
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Confirmer';
+  confirmBtn.addEventListener('click', async () => {
+    try {
+      await api('/pseudo/confirm', { session_token, word, color });
+      await loadPseudoWordLogos();
+      container.innerHTML = '<p class="info">Pseudonyme confirmé !</p>';
+      if (onConfirmed) onConfirmed();
+    } catch (e) {
+      errorP.textContent = e.message;
+      errorP.style.display = 'block';
+    }
+  });
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-link';
   cancelBtn.textContent = 'Annuler';
-  cancelBtn.addEventListener('click', () => showPseudoProposalButton(word, color, displayText));
-  list.appendChild(question);
-  list.appendChild(logoPreviewEl);
-  list.appendChild(cancelBtn);
-  fetchPseudoLogoPreview(word, color, logoPreviewEl).then(result => {
-    loadingEl.remove();
-    const confirmBtn = document.createElement('button');
-    confirmBtn.className = 'btn-primary';
-    confirmBtn.textContent = result ? ('Valider ' + displayText) : ('Valider ' + displayText + ' (sans logo)');
-    confirmBtn.addEventListener('click', () => confirmPseudo(word, color, displayText, result));
-    list.insertBefore(confirmBtn, cancelBtn);
+  cancelBtn.addEventListener('click', async () => {
+    await api('/pseudo/release', { session_token }).catch(() => {});
+    renderPseudoGridPicker(container.id, onConfirmed);
   });
+  container.appendChild(confirmBtn);
+  container.appendChild(cancelBtn);
 }
-// Preview du logo (2026-07-31, gate du bouton final revue le 2026-08-03) : appelé dès l'entrée
-// dans l'étape de confirmation — si le mot a déjà un logo validé (mot déjà utilisé par
-// quelqu'un), le relit instantanément (gratuit) ; sinon génère une silhouette (5-8s, ~0,014$) et
-// la fait valider par un modèle vision. Le bouton final (voir askPseudoConfirmation) n'apparaît
-// qu'une fois cette promesse résolue, succès ou échec — un échec de génération (image_base64
-// absent) n'affiche pas d'erreur bruyante, juste l'explication ci-dessous et un bouton de
-// secours "sans logo".
-async function fetchPseudoLogoPreview(word, color, containerEl) {
-  const session_token = localStorage.getItem('session_token');
-  try {
-    const data = await api('/pseudo/logo/preview', { session_token, word });
-    if (data.image_base64) {
-      const logoEl = buildColoredLogoElement('data:image/png;base64,' + data.image_base64, color, 4.2);
-      containerEl.appendChild(logoEl);
-    } else if (data.is_new) {
-      // Contrôle qualité (2026-07-31, demande développeur) : le backend a essayé de générer ET
-      // vérifier un logo pour ce mot (dessin + relecture par un modèle vision, jusqu'à 2 tentatives
-      // bornées) sans succès — jamais silencieux, on l'explique plutôt que de laisser deviner.
-      const p = document.createElement('p');
-      p.className = 'info';
-      p.style.margin = '.3em 0 0';
-      p.textContent = "Je n'ai pas réussi à générer un logo clair pour ce mot — le pseudo reste utilisable normalement (affiché en texte), ou choisis un autre mot si tu veux un logo.";
-      containerEl.appendChild(p);
-    }
-    return data.image_base64 ? data : null;
-  } catch (e) {
-    return null;
-  }
-}
-// Logo pour un pseudo DÉJÀ confirmé (2026-07-31, demande développeur via angelobot) : le flux
-// normal (askPseudoConfirmation) ne couvre que le moment de la confirmation initiale — un compte
-// dont le pseudo a été confirmé AVANT ce pipeline (ou via un chemin qui a sauté cette étape,
-// comme un compte de test créé directement en base) n'a jamais eu l'occasion de proposer/valider
-// un logo. Section "Mon compte" : réutilise exactement les mêmes 2 endpoints
-// (/pseudo/logo/preview, /pseudo/logo/confirm) que le flux normal, juste un nouveau point d'entrée.
+// Section "Mon compte" (2026-08-09, réécrite pour la grille) : contrairement à l'ancienne
+// version, reste VISIBLE même sans pseudo confirmé — c'est maintenant le point d'entrée principal
+// pour en choisir un (avant, cette section n'apparaissait qu'après un premier pseudo obtenu via
+// le chatbot).
 async function loadMyPseudoLogoStatus() {
   const section = document.getElementById('compteLogoSection');
   const hr = document.getElementById('compteLogoHr');
   const statusEl = document.getElementById('compteLogoStatus');
+  const pickerEl = document.getElementById('comptePseudoGridContainer');
   const session_token = localStorage.getItem('session_token');
   statusEl.innerHTML = '';
+  pickerEl.classList.add('hidden');
+  pickerEl.innerHTML = '';
+  section.classList.remove('hidden');
+  hr.classList.remove('hidden');
+  let pseudo;
   try {
-    const pseudo = await api('/pseudo/mine', { session_token });
-    if (!pseudo.word) {
-      section.classList.add('hidden');
-      hr.classList.add('hidden');
-      return;
-    }
-    section.classList.remove('hidden');
-    hr.classList.remove('hidden');
-    await loadPseudoWordLogos(); // toujours réattendu ici, pas de dépendance au flag de la page Forum
-    const existingFile = PSEUDO_WORD_LOGOS[pseudo.word];
-    if (existingFile) {
-      const logoEl = buildColoredLogoElement('/pseudo_logos_data/' + existingFile, pseudo.color, 4.2);
-      statusEl.appendChild(logoEl);
-      const p = document.createElement('p');
-      p.className = 'info';
-      p.style.cssText = 'margin:.4em 0 0; display:inline-block; vertical-align:middle; margin-left:.5em;';
-      p.textContent = 'Logo de « ' + pseudo.display + ' » — déjà validé.';
-      statusEl.appendChild(p);
-    } else {
-      const p = document.createElement('p');
-      p.className = 'info';
-      p.style.margin = '0 0 .5em';
-      p.textContent = 'Ton pseudo « ' + pseudo.display + ' » n\'a pas encore de logo.';
-      statusEl.appendChild(p);
-      const btn = document.createElement('button');
-      btn.className = 'btn-primary';
-      btn.textContent = 'Proposer un logo pour mon pseudo';
-      btn.addEventListener('click', () => proposeLogoForExistingPseudo(pseudo.word, pseudo.color, pseudo.display, statusEl));
-      statusEl.appendChild(btn);
-    }
+    pseudo = await api('/pseudo/mine', { session_token });
   } catch (e) {
-    section.classList.add('hidden');
-    hr.classList.add('hidden');
-  }
-}
-async function proposeLogoForExistingPseudo(word, color, displayText, containerEl) {
-  containerEl.innerHTML = '';
-  const loadingP = document.createElement('p');
-  loadingP.className = 'info';
-  loadingP.textContent = 'Génération en cours (quelques secondes)…';
-  containerEl.appendChild(loadingP);
-  const previewEl = document.createElement('div');
-  const result = await fetchPseudoLogoPreview(word, color, previewEl);
-  containerEl.innerHTML = '';
-  containerEl.appendChild(previewEl);
-  if (!result || !result.image_base64) {
-    const p = document.createElement('p');
-    p.className = 'info';
-    p.textContent = 'La génération a échoué, réessaie plus tard.';
-    containerEl.appendChild(p);
+    statusEl.innerHTML = '<p class="info">Impossible de charger ton pseudonyme.</p>';
     return;
   }
-  const question = document.createElement('p');
-  question.className = 'info';
-  question.style.margin = '.4em 0';
-  question.textContent = 'Valider ce logo pour « ' + displayText + ' » ?';
-  containerEl.appendChild(question);
-  const validateBtn = document.createElement('button');
-  validateBtn.className = 'btn-primary';
-  validateBtn.textContent = 'Valider ce logo';
-  validateBtn.addEventListener('click', async () => {
-    const session_token = localStorage.getItem('session_token');
-    try {
-      await api('/pseudo/logo/confirm', { session_token, word, image_base64: result.image_base64 });
-      await loadPseudoWordLogos();
-      loadMyPseudoLogoStatus();
-    } catch (e) {
-      showMsg('compteMsg', e.message, 'error');
-    }
-  });
-  const skipBtn = document.createElement('button');
-  skipBtn.className = 'btn-link';
-  skipBtn.textContent = 'Pas maintenant';
-  skipBtn.addEventListener('click', () => loadMyPseudoLogoStatus());
-  containerEl.appendChild(validateBtn);
-  containerEl.appendChild(skipBtn);
-}
-async function confirmPseudo(word, color, displayText, pendingLogo) {
-  const session_token = localStorage.getItem('session_token');
-  try {
-    await api('/pseudo/confirm', { session_token, word, color });
-    // Logo (2026-07-31) : commis SEULEMENT si preview a renvoyé une image NOUVELLE (is_new) —
-    // un mot déjà pourvu d'un logo (is_new=false) n'a rien à réécrire, /pseudo/logo/confirm ne
-    // serait qu'un aller-retour réseau inutile. Échec silencieux : le pseudo est déjà confirmé à
-    // ce stade, un souci sur le logo ne doit jamais faire échouer la confirmation elle-même.
-    if (pendingLogo && pendingLogo.is_new && pendingLogo.image_base64) {
-      try {
-        await api('/pseudo/logo/confirm', { session_token, word, image_base64: pendingLogo.image_base64 });
-        loadPseudoWordLogos(); // rafraîchit le cache local, pas besoin d'attendre ici
-      } catch (e) { /* pas bloquant */ }
-    }
-    document.getElementById('pseudoProposal').classList.add('hidden');
-    chatHistory.push({ role: 'assistant', content: 'Pseudo confirmé : ' + (displayText || (word + ' ' + color)) + '.' });
-    renderChatMessages();
-  } catch (e) {
-    showMsg('chatMsg', e.message, 'error');
+  await loadPseudoWordLogos();
+  if (pseudo.word) {
+    const logoFile = PSEUDO_WORD_LOGOS[pseudo.word];
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; gap:.5em;';
+    if (logoFile) row.appendChild(buildColoredLogoElement('/pseudo_logos_data/' + logoFile, pseudo.color, 3));
+    const span = document.createElement('span');
+    span.textContent = pseudo.display;
+    row.appendChild(span);
+    statusEl.appendChild(row);
+  } else {
+    statusEl.innerHTML = '<p class="info">Tu n\'as pas encore de pseudonyme.</p>';
   }
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.style.marginTop = '.5em';
+  btn.textContent = pseudo.word ? 'Changer de pseudonyme' : 'Choisir mon pseudonyme';
+  btn.addEventListener('click', () => {
+    pickerEl.classList.remove('hidden');
+    renderPseudoGridPicker('comptePseudoGridContainer', () => loadMyPseudoLogoStatus());
+  });
+  statusEl.appendChild(btn);
 }
 // Forum : confirmation d'opinion (2026-07-26, bug réel signalé par le développeur — le backend
 // propose_opinion/opinion/confirm existait depuis la veille au soir, mais AUCUN code ne rendait

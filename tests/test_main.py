@@ -3051,10 +3051,11 @@ async def test_pseudo_confirm_endpoint_succeeds_then_allows_free_rechoice(client
 
 
 @pytest.mark.anyio
-async def test_chat_v2_injects_onboarding_block_until_pseudo_confirmed(client, logged_in_user, monkeypatch):
-    """Signal 'Nouveau, sans pseudo' : le bloc onboarding doit apparaître dans le system_prompt
-    tant qu'aucun pseudo n'est confirmé, et disparaître juste après confirmation — sur autant de
-    tours que nécessaire avant, pas seulement le tout premier appel."""
+async def test_chat_v2_never_injects_onboarding_block_anymore(client, logged_in_user, monkeypatch):
+    """Bloc onboarding retiré (2026-08-09, décision Angelo) : même sans pseudo confirmé, le
+    system_prompt ne doit plus jamais mentionner de mécanique de choix de pseudo — remplacé par
+    la grille de logos + réservation (voir /pseudo/grid, renderPseudoGridPicker côté frontend),
+    déclenchée directement à l'affichage de la page, jamais via une réponse du chatbot."""
     import main as main_module
 
     captured_prompts = []
@@ -3067,8 +3068,8 @@ async def test_chat_v2_injects_onboarding_block_until_pseudo_confirmed(client, l
 
     await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "salut"})
     await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "encore avant de choisir"})
-    assert "Premier contact" in captured_prompts[0]
-    assert "Premier contact" in captured_prompts[1]  # toujours actif au 2e tour, pas juste le 1er
+    assert "propose_custom_pseudo(word, color, appropriate)" not in captured_prompts[0]
+    assert "propose_custom_pseudo(word, color, appropriate)" not in captured_prompts[1]
 
 
 @pytest.mark.anyio
@@ -4827,18 +4828,19 @@ def test_build_tools_description_onboarding_scope_excludes_unrelated_actions():
     import chatbot_actions
 
     text = chatbot_actions.build_tools_description(chatbot_actions.ONBOARDING_ACTIONS)
-    # présent : les actions du scope onboarding
-    assert "propose_custom_pseudo(word, color, appropriate)" in text
-    assert "get_or_assign_pseudo()" in text
+    # présent : les actions du scope onboarding restant (2026-08-09, choix de pseudo retiré du
+    # chatbot — voir décision Angelo dans main.py chat_v2)
     assert "list_summaries()" in text
-    # absent : forum et RAG conseil municipal, hors scope, ET propose_pseudo_candidates (retirée
-    # du scope onboarding le 2026-08-05, bug réel #24 — les 3 exemples sont désormais injectés
-    # tout faits dans le contexte, plus besoin de cette action ici).
+    assert "report_bug(description)" in text
+    # absent : choix de pseudo (retiré ENTIÈREMENT du chatbot le 2026-08-09, remplacé par la
+    # grille de logos + réservation), forum et RAG conseil municipal, hors scope.
+    assert "propose_custom_pseudo(word, color, appropriate)" not in text
+    assert "get_or_assign_pseudo()" not in text
+    assert "propose_pseudo_candidates(index, appropriate)" not in text
     assert "search_conseil_municipal(query)" not in text
     assert "get_conseil_municipal_document(source_url)" not in text
     assert "propose_opinion(thread_id" not in text
     assert "propose_reaction(opinion_id" not in text
-    assert "propose_pseudo_candidates(index, appropriate)" not in text
     # la règle universelle {{résultat}} doit rester présente même scopé (bug #22)
     assert "{{résultat}}" in text
 
@@ -5038,10 +5040,11 @@ def test_build_onboarding_context_block_mentions_examples_and_custom_pseudo_only
 
 
 @pytest.mark.anyio
-async def test_chat_v2_onboarding_context_includes_random_suggestions(client, logged_in_user, monkeypatch):
-    """Vérifie le câblage main.py : sans pseudo confirmé, le system_prompt doit contenir les 3
-    suggestions renvoyées par random_available_pseudo_candidates pour CE tour précis."""
-    import chatbot_actions
+async def test_chat_v2_no_longer_offers_pseudo_choice_without_pseudo(client, logged_in_user, monkeypatch):
+    """Bloc onboarding retiré (2026-08-09, décision Angelo) : le choix de pseudo passe désormais
+    entièrement par la grille de logos + réservation (/pseudo/grid, /pseudo/reserve), plus jamais
+    par le chatbot — même sans pseudo confirmé, le system_prompt ne doit plus jamais exposer
+    propose_custom_pseudo/get_or_assign_pseudo ni suggérer de mots."""
     import main as main_module
 
     captured_prompts = []
@@ -5051,17 +5054,10 @@ async def test_chat_v2_onboarding_context_includes_random_suggestions(client, lo
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
     monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
-    fixed_suggestions = [
-        {"word": "Galaxie", "color": "violet", "display": "Galaxie violette"},
-        {"word": "Trompette", "color": "rouge", "display": "Trompette rouge"},
-        {"word": "Cygne", "color": "gris", "display": "Cygne gris"},
-    ]
-    monkeypatch.setattr(main_module, "random_available_pseudo_candidates", lambda taken, n=3: fixed_suggestions)
 
     await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "bonjour"})
-    assert "Galaxie violette" in captured_prompts[0]
-    assert "Trompette rouge" in captured_prompts[0]
-    assert "Cygne gris" in captured_prompts[0]
+    assert "propose_custom_pseudo(word, color, appropriate)" not in captured_prompts[0]
+    assert "get_or_assign_pseudo()" not in captured_prompts[0]
 
 
 # ---------- Rechoix de pseudo déjà confirmé (bug réel connexe, 2026-08-06) ----------
@@ -5089,11 +5085,11 @@ def test_build_pseudo_rechoice_context_block_mentions_current_and_alternatives()
 
 
 @pytest.mark.anyio
-async def test_chat_v2_rechoice_context_includes_random_suggestions_when_pseudo_confirmed(client, logged_in_user, monkeypatch):
-    """Vérifie le câblage main.py côté rechoix : un pseudo déjà confirmé ne doit plus donner un
-    context_block vide — les 3 nouvelles alternatives renvoyées par
-    random_available_pseudo_candidates pour CE tour doivent apparaître dans le system_prompt,
-    exactement comme pour l'onboarding."""
+async def test_chat_v2_no_longer_offers_pseudo_rechoice_via_chat(client, logged_in_user, monkeypatch):
+    """Bloc rechoix retiré (2026-08-09, décision Angelo) : un pseudo déjà confirmé, y compris si
+    l'utilisateur demande explicitement à en changer, ne doit plus jamais faire apparaître de
+    mécanique de choix de pseudo dans le system_prompt — le rechoix passe désormais par le bouton
+    "Changer de pseudonyme" de la page Mon compte (grille de logos + réservation)."""
     import main as main_module
 
     identity_token = main_module._require_identity(logged_in_user["session_token"])
@@ -5106,15 +5102,7 @@ async def test_chat_v2_rechoice_context_includes_random_suggestions_when_pseudo_
         return {"replies": ["ok"], "actions_log": [], "error": None}
 
     monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
-    fixed_suggestions = [
-        {"word": "Galaxie", "color": "violet", "display": "Galaxie violette"},
-        {"word": "Trompette", "color": "rouge", "display": "Trompette rouge"},
-        {"word": "Cygne", "color": "gris", "display": "Cygne gris"},
-    ]
-    monkeypatch.setattr(main_module, "random_available_pseudo_candidates", lambda taken, n=3: fixed_suggestions)
 
     await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "je veux changer de pseudo"})
-    assert "Hibou vert" in captured_prompts[0]
-    assert "Galaxie violette" in captured_prompts[0]
-    assert "Trompette rouge" in captured_prompts[0]
-    assert "Cygne gris" in captured_prompts[0]
+    assert "propose_custom_pseudo(word, color, appropriate)" not in captured_prompts[0]
+    assert "get_or_assign_pseudo()" not in captured_prompts[0]

@@ -27,9 +27,8 @@ from pydantic import BaseModel
 
 from chatbot_actions import (
     ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, FORUM_REACTION_ACTIONS,
-    ONBOARDING_ACTIONS, PSEUDO_COLORS, RESERVED_CATEGORIES,
-    _agree_pseudo_display, build_onboarding_context_block, build_pseudo_rechoice_context_block,
-    build_response_format, compute_debate_token, random_available_pseudo_candidates,
+    GENERAL_ACTIONS, ONBOARDING_ACTIONS, PSEUDO_COLORS, RESERVED_CATEGORIES,
+    _agree_pseudo_display, build_response_format, compute_debate_token,
 )
 from chatbot_executor import build_system_prompt, run_turn
 import pseudo_logo_gen
@@ -350,6 +349,23 @@ def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )"""
         )
+        # pseudo_reservations (2026-08-09, décision Angelo) : verrou temporaire sur un (word,
+        # color) pendant qu'un utilisateur hésite dans la nouvelle grille de logos, pour éviter
+        # que 2 personnes confirment le même pseudo entre le clic et la confirmation. TTL de 3 min
+        # (RESERVATION_TTL_SECONDS), PAS de tâche de nettoyage en arrière-plan : une réservation
+        # expirée est simplement ignorée/écrasée à la prochaine lecture ou écriture (voir clause
+        # WHERE dans reserve_pseudo_slot/get_pseudo_grid) — inutile de la supprimer activement,
+        # elle ne gêne jamais personne une fois son TTL dépassé. PRIMARY KEY (word, color) : au
+        # plus une réservation active par pseudo possible, cohérent avec pseudos.idx_pseudos_word_color.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pseudo_reservations (
+                word TEXT NOT NULL,
+                color TEXT NOT NULL,
+                debate_token TEXT NOT NULL,
+                reserved_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (word, color)
+            )"""
+        )
         # Seule exception au principe "chatbot = passage obligé" : l'administration s'adresse
         # directement à un citoyen, jamais via le chatbot comme intermédiaire. admin_identity est
         # une identité FIXE et publique par construction (jamais un pseudo, jamais peppée) —
@@ -616,6 +632,20 @@ class PseudoMineRequest(BaseModel):
     session_token: str
 
 
+class PseudoGridRequest(BaseModel):
+    session_token: str
+
+
+class PseudoReserveRequest(BaseModel):
+    session_token: str
+    word: str
+    color: str
+
+
+class PseudoReleaseRequest(BaseModel):
+    session_token: str
+
+
 class OpinionConfirmRequest(BaseModel):
     session_token: str
     # Soit thread_id (fil EXISTANT déjà publié), soit new_thread_title (création couplée d'un
@@ -798,7 +828,106 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
             )
         except sqlite3.IntegrityError:
             raise ValueError("ce mot+couleur est déjà pris par quelqu'un d'autre")
+    with db() as conn:
+        conn.execute("DELETE FROM pseudo_reservations WHERE debate_token=?", (debate_token,))
     return {"word": word, "color": color}
+
+
+# TTL de réservation (2026-08-09, décision Angelo) : 3 minutes, largement suffisant pour
+# choisir une couleur dans la grille puis confirmer, sans laisser un slot bloqué trop longtemps
+# si l'utilisateur abandonne en cours de route (onglet fermé, perte réseau...).
+RESERVATION_TTL_SECONDS = 180
+
+
+def _release_reservation(conn, debate_token: str) -> None:
+    conn.execute("DELETE FROM pseudo_reservations WHERE debate_token=?", (debate_token,))
+
+
+def reserve_pseudo_slot(identity_token: str, word: str, color: str) -> dict:
+    """Verrou temporaire (RESERVATION_TTL_SECONDS) sur un (word, color) pendant qu'un
+    utilisateur choisit dans la grille — évite qu'un 2e utilisateur confirme le même pseudo
+    entre le clic et la confirmation finale (/pseudo/confirm reste le seul point d'écriture
+    définitive). Une seule réservation active par utilisateur : reserver un nouveau (word,
+    color) libère automatiquement l'ancien. Pas de nettoyage en arrière-plan — une réservation
+    expirée (age >= TTL) est traitée comme absente ici même, et sera écrasée par le prochain
+    INSERT si quelqu'un d'autre la reprend."""
+    word = word.strip()
+    color = color.strip().lower()
+    if not word:
+        raise ValueError("mot manquant")
+    if color not in PSEUDO_COLORS:
+        raise ValueError("couleur non valide")
+    debate_token = compute_debate_token(identity_token)
+    with db() as conn:
+        taken = conn.execute(
+            "SELECT 1 FROM pseudos WHERE word=? AND color=?", (word, color)
+        ).fetchone()
+        if taken:
+            raise ValueError("ce mot+couleur est déjà pris par quelqu'un d'autre")
+        active = conn.execute(
+            "SELECT debate_token FROM pseudo_reservations WHERE word=? AND color=? "
+            "AND (julianday('now') - julianday(reserved_at)) * 86400 < ?",
+            (word, color, RESERVATION_TTL_SECONDS),
+        ).fetchone()
+        if active and active["debate_token"] != debate_token:
+            raise ValueError("ce mot+couleur est en cours de choix par quelqu'un d'autre, réessaie dans quelques minutes")
+        conn.execute(
+            "DELETE FROM pseudo_reservations WHERE debate_token=? AND NOT (word=? AND color=?)",
+            (debate_token, word, color),
+        )
+        conn.execute(
+            "INSERT INTO pseudo_reservations (word, color, debate_token, reserved_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(word, color) DO UPDATE SET "
+            "debate_token=excluded.debate_token, reserved_at=CURRENT_TIMESTAMP",
+            (word, color, debate_token),
+        )
+    return {"word": word, "color": color, "ttl_seconds": RESERVATION_TTL_SECONDS}
+
+
+def release_pseudo_reservation(identity_token: str) -> None:
+    """Libère explicitement la réservation en cours de l'utilisateur (annulation, changement de
+    sélection dans la grille avant confirmation). Idempotent — aucune erreur si rien à libérer."""
+    debate_token = compute_debate_token(identity_token)
+    with db() as conn:
+        _release_reservation(conn, debate_token)
+
+
+def get_pseudo_grid(identity_token: str) -> dict:
+    """Lecture seule pour la nouvelle grille de logos (2026-08-09) : pour chaque mot de la
+    banque pré-générée (pseudo_word_logos), la liste des couleurs encore choisissables — ni déjà
+    confirmées par quelqu'un (table pseudos), ni activement réservées par quelqu'un d'autre
+    (table pseudo_reservations, filtrée sur le TTL). Un mot dont les 8 couleurs sont indisponibles
+    n'apparaît pas du tout dans la grille, comme prévu dans le design initial (wiki
+    pseudo-logo-banque). Inclut aussi ma propre réservation en cours le cas échéant, pour que le
+    frontend puisse la présélectionner après un rechargement de page."""
+    debate_token = compute_debate_token(identity_token)
+    with db() as conn:
+        taken = {(r["word"], r["color"]) for r in conn.execute("SELECT word, color FROM pseudos")}
+        reserved_rows = conn.execute(
+            "SELECT word, color, debate_token FROM pseudo_reservations "
+            "WHERE (julianday('now') - julianday(reserved_at)) * 86400 < ?",
+            (RESERVATION_TTL_SECONDS,),
+        ).fetchall()
+    reserved = {(r["word"], r["color"]): r["debate_token"] for r in reserved_rows}
+    words = get_all_word_logos()
+    grid = {}
+    my_reservation = None
+    for word in words:
+        colors = []
+        for color in PSEUDO_COLORS:
+            key = (word, color)
+            if key in taken:
+                continue
+            holder = reserved.get(key)
+            if holder is not None and holder != debate_token:
+                continue
+            colors.append(color)
+            if holder == debate_token:
+                my_reservation = {"word": word, "color": color}
+        if colors:
+            grid[word] = colors
+    return {"grid": grid, "my_reservation": my_reservation, "ttl_seconds": RESERVATION_TTL_SECONDS}
 
 
 # Volontairement DANS le volume /data (même montage persistant que vote.db), PAS sous
@@ -2482,27 +2611,15 @@ def chat_v2(req: ChatRequest):
         ).fetchall()
         taken_rows = conn.execute("SELECT word, color FROM pseudos").fetchall()
     taken_pseudos = {(r["word"], r["color"]) for r in taken_rows}
-    # Bloc actif tant qu'aucun pseudo n'est confirmé — sur autant de tours que nécessaire (pas de
-    # education_state pour cette passe, donc pas de suivi plus fin que ce signal binaire). Bug réel
-    # #24 (2026-08-04/05, Angelo) : 3 exemples tirés au hasard RECALCULÉS à chaque appel (pas une
-    # constante figée) — voir chatbot_actions.random_available_pseudo_candidates/
-    # build_onboarding_context_block, le modèle n'a plus besoin de suivre un état lui-même.
-    # Bug réel connexe (2026-08-06, Angelo) : ce fix n'était branché QUE sur l'onboarding — un
-    # rechoix explicite (pseudo déjà confirmé) retombait sur l'ancien mécanisme un-par-un. Même
-    # principe étendu ici : 3 alternatives déjà calculées, fournies même quand un pseudo existe
-    # déjà, à ne mentionner QUE si l'utilisateur demande explicitement à changer (voir
-    # build_pseudo_rechoice_context_block).
-    pseudo_suggestions = random_available_pseudo_candidates(taken_pseudos)
-    if existing_pseudo:
-        current_display = _agree_pseudo_display(existing_pseudo["word"], existing_pseudo["color"])
-        context_block = build_pseudo_rechoice_context_block(current_display, pseudo_suggestions)
-    else:
-        context_block = build_onboarding_context_block(pseudo_suggestions)
+    # Choix/rechoix de pseudo (2026-08-09, décision Angelo) : RETIRÉ du chatbot — remplacé
+    # entièrement par la grille de logos + réservation (voir /pseudo/grid, /pseudo/reserve,
+    # frontend renderPseudoGridPicker). Plus de bloc onboarding/rechoice injecté ici, plus de
+    # pseudo_suggestions calculées — le chatbot ne doit plus jamais négocier de pseudo, voir
+    # ONBOARDING_ACTIONS ci-dessous (propose_custom_pseudo/get_or_assign_pseudo retirés du scope
+    # exposé au LLM, plutôt que supprimés du code : dette de nettoyage identifiée, pas faite ici).
     # Date du jour (2026-07-26, manque trouvé par Angelo en réel : "tu sais quel jour on est ?" ->
-    # "je n'ai pas accès à l'heure actuelle") — toujours injectée, indépendamment de l'onboarding,
-    # utile aussi pour raisonner sur list_conseil_municipal_seances ("y a-t-il eu un conseil
-    # depuis juin ?").
-    context_block = f"{current_date_block()}\n\n{context_block}".strip() if context_block else current_date_block()
+    # "je n'ai pas accès à l'heure actuelle") — toujours injectée.
+    context_block = current_date_block()
     element_block = _element_context_block(
         req.context_opinion_id, req.context_remarque_id, identity_token, req.context_reaction_id
     )
@@ -2513,13 +2630,16 @@ def chat_v2(req: ChatRequest):
     # widget "Réagir" (élément forum ciblé) prime sur l'onboarding si les deux signaux sont
     # présents en même temps (cas marginal : naviguer le Forum avant d'avoir choisi de pseudo),
     # car c'est le signal le plus précis des deux. "assistance générale" (aucun des deux signaux)
-    # garde le jeu complet, inchangé.
+    # garde le jeu complet MOINS les 3 actions pseudo (2026-08-09, décision Angelo — voir
+    # chatbot_actions.GENERAL_ACTIONS) : action_scope=None (jeu complet SANS exclusion) n'est plus
+    # utilisé nulle part ici, précisément pour garantir que le LLM ne peut plus jamais négocier de
+    # pseudo, qu'il en ait déjà un ou non.
     if element_block:
         action_scope = FORUM_REACTION_ACTIONS
     elif not existing_pseudo:
         action_scope = ONBOARDING_ACTIONS
     else:
-        action_scope = None
+        action_scope = GENERAL_ACTIONS
     system_prompt = build_system_prompt(CHAT_SYSTEM_PROMPT, context_block=context_block, action_names=action_scope)
     conversation_messages = [{"role": m.role, "content": m.content} for m in req.history[-20:]]
     conversation_messages.append({"role": "user", "content": req.message})
@@ -2592,6 +2712,38 @@ def pseudo_mine(req: PseudoMineRequest):
         "word": pseudo["word"], "color": pseudo["color"],
         "display": _agree_pseudo_display(pseudo["word"], pseudo["color"]),
     }
+
+
+@app.post("/pseudo/grid")
+def pseudo_grid(req: PseudoGridRequest):
+    """Grille de logos (2026-08-09, remplace la négociation par chatbot pour ce choix précis —
+    décision Angelo). Lecture seule : mot -> couleurs encore choisissables pour ce mot, plus ma
+    réservation en cours le cas échéant (voir get_pseudo_grid)."""
+    identity_token = _require_identity(req.session_token)
+    return get_pseudo_grid(identity_token)
+
+
+@app.post("/pseudo/reserve")
+def pseudo_reserve(req: PseudoReserveRequest):
+    """Réservation temporaire (RESERVATION_TTL_SECONDS) d'un (word, color) pendant que
+    l'utilisateur est sur l'écran de confirmation de la grille — jamais une écriture définitive
+    (voir /pseudo/confirm, seul point d'écriture réel). Appelée dès le clic sur un logo+couleur,
+    avant l'écran "Confirmes-tu ?"."""
+    identity_token = _require_identity(req.session_token)
+    try:
+        return reserve_pseudo_slot(identity_token, req.word, req.color)
+    except ValueError as e:
+        status = 409 if "en cours de choix" in str(e) or "déjà pris" in str(e) else 400
+        raise HTTPException(status, str(e))
+
+
+@app.post("/pseudo/release")
+def pseudo_release(req: PseudoReleaseRequest):
+    """Libère explicitement la réservation en cours (l'utilisateur change d'avis dans la grille
+    avant confirmation, ou quitte l'écran). Idempotent, jamais d'erreur si rien à libérer."""
+    identity_token = _require_identity(req.session_token)
+    release_pseudo_reservation(identity_token)
+    return {"released": True}
 
 
 @app.post("/pseudo/logo/preview")
