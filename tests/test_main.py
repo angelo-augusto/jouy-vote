@@ -1277,9 +1277,9 @@ def test_confirm_pseudo_rejects_invalid_color():
 
 def test_confirm_pseudo_allows_free_rechoice_replacing_previous_pseudo():
     """Rechoix libre (2026-07-25, demande développeur via angelobot) : reconfirmer un pseudo
-    REMPLACE le précédent au lieu d'être bloqué. Décision explicite : aucune table de publication
-    liée au pseudo n'existe encore (voir TODO dans confirm_pseudo), donc "rien n'est publiable"
-    est vrai pour tout le monde aujourd'hui — rechoix inconditionnel assumé, pas un oubli."""
+    REMPLACE le précédent au lieu d'être bloqué — tant que rien n'a été publié sous ce pseudo (voir
+    test_confirm_pseudo_blocks_rechoice_once_something_published pour le cas bloqué, branché le
+    2026-08-09 une fois les tables opinions/opinion_reactions/thread_remarques disponibles)."""
     import main as main_module
 
     identity_token = "identity-pour-pseudo-test-3"
@@ -1298,6 +1298,86 @@ def test_confirm_pseudo_allows_free_rechoice_replacing_previous_pseudo():
 
     with main.db() as conn:
         conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+
+
+def test_confirm_pseudo_blocks_rechoice_once_something_published():
+    """2026-08-09 (demande Angelo, TODO du 2026-07-25 enfin branché) : dès qu'une opinion a été
+    PUBLIÉE sous le pseudo actuel, changer de pseudo doit être bloqué — casserait la cohérence de
+    ce qui est déjà public. Ré-confirmer le MÊME pseudo (pas un changement) reste toujours permis."""
+    import main as main_module
+
+    identity_token = "identity-pseudo-blocage-rechoice"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+        conn.execute("DELETE FROM opinions WHERE author_debate_token=?", (debate_token,))
+    try:
+        main_module.confirm_pseudo(identity_token, "Renard", "bleu")
+        thread = main_module.create_thread("Fil pour test blocage rechoix")
+        main_module.publish_thread(thread["thread_id"])
+        opinion = main_module.create_opinion(thread["thread_id"], identity_token, "Mon opinion publiée")
+        main_module.publish_opinion(opinion["opinion_id"])
+
+        with pytest.raises(ValueError, match="rechoix impossible"):
+            main_module.confirm_pseudo(identity_token, "Hibou", "vert")
+
+        # ré-confirmer le MÊME pseudo (pas un changement réel) reste permis
+        result = main_module.confirm_pseudo(identity_token, "Renard", "bleu")
+        assert result == {"word": "Renard", "color": "bleu"}
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+            conn.execute("DELETE FROM opinions WHERE author_debate_token=?", (debate_token,))
+
+
+def test_confirm_pseudo_allows_rechoice_if_only_draft_content_exists():
+    """Un brouillon ('draft', jamais publié) ne bloque pas le rechoix — voir
+    _has_published_content, seul le statut 'published' compte."""
+    import main as main_module
+
+    identity_token = "identity-pseudo-rechoice-draft-only"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+        conn.execute("DELETE FROM opinions WHERE author_debate_token=?", (debate_token,))
+    try:
+        main_module.confirm_pseudo(identity_token, "Renard", "bleu")
+        thread = main_module.create_thread("Fil pour test brouillon rechoix")
+        main_module.publish_thread(thread["thread_id"])
+        main_module.create_opinion(thread["thread_id"], identity_token, "Brouillon jamais publié")
+
+        result = main_module.confirm_pseudo(identity_token, "Hibou", "vert")
+        assert result == {"word": "Hibou", "color": "vert"}
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+            conn.execute("DELETE FROM opinions WHERE author_debate_token=?", (debate_token,))
+
+
+@pytest.mark.anyio
+async def test_pseudo_mine_endpoint_reports_can_rechoice(client, logged_in_user):
+    """2026-08-09 : /pseudo/mine expose can_rechoice pour que le frontend désactive le bouton
+    "Changer de pseudonyme" AVANT que l'utilisateur ne se heurte à un 400 en fin de parcours."""
+    import main as main_module
+
+    identity_token = main_module._require_identity(logged_in_user["session_token"])
+    debate_token = main_module.compute_debate_token(identity_token)
+    main_module.confirm_pseudo(identity_token, "Renard", "bleu")
+    try:
+        resp = await client.post("/pseudo/mine", json={"session_token": logged_in_user["session_token"]})
+        assert resp.json()["can_rechoice"] is True
+
+        thread = main_module.create_thread("Fil pour test endpoint can_rechoice")
+        main_module.publish_thread(thread["thread_id"])
+        opinion = main_module.create_opinion(thread["thread_id"], identity_token, "Opinion publiée")
+        main_module.publish_opinion(opinion["opinion_id"])
+
+        resp2 = await client.post("/pseudo/mine", json={"session_token": logged_in_user["session_token"]})
+        assert resp2.json()["can_rechoice"] is False
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+            conn.execute("DELETE FROM opinions WHERE author_debate_token=?", (debate_token,))
 
 
 def test_confirm_pseudo_rejects_word_color_pair_already_taken_by_another_identity():

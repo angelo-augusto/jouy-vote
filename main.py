@@ -803,15 +803,13 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
 
     Rechoix libre (2026-07-25, demande développeur via angelobot) : reconfirmer REMPLACE le
     pseudo existant au lieu d'être bloqué — plus de vérification "un pseudo existe déjà pour
-    cette identité". TODO IMPORTANT : la condition prévue par le développeur était "rechoix libre
-    SI RIEN N'A ÉTÉ PUBLIÉ" — au moment de ce changement, aucune table opinions/témoignages/
-    argumentaires n'existe encore (seuls votes, chat_summaries, pseudos existent, et votes est
-    délibérément non-reliable au pseudo pour préserver l'anonymat, voir wiki
-    architecture-technique) donc "rien n'est publiable" est vrai pour tout le monde aujourd'hui —
-    rechoix inconditionnel décidé en connaissance de cause (confirmé par angelobot avant
-    implémentation). LE JOUR OÙ une table de publication liée au pseudo existe, ce rechoix doit
-    être regaté sur "aucune publication associée à ce debate_token", sans quoi changer de pseudo
-    après publication casserait la cohérence des publications déjà attribuées."""
+    cette identité". TODO du 2026-07-25 enfin branché (2026-08-09, confirmé par Angelo) : la
+    condition prévue dès l'origine était "rechoix libre SI RIEN N'A ÉTÉ PUBLIÉ" — à l'époque
+    aucune table de publication n'existait encore, rendant la condition vide de sens ; les 3 tables
+    (opinions, opinion_reactions, thread_remarques) existent maintenant, voir
+    _has_published_content. Dès qu'une publication existe sous ce debate_token, le rechoix est
+    bloqué — sans quoi changer de pseudo après publication casserait la cohérence des publications
+    déjà attribuées (un lecteur verrait une opinion signée d'un pseudo qui n'a plus de sens)."""
     word = word.strip()
     color = color.strip().lower()
     if not word:
@@ -819,6 +817,16 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
     if color not in PSEUDO_COLORS:
         raise ValueError("couleur non valide")
     debate_token = compute_debate_token(identity_token)
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT word, color FROM pseudos WHERE debate_token=?", (debate_token,)
+        ).fetchone()
+    is_rechoice = existing is not None and (existing["word"], existing["color"]) != (word, color)
+    if is_rechoice and _has_published_content(debate_token):
+        raise ValueError(
+            "rechoix impossible : tu as déjà publié une opinion, une réaction ou une remarque "
+            "sous ton pseudo actuel — le changer casserait la cohérence de ce que tu as déjà publié"
+        )
     with db() as conn:
         try:
             conn.execute(
@@ -832,6 +840,28 @@ def confirm_pseudo(identity_token: str, word: str, color: str) -> dict:
     with db() as conn:
         conn.execute("DELETE FROM pseudo_reservations WHERE debate_token=?", (debate_token,))
     return {"word": word, "color": color}
+
+
+def _has_published_content(debate_token: str) -> bool:
+    """Vrai si ce debate_token a au moins une publication (opinion, réaction, ou remarque) au
+    statut 'published' — utilisé pour geler le rechoix de pseudo (voir confirm_pseudo). Les
+    brouillons ('draft') ne comptent pas : jamais montrés publiquement avec un pseudo attaché,
+    donc aucun risque d'incohérence si l'utilisateur change d'avis avant de publier pour de vrai."""
+    with db() as conn:
+        if conn.execute(
+            "SELECT 1 FROM opinions WHERE author_debate_token=? AND status='published' LIMIT 1",
+            (debate_token,),
+        ).fetchone():
+            return True
+        if conn.execute(
+            "SELECT 1 FROM opinion_reactions WHERE reactor_debate_token=? AND status='published' LIMIT 1",
+            (debate_token,),
+        ).fetchone():
+            return True
+        return conn.execute(
+            "SELECT 1 FROM thread_remarques WHERE author_debate_token=? AND status='published' LIMIT 1",
+            (debate_token,),
+        ).fetchone() is not None
 
 
 # TTL de réservation (2026-08-09, décision Angelo) : 3 minutes, largement suffisant pour
@@ -2744,10 +2774,15 @@ def pseudo_mine(req: PseudoMineRequest):
     identity_token = _require_identity(req.session_token)
     pseudo = get_existing_pseudo(identity_token)
     if pseudo is None:
-        return {"word": None, "color": None, "display": None}
+        return {"word": None, "color": None, "display": None, "can_rechoice": True}
+    debate_token = compute_debate_token(identity_token)
     return {
         "word": pseudo["word"], "color": pseudo["color"],
         "display": _agree_pseudo_display(pseudo["word"], pseudo["color"]),
+        # can_rechoice (2026-08-09) : voir confirm_pseudo/_has_published_content — permet au
+        # frontend de désactiver/expliquer le bouton "Changer de pseudonyme" AVANT que
+        # l'utilisateur ne passe par toute la planche pour se heurter à un 400 à la confirmation.
+        "can_rechoice": not _has_published_content(debate_token),
     }
 
 

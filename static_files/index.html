@@ -1019,15 +1019,26 @@ async function loadMyPseudoLogoStatus() {
   } else {
     statusEl.innerHTML = '<p class="info">Tu n\'as pas encore de pseudonyme.</p>';
   }
-  const btn = document.createElement('button');
-  btn.className = 'btn-primary';
-  btn.style.marginTop = '.5em';
-  btn.textContent = pseudo.word ? 'Changer de pseudonyme' : 'Choisir mon pseudonyme';
-  btn.addEventListener('click', () => {
-    pickerEl.classList.remove('hidden');
-    renderPseudoGridPicker('comptePseudoGridContainer', () => loadMyPseudoLogoStatus());
-  });
-  statusEl.appendChild(btn);
+  // can_rechoice (2026-08-09) : faux dès qu'une opinion/réaction/remarque a été publiée sous ce
+  // pseudo — changer casserait la cohérence de ce qui est déjà public (voir confirm_pseudo/
+  // _has_published_content). Le 1er choix (pas encore de pseudo) n'est jamais concerné.
+  if (pseudo.word && !pseudo.can_rechoice) {
+    const lockedMsg = document.createElement('p');
+    lockedMsg.className = 'info';
+    lockedMsg.style.marginTop = '.5em';
+    lockedMsg.textContent = "Tu as déjà publié sous ce pseudo — il n'est plus modifiable toi-même. Passe par l'assistant pour demander l'intervention d'un administrateur si besoin.";
+    statusEl.appendChild(lockedMsg);
+  } else {
+    const btn = document.createElement('button');
+    btn.className = 'btn-primary';
+    btn.style.marginTop = '.5em';
+    btn.textContent = pseudo.word ? 'Changer de pseudonyme' : 'Choisir mon pseudonyme';
+    btn.addEventListener('click', () => {
+      pickerEl.classList.remove('hidden');
+      renderPseudoGridPicker('comptePseudoGridContainer', () => loadMyPseudoLogoStatus());
+    });
+    statusEl.appendChild(btn);
+  }
 }
 // Forum : confirmation d'opinion (2026-07-26, bug réel signalé par le développeur — le backend
 // propose_opinion/opinion/confirm existait depuis la veille au soir, mais AUCUN code ne rendait
