@@ -2079,14 +2079,85 @@ async function loadMyActivity() {
   try {
     const data = await api('/activity/mine', { session_token });
     el.innerHTML = '';
-    if (data.opinions.length === 0) {
-      el.innerHTML = "<p class=\"info\">Vous n'avez encore rien publié sur le Forum.</p>";
+    // Messages admin (2026-08-09) : en premier, avant le reste — canal privé, potentiellement
+    // important (avertissement de modération, précision sur un signalement), jamais noyé dans
+    // le reste de l'activité publique.
+    if (data.admin_messages && data.admin_messages.length > 0) {
+      const adminSection = document.createElement('div');
+      adminSection.style.marginBottom = '1.2em';
+      const h3 = document.createElement('h3');
+      h3.textContent = "Messages de l'administration";
+      adminSection.appendChild(h3);
+      data.admin_messages.forEach(m => adminSection.appendChild(renderMyActivityAdminMessage(m)));
+      el.appendChild(adminSection);
+    }
+    if (data.opinions.length === 0 && data.remarques.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'info';
+      p.textContent = "Vous n'avez encore rien publié sur le Forum.";
+      el.appendChild(p);
       return;
     }
     data.opinions.forEach(o => el.appendChild(renderMyActivityOpinion(o)));
+    // Mes remarques (2026-08-09) : jusqu'ici jamais affichées dans "Mon activité" — seulement les
+    // opinions. Chacune avec ses propres réponses (voir "qui m'a répondu", demande Angelo).
+    if (data.remarques.length > 0) {
+      const remSection = document.createElement('div');
+      const h3 = document.createElement('h3');
+      h3.textContent = 'Mes remarques';
+      remSection.appendChild(h3);
+      data.remarques.forEach(r => remSection.appendChild(renderMyActivityRemarque(r)));
+      el.appendChild(remSection);
+    }
   } catch (e) {
     el.innerHTML = '<p class="info">Impossible de charger votre activité.</p>';
   }
+}
+function renderMyActivityAdminMessage(m) {
+  const div = document.createElement('div');
+  div.className = 'question-block';
+  div.style.background = m.unread ? VOICE_BADGE_BG.admin : '';
+  const header = document.createElement('p');
+  header.style.margin = '0 0 .4em';
+  appendAuteurLabel(header, null, m.unread ? ' — nouveau' : '', null, null, 'admin');
+  div.appendChild(header);
+  const body = document.createElement('p');
+  body.style.margin = '0';
+  body.appendChild(document.createTextNode(m.body));
+  div.appendChild(body);
+  return div;
+}
+// Une remarque (réponse) reçue sous une opinion ou une autre remarque de l'utilisateur — pas de
+// stance (adhérer/opposer/neutre), juste un texte libre. Style volontairement proche de
+// renderMyActivityReaction pour rester visuellement cohérent dans la même page.
+function renderMyActivityReply(r) {
+  const div = document.createElement('div');
+  div.id = 'remarque-' + r.remarque_id;
+  div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
+  const strong = document.createElement('strong');
+  appendAuteurLabel(strong, r.auteur, ' : ', r.auteur_word, r.auteur_color, r.voice);
+  div.appendChild(strong);
+  div.appendChild(document.createTextNode(r.body));
+  return div;
+}
+function renderMyActivityRemarque(rem) {
+  const block = document.createElement('div');
+  block.className = 'question-block';
+  const h4 = document.createElement('h4');
+  h4.style.margin = '0 0 .3em';
+  h4.textContent = rem.thread_title;
+  block.appendChild(h4);
+  const body = document.createElement('p');
+  body.appendChild(document.createTextNode(rem.body));
+  block.appendChild(body);
+  if (rem.replies.length > 0) {
+    const repliesLabel = document.createElement('p');
+    repliesLabel.style.cssText = 'font-size:.85em; color:#666; margin:.3em 0 0;';
+    repliesLabel.textContent = rem.replies.length + ' réponse' + (rem.replies.length !== 1 ? 's' : '');
+    block.appendChild(repliesLabel);
+    rem.replies.forEach(r => block.appendChild(renderMyActivityReply(r)));
+  }
+  return block;
 }
 function renderMyActivityOpinion(o) {
   const block = document.createElement('div');
@@ -2131,6 +2202,15 @@ function renderMyActivityOpinion(o) {
   renderReactionSummary(o.reaction_counts, o.reactions);
   block.appendChild(reactionSummaryEl);
   block.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary));
+  // Réponses (remarques) reçues sous cette opinion (2026-08-09, "qui m'a répondu") — distinct des
+  // réactions adhérer/opposer/neutre affichées au-dessus.
+  if (o.replies && o.replies.length > 0) {
+    const repliesLabel = document.createElement('p');
+    repliesLabel.style.cssText = 'font-size:.85em; color:#666; margin:.5em 0 0;';
+    repliesLabel.textContent = o.replies.length + ' réponse' + (o.replies.length !== 1 ? 's' : '');
+    block.appendChild(repliesLabel);
+    o.replies.forEach(r => block.appendChild(renderMyActivityReply(r)));
+  }
   return block;
 }
 function renderMyActivityReaction(r, replyCtx) {

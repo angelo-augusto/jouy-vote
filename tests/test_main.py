@@ -3620,6 +3620,100 @@ async def test_activity_mine_endpoint_requires_valid_session(client):
     assert resp.status_code == 401
 
 
+def test_get_my_activity_includes_replies_to_own_opinion():
+    """2026-08-09 (demande Angelo, "qui m'a répondu") : les remarques PUBLIÉES qui répondent à
+    une opinion de l'utilisateur apparaissent dans son activité, distinctes des réactions
+    adhérer/opposer/neutre."""
+    import main as main_module
+
+    author_identity = "identity-activity-replies-author"
+    replier_identity = "identity-activity-replies-replier"
+    with main.db() as conn:
+        conn.execute(
+            "DELETE FROM pseudos WHERE debate_token IN (?, ?)",
+            (main_module.compute_debate_token(author_identity), main_module.compute_debate_token(replier_identity)),
+        )
+    main_module.confirm_pseudo(replier_identity, "Renard", "orange")
+
+    thread = main_module.create_thread("Fil pour test replies opinion")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], author_identity, "Mon opinion à répondre")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    remarque = main_module.create_remarque(
+        thread["thread_id"], replier_identity, "Je ne suis pas d'accord",
+        reply_to_opinion_id=opinion["opinion_id"],
+    )
+    main_module.publish_remarque(remarque["remarque_id"])
+
+    activity = main_module.get_my_activity(author_identity)
+    found = next(o for o in activity["opinions"] if o["opinion_id"] == opinion["opinion_id"])
+    assert len(found["replies"]) == 1
+    assert found["replies"][0]["auteur"] == "Renard orange"
+    assert found["replies"][0]["body"] == "Je ne suis pas d'accord"
+
+
+def test_get_my_activity_includes_own_remarques_with_their_replies():
+    """2026-08-09 : les remarques PUBLIÉES par l'utilisateur lui-même apparaissent désormais dans
+    son activité (absentes avant cette extension), chacune avec les réponses reçues."""
+    import main as main_module
+
+    me = "identity-activity-my-remarques"
+    replier = "identity-activity-my-remarques-replier"
+    with main.db() as conn:
+        conn.execute(
+            "DELETE FROM pseudos WHERE debate_token IN (?, ?)",
+            (main_module.compute_debate_token(me), main_module.compute_debate_token(replier)),
+        )
+    main_module.confirm_pseudo(replier, "Koala", "gris")
+
+    thread = main_module.create_thread("Fil pour test mes remarques")
+    main_module.publish_thread(thread["thread_id"])
+    opinion = main_module.create_opinion(thread["thread_id"], "identity-activity-my-remarques-other-author", "Une opinion")
+    main_module.publish_opinion(opinion["opinion_id"])
+
+    my_remarque = main_module.create_remarque(
+        thread["thread_id"], me, "Ma remarque à moi", reply_to_opinion_id=opinion["opinion_id"],
+    )
+    main_module.publish_remarque(my_remarque["remarque_id"])
+    reply = main_module.create_remarque(
+        thread["thread_id"], replier, "Réponse à ta remarque",
+        reply_to_remarque_id=my_remarque["remarque_id"],
+    )
+    main_module.publish_remarque(reply["remarque_id"])
+
+    activity = main_module.get_my_activity(me)
+    assert len(activity["remarques"]) == 1
+    assert activity["remarques"][0]["remarque_id"] == my_remarque["remarque_id"]
+    assert len(activity["remarques"][0]["replies"]) == 1
+    assert activity["remarques"][0]["replies"][0]["auteur"] == "Koala gris"
+
+
+def test_get_my_activity_includes_admin_messages_and_marks_them_read():
+    """2026-08-09 : les messages privés admin (send_admin_message) apparaissent dans l'activité de
+    leur destinataire — canal jamais lu nulle part avant cette extension. "unread" reflète l'état
+    AVANT cet appel (sinon jamais vrai), et l'appel marque les messages lus pour la prochaine fois."""
+    import main as main_module
+
+    recipient = "identity-activity-admin-msg-recipient"
+    debate_token = main_module.compute_debate_token(recipient)
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_messages WHERE recipient_debate_token=?", (debate_token,))
+    try:
+        main_module.send_admin_message(recipient, "Merci de rester courtois sur le fil X")
+
+        activity = main_module.get_my_activity(recipient)
+        assert len(activity["admin_messages"]) == 1
+        assert activity["admin_messages"][0]["body"] == "Merci de rester courtois sur le fil X"
+        assert activity["admin_messages"][0]["unread"] is True
+
+        activity2 = main_module.get_my_activity(recipient)
+        assert activity2["admin_messages"][0]["unread"] is False
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_messages WHERE recipient_debate_token=?", (debate_token,))
+
+
 @pytest.mark.anyio
 async def test_activity_mine_endpoint_returns_own_opinions(client, logged_in_user):
     import main as main_module

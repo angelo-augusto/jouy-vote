@@ -1631,14 +1631,48 @@ def get_forum_page_snapshot() -> list[dict]:
     return snapshot
 
 
+def _attribute_remarque_row(conn: sqlite3.Connection, r: sqlite3.Row) -> dict:
+    """Même principe d'attribution par pseudo que _get_opinion_reaction_summary, factorisé pour
+    les remarques (2026-08-09, "qui m'a répondu" — voir get_my_activity)."""
+    pseudo_row = conn.execute(
+        "SELECT word, color FROM pseudos WHERE debate_token=?", (r["author_debate_token"],)
+    ).fetchone()
+    word = pseudo_row["word"] if pseudo_row else None
+    color = pseudo_row["color"] if pseudo_row else None
+    return {
+        "remarque_id": r["remarque_id"],
+        "auteur": _voice_or_pseudo_display(r["voice"], word, color),
+        "auteur_word": word, "auteur_color": color, "voice": r["voice"],
+        "body": r["body"], "created_at": r["created_at"],
+    }
+
+
+def _get_replies_to(conn: sqlite3.Connection, column: str, target_id: int) -> list[dict]:
+    """Remarques PUBLIÉES qui répondent directement à une opinion, une remarque, ou une réaction
+    donnée — "column" ∈ {reply_to_opinion_id, reply_to_remarque_id, reply_to_reaction_id}. Utilisé
+    pour "qui m'a répondu" (2026-08-09, demande Angelo) : une remarque n'est visible dans
+    get_my_activity QUE si elle répond à du contenu de l'utilisateur connecté."""
+    rows = conn.execute(
+        f"""SELECT remarque_id, author_debate_token, body, voice, created_at
+            FROM thread_remarques
+            WHERE {column}=? AND status='published'
+            ORDER BY created_at ASC, remarque_id ASC""",
+        (target_id,),
+    ).fetchall()
+    return [_attribute_remarque_row(conn, r) for r in rows]
+
+
 def get_my_activity(identity_token: str) -> dict:
-    """Page "Mon activité" (lecture seule, 2026-07-26, priorité 1) : les opinions publiées ou
-    désavouées de l'utilisateur connecté, chacune avec le décompte des réactions reçues
-    (adhérer/opposer/neutre) et le détail des réactions elles-mêmes (voir
-    _get_opinion_reaction_summary). Attribution par pseudo confirmée par le développeur (via
-    angelobot, 2026-07-26) : une réaction avec argumentaire est essentiellement une mini-opinion,
-    même modèle d'identité publique stable que le reste du forum — pas une nouvelle frontière
-    d'anonymat à inventer."""
+    """Page "Mon activité" (lecture seule, 2026-07-26, priorité 1 ; étendue le 2026-08-09 pour
+    "qui m'a répondu" — demande Angelo) : les opinions et remarques publiées ou désavouées de
+    l'utilisateur connecté, chacune avec le décompte des réactions reçues (adhérer/opposer/neutre,
+    voir _get_opinion_reaction_summary) ET les remarques (réponses) reçues (voir _get_replies_to).
+    Inclut aussi les messages privés reçus d'un administrateur (voir send_admin_message — SEULE
+    exception "chatbot = passage obligé", jamais montrés nulle part avant cette extension).
+    Attribution par pseudo confirmée par le développeur (via angelobot, 2026-07-26) : une
+    réaction/remarque avec argumentaire est essentiellement une mini-opinion, même modèle
+    d'identité publique stable que le reste du forum — pas une nouvelle frontière d'anonymat à
+    inventer."""
     debate_token = compute_debate_token(identity_token)
     with db() as conn:
         opinion_rows = conn.execute(
@@ -1661,10 +1695,52 @@ def get_my_activity(identity_token: str) -> dict:
                 "voice": o["voice"],
                 "superseded_by_opinion_id": o["superseded_by_opinion_id"],
                 **_get_opinion_reaction_summary(conn, o["opinion_id"]),
+                "replies": _get_replies_to(conn, "reply_to_opinion_id", o["opinion_id"]),
             }
             for o in opinion_rows
         ]
-    return {"opinions": opinions}
+
+        remarque_rows = conn.execute(
+            """SELECT r.remarque_id, r.thread_id, r.body, r.voice, r.created_at, t.title AS thread_title
+               FROM thread_remarques r
+               JOIN threads t ON t.thread_id = r.thread_id
+               WHERE r.author_debate_token=? AND r.status='published'
+               ORDER BY r.created_at DESC, r.remarque_id DESC""",
+            (debate_token,),
+        ).fetchall()
+        remarques = [
+            {
+                "remarque_id": r["remarque_id"],
+                "thread_id": r["thread_id"],
+                "thread_title": r["thread_title"],
+                "body": r["body"],
+                "voice": r["voice"],
+                "replies": _get_replies_to(conn, "reply_to_remarque_id", r["remarque_id"]),
+            }
+            for r in remarque_rows
+        ]
+
+        # Messages admin (2026-08-09) : marqués lus au moment où l'utilisateur les consulte via
+        # cette page — "unread" reflète l'état AVANT cette lecture (sinon tout apparaîtrait déjà
+        # lu dès le premier chargement).
+        admin_message_rows = conn.execute(
+            "SELECT message_id, admin_identity, body, read_at, created_at FROM admin_messages "
+            "WHERE recipient_debate_token=? ORDER BY created_at DESC",
+            (debate_token,),
+        ).fetchall()
+        admin_messages = [
+            {
+                "message_id": m["message_id"], "admin_identity": m["admin_identity"],
+                "body": m["body"], "created_at": m["created_at"], "unread": m["read_at"] is None,
+            }
+            for m in admin_message_rows
+        ]
+        conn.execute(
+            "UPDATE admin_messages SET read_at=CURRENT_TIMESTAMP "
+            "WHERE recipient_debate_token=? AND read_at IS NULL",
+            (debate_token,),
+        )
+    return {"opinions": opinions, "remarques": remarques, "admin_messages": admin_messages}
 
 
 def send_reset_email(to_email: str, reset_token: str) -> bool:
