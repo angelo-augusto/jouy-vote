@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import secrets
 import sqlite3
@@ -928,6 +929,38 @@ def get_pseudo_grid(identity_token: str) -> dict:
         if colors:
             grid[word] = colors
     return {"grid": grid, "my_reservation": my_reservation, "ttl_seconds": RESERVATION_TTL_SECONDS}
+
+
+# Taille d'une planche (2026-08-09, décision Angelo) : montrer directement des logos DÉJÀ
+# colorisés qu'il suffit de cliquer, tirés au hasard parmi les combinaisons encore disponibles,
+# plutôt qu'un mot en gris à cliquer puis un choix de couleur en 2e étape (retour terrain sur la
+# 1re version de la grille : "il faut qu'on voit directement des logos colorisés").
+PSEUDO_BOARD_SIZE = 60
+
+
+def random_pseudo_board(identity_token: str, n: int = PSEUDO_BOARD_SIZE) -> dict:
+    """Tire n couples (word, color) au hasard parmi ceux encore disponibles (voir get_pseudo_grid)
+    — un appel = une planche, un nouvel appel = une planche différente (aucun état de tirage
+    conservé côté serveur, le hasard suffit). Si l'appelant a déjà une réservation active, elle
+    est FORCÉE dans la planche (sinon un rechargement de planche la ferait disparaître de la vue
+    alors qu'elle reste valide 3 min côté serveur)."""
+    grid_data = get_pseudo_grid(identity_token)
+    words_map = get_all_word_logos()
+    pairs = [(word, color) for word, colors in grid_data["grid"].items() for color in colors]
+    random.shuffle(pairs)
+    my_reservation = grid_data["my_reservation"]
+    board_pairs: list[tuple[str, str]] = []
+    if my_reservation:
+        pinned = (my_reservation["word"], my_reservation["color"])
+        board_pairs.append(pinned)
+        pairs = [p for p in pairs if p != pinned]
+    board_pairs.extend(pairs[: max(0, n - len(board_pairs))])
+    board = [{"word": w, "color": c, "file": words_map[w]} for w, c in board_pairs]
+    return {
+        "board": board,
+        "my_reservation": my_reservation,
+        "ttl_seconds": grid_data["ttl_seconds"],
+    }
 
 
 # Volontairement DANS le volume /data (même montage persistant que vote.db), PAS sous
@@ -2721,6 +2754,16 @@ def pseudo_grid(req: PseudoGridRequest):
     réservation en cours le cas échéant (voir get_pseudo_grid)."""
     identity_token = _require_identity(req.session_token)
     return get_pseudo_grid(identity_token)
+
+
+@app.post("/pseudo/board")
+def pseudo_board(req: PseudoGridRequest):
+    """Planche de logos déjà colorisés (2026-08-09, décision Angelo suite à un retour terrain sur
+    la 1re version de la grille) : PSEUDO_BOARD_SIZE couples (mot, couleur) tirés au hasard parmi
+    ceux encore disponibles, prêts à cliquer directement — plus d'étape intermédiaire de choix de
+    couleur. Un nouvel appel ('planche suivante' côté frontend) tire une nouvelle sélection."""
+    identity_token = _require_identity(req.session_token)
+    return random_pseudo_board(identity_token)
 
 
 @app.post("/pseudo/reserve")

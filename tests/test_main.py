@@ -1319,6 +1319,176 @@ def test_confirm_pseudo_rechoice_to_pair_taken_by_another_identity_still_rejecte
         main_module.confirm_pseudo(id_b, "Renard", "bleu")
 
 
+# ===== Planche de logos + réservation (2026-08-09, décision Angelo) =====
+# Remplace la négociation de pseudo par chatbot : /pseudo/grid (mot -> couleurs libres),
+# /pseudo/board (planche de couples déjà tirés au hasard, prêts à cliquer), /pseudo/reserve +
+# /pseudo/release (verrou temporaire anti-collision), /pseudo/confirm inchangé (seul point
+# d'écriture définitive).
+
+def _seed_word_logos(words):
+    """Insertion directe dans pseudo_word_logos (bypass save_word_logo, qui écrit un vrai fichier
+    sur disque) — seul le mapping word->file compte pour get_pseudo_grid/random_pseudo_board."""
+    import main as main_module
+    with main.db() as conn:
+        for word in words:
+            conn.execute(
+                "INSERT OR IGNORE INTO pseudo_word_logos (word, file) VALUES (?, ?)",
+                (word, main_module._slugify_word(word) + ".png"),
+            )
+
+
+def _cleanup_word_logos(words):
+    import main as main_module
+    with main.db() as conn:
+        for word in words:
+            conn.execute("DELETE FROM pseudo_word_logos WHERE word=?", (word,))
+
+
+def test_get_pseudo_grid_excludes_taken_and_reserved_colors():
+    import main as main_module
+
+    words = ["MotGrilleA", "MotGrilleB"]
+    _seed_word_logos(words)
+    id_taker = "identity-grid-taker"
+    id_me = "identity-grid-me"
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token IN (?, ?)", (
+            main_module.compute_debate_token(id_taker), main_module.compute_debate_token(id_me),
+        ))
+        conn.execute("DELETE FROM pseudo_reservations WHERE word IN (?, ?)", tuple(words))
+    try:
+        main_module.confirm_pseudo(id_taker, "MotGrilleA", "rouge")
+        grid = main_module.get_pseudo_grid(id_me)["grid"]
+        assert "rouge" not in grid["MotGrilleA"]
+        assert set(grid["MotGrilleA"]) == set(main_module.PSEUDO_COLORS) - {"rouge"}
+        assert set(grid["MotGrilleB"]) == set(main_module.PSEUDO_COLORS)
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(id_taker),))
+        _cleanup_word_logos(words)
+
+
+def test_reserve_pseudo_slot_blocks_other_identity_but_allows_same_identity():
+    import main as main_module
+
+    words = ["MotReserveA"]
+    _seed_word_logos(words)
+    id_a, id_b = "identity-reserve-a", "identity-reserve-b"
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudo_reservations WHERE word=?", tuple(words))
+    try:
+        main_module.reserve_pseudo_slot(id_a, "MotReserveA", "bleu")
+        with pytest.raises(ValueError, match="en cours de choix"):
+            main_module.reserve_pseudo_slot(id_b, "MotReserveA", "bleu")
+        # la même identité peut re-réserver le même couple sans erreur (pas une collision avec soi-même)
+        main_module.reserve_pseudo_slot(id_a, "MotReserveA", "bleu")
+        # réserver un AUTRE couple libère automatiquement l'ancien
+        main_module.reserve_pseudo_slot(id_a, "MotReserveA", "vert")
+        main_module.reserve_pseudo_slot(id_b, "MotReserveA", "bleu")  # devenu libre
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudo_reservations WHERE word=?", tuple(words))
+        _cleanup_word_logos(words)
+
+
+def test_reserve_pseudo_slot_rejects_already_confirmed_pair():
+    import main as main_module
+
+    words = ["MotReserveConfirme"]
+    _seed_word_logos(words)
+    id_owner, id_other = "identity-reserve-confirme-owner", "identity-reserve-confirme-other"
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(id_owner),))
+    try:
+        main_module.confirm_pseudo(id_owner, "MotReserveConfirme", "noir")
+        with pytest.raises(ValueError, match="déjà pris"):
+            main_module.reserve_pseudo_slot(id_other, "MotReserveConfirme", "noir")
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(id_owner),))
+        _cleanup_word_logos(words)
+
+
+def test_random_pseudo_board_respects_size_and_pins_my_reservation():
+    import main as main_module
+
+    words = [f"MotPlanche{i}" for i in range(10)]
+    _seed_word_logos(words)
+    identity = "identity-planche-test"
+    with main.db() as conn:
+        conn.execute("DELETE FROM pseudo_reservations WHERE word IN ({})".format(
+            ",".join("?" * len(words))
+        ), tuple(words))
+    try:
+        main_module.reserve_pseudo_slot(identity, "MotPlanche3", "jaune")
+        board = main_module.random_pseudo_board(identity, n=5)
+        assert len(board["board"]) <= 5
+        # la réservation en cours est forcée dans la planche, même petite
+        pinned = {(item["word"], item["color"]) for item in board["board"]}
+        assert ("MotPlanche3", "jaune") in pinned
+        assert board["my_reservation"] == {"word": "MotPlanche3", "color": "jaune"}
+        # tous les couples renvoyés existent bien dans la grille de disponibilité
+        available = main_module.get_pseudo_grid(identity)["grid"]
+        for item in board["board"]:
+            assert item["color"] in available[item["word"]]
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudo_reservations WHERE word IN ({})".format(
+                ",".join("?" * len(words))
+            ), tuple(words))
+        _cleanup_word_logos(words)
+
+
+@pytest.mark.anyio
+async def test_pseudo_board_endpoint_returns_clickable_pairs(client, logged_in_user):
+    import main as main_module
+
+    words = ["MotEndpointPlanche"]
+    _seed_word_logos(words)
+    try:
+        resp = await client.post("/pseudo/board", json={"session_token": logged_in_user["session_token"]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "board" in data and "ttl_seconds" in data
+        assert all({"word", "color", "file"} <= item.keys() for item in data["board"])
+    finally:
+        _cleanup_word_logos(words)
+
+
+@pytest.mark.anyio
+async def test_pseudo_reserve_then_release_endpoint_frees_the_slot(client, logged_in_user):
+    import main as main_module
+
+    words = ["MotEndpointReserve"]
+    _seed_word_logos(words)
+    identity_token = main_module._require_identity(logged_in_user["session_token"])
+    debate_token = main_module.compute_debate_token(identity_token)
+    try:
+        resp = await client.post("/pseudo/reserve", json={
+            "session_token": logged_in_user["session_token"], "word": "MotEndpointReserve", "color": "orange",
+        })
+        assert resp.status_code == 200
+        with main.db() as conn:
+            row = conn.execute(
+                "SELECT debate_token FROM pseudo_reservations WHERE word=? AND color=?",
+                ("MotEndpointReserve", "orange"),
+            ).fetchone()
+            assert row["debate_token"] == debate_token
+
+        resp2 = await client.post("/pseudo/release", json={"session_token": logged_in_user["session_token"]})
+        assert resp2.status_code == 200
+        with main.db() as conn:
+            row2 = conn.execute(
+                "SELECT 1 FROM pseudo_reservations WHERE word=? AND color=?",
+                ("MotEndpointReserve", "orange"),
+            ).fetchone()
+            assert row2 is None
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudo_reservations WHERE word=?", ("MotEndpointReserve",))
+        _cleanup_word_logos(words)
+
+
 # ===== Forum (2026-07-25, phase 1 : schéma + fonctions d'écriture, zéro branchement chatbot) =====
 # Spec : wiki.jouyvote.fr/themes:chatbot-fonctionnalites, section "Page Forum" (version après
 # corrections angelobot du 2026-07-25 soir — plus de table opinion_versions séparée, body/
