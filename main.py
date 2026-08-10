@@ -408,6 +408,13 @@ def init_db():
             conn.execute("ALTER TABLE bug_reports ADD COLUMN status TEXT")
         except sqlite3.OperationalError:
             pass
+        # "voice" (2026-08-10, tâche #178) : NULL/'admin'/'mairie' — voix active au moment du
+        # signalement, même tolérance que "status" ci-dessus (validité garantie côté Python via
+        # _validate_voice, jamais par une contrainte DB).
+        try:
+            conn.execute("ALTER TABLE bug_reports ADD COLUMN voice TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.execute(
             """CREATE TABLE IF NOT EXISTS admin_intervention_requests (
                 request_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -421,6 +428,10 @@ def init_db():
         )
         try:
             conn.execute("ALTER TABLE admin_intervention_requests ADD COLUMN status TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE admin_intervention_requests ADD COLUMN voice TEXT")
         except sqlite3.OperationalError:
             pass
         # rate_limit_events (2026-08-04, faille E revue Opus) : brute-force/spam anti-abus sur
@@ -609,6 +620,13 @@ class ChatRequest(BaseModel):
     context_opinion_id: int | None = None
     context_remarque_id: int | None = None
     context_reaction_id: int | None = None
+    # voice (2026-08-10, tâche #178, demande Angelo relayée par angelobot) : trace sous quelle
+    # voix active (citoyen/admin/mairie) un signalement (report_bug/request_admin_intervention)
+    # a été fait — même principe que sur /opinion/confirm, /reaction/confirm, /remarque/confirm :
+    # revalidé côté serveur via _validate_voice avant écriture, jamais fait confiance au client
+    # seul. N'affecte AUCUN autre outil du chatbot (list_threads, propose_opinion...), uniquement
+    # les 2 actions à écriture directe (voir submit_bug_report/submit_admin_intervention_request).
+    voice: str | None = None
 
 
 class ChatSummarizeRequest(BaseModel):
@@ -1519,17 +1537,32 @@ def list_pending_signalements() -> list[dict]:
     themes:maquette-tracabilite-signalements, go Angelo 2026-08-09/10, choix : fusion plutôt que
     2 listes séparées). "debate_token" est inclus comme identifiant OPAQUE, jamais réversible vers
     une identité réelle — utile uniquement pour répondre (voir resolve_signalement), jamais
-    destiné à être affiché tel quel côté UI."""
+    destiné à être affiché tel quel côté UI.
+
+    word/color (2026-08-10, demande Angelo relayée par angelobot) : JOIN sur la table `pseudos`
+    (pseudos CONFIRMÉS, pas `pseudo_reservations` qui ne contient que les réservations temporaires
+    3 min du picker de logo) — contrairement à debate_token, le pseudo est DÉJÀ public partout
+    ailleurs sur le site (Forum, etc.), l'afficher ici sur une page réservée Admin ne casse aucune
+    exigence d'anonymat. None si l'auteur n'a pas encore de pseudo confirmé (signalement envoyé
+    avant tout choix de pseudo, ou via un flux qui n'en a jamais besoin).
+
+    voice (2026-08-10, tâche #178) : voix active (citoyen=None/admin/mairie) au moment du
+    signalement, déjà stockée sur la ligne elle-même (voir submit_bug_report/submit_admin_
+    intervention_request) — aucun JOIN nécessaire pour ce champ, contrairement au pseudo."""
     with db() as conn:
         items = []
         for kind, (table, id_col) in _SIGNALEMENT_TABLES.items():
             rows = conn.execute(
-                f"SELECT {id_col} AS id, debate_token, description, status, created_at FROM {table} "
-                "ORDER BY created_at DESC"
+                f"""SELECT s.{id_col} AS id, s.debate_token, s.description, s.status, s.created_at,
+                           s.voice, p.word, p.color
+                    FROM {table} s
+                    LEFT JOIN pseudos p ON p.debate_token = s.debate_token
+                    ORDER BY s.created_at DESC"""
             ).fetchall()
             items.extend({
                 "type": kind, "id": r["id"], "debate_token": r["debate_token"],
                 "description": r["description"], "status": r["status"], "created_at": r["created_at"],
+                "voice": r["voice"], "auteur_word": r["word"], "auteur_color": r["color"],
             } for r in rows)
     items.sort(key=lambda x: x["created_at"], reverse=True)
     return items
@@ -1906,6 +1939,15 @@ def _recent_reports_count(table: str, debate_token: str, window_minutes: int = 6
 
 BUG_REPORT_RATE_LIMIT = 3
 ADMIN_INTERVENTION_RATE_LIMIT = 3
+# Préfixe de test (2026-08-10, tâche #179, suite à 2 fuites d'email Brevo réel le même matin
+# via des signalements de test manuels — voir submit_bug_report/submit_admin_intervention_
+# request) : une description qui COMMENCE par ce préfixe est bien écrite en base normalement
+# (visible sur /admin/signalements), mais ne déclenche JAMAIS l'envoi email réel — la ligne DB
+# pouvait être nettoyée après coup, l'email lui partait déjà avant ce nettoyage, aucun moyen de
+# le rattraper une fois envoyé. Convention simple plutôt qu'un flag d'environnement séparé : reste
+# vrai quel que soit l'environnement (prod/dev), et documente l'intention directement dans la
+# donnée de test elle-même.
+TEST_REPORT_PREFIX = "[TEST"
 
 
 def _client_ip(request: Request) -> str:
@@ -1944,40 +1986,57 @@ def _enforce_rate_limit(request: Request, endpoint: str, limit: int, window_minu
         conn.execute("INSERT INTO rate_limit_events (ip, endpoint) VALUES (?, ?)", (ip, endpoint))
 
 
-def submit_bug_report(identity_token: str, description: str) -> dict:
+def submit_bug_report(identity_token: str, description: str, voice: str | None = None) -> dict:
     """SEUL point d'écriture + d'envoi réel pour un signalement de bug — appelé DIRECTEMENT par
     l'action LLM report_bug (chatbot_actions.py), pas via un clic de confirmation utilisateur.
     Exception délibérée au principe "jamais d'écriture directe par le LLM" appliqué partout
     ailleurs ce soir (opinions, réactions, remarques...) : un signalement de bug est PRIVÉ (visible
     seulement par angelobot/le développeur, jamais public), à faible enjeu, et rate-limité — profil
-    de risque très différent d'une opinion publique et permanente."""
+    de risque très différent d'une opinion publique et permanente.
+
+    "voice" (2026-08-10, tâche #178) : trace sous quelle voix active (citoyen/admin/mairie) le
+    signalement a été fait — revalidé via _validate_voice comme partout ailleurs, jamais fait
+    confiance au client seul même si ce champ n'est pas une action de publication publique."""
     description = description.strip()
     if not description:
         raise ValueError("description vide")
+    _validate_voice(identity_token, voice)
     debate_token = compute_debate_token(identity_token)
     if _recent_reports_count("bug_reports", debate_token) >= BUG_REPORT_RATE_LIMIT:
         raise ValueError("trop de signalements récents, réessaie dans un moment")
     with db() as conn:
-        conn.execute("INSERT INTO bug_reports (debate_token, description) VALUES (?, ?)", (debate_token, description))
+        conn.execute(
+            "INSERT INTO bug_reports (debate_token, description, voice) VALUES (?, ?, ?)",
+            (debate_token, description, voice),
+        )
+    # TEST_REPORT_PREFIX (2026-08-10, tâche #179) : la ligne DB reste écrite normalement (visible
+    # sur /admin/signalements), seul l'envoi email réel est court-circuité — évite qu'un test
+    # manuel (curl/script) déclenche un vrai email Brevo avant même d'avoir eu le temps de
+    # nettoyer la ligne, comme ce fut le cas 2 fois ce matin.
+    if description.upper().startswith(TEST_REPORT_PREFIX):
+        return {"sent": False}
     sent = _send_admin_email("Signalement de bug — jouyvote.fr", description)
     return {"sent": sent}
 
 
-def submit_admin_intervention_request(identity_token: str, description: str) -> dict:
+def submit_admin_intervention_request(identity_token: str, description: str, voice: str | None = None) -> dict:
     """Même mécanique que submit_bug_report (2026-07-25, demande développeur explicite : même
     mécanique pour les 2) — table séparée car sémantiquement différent : une demande personnelle
     sur son propre compte (ex: exigence d'anonymat compromise), pas un bug logiciel général."""
     description = description.strip()
     if not description:
         raise ValueError("description vide")
+    _validate_voice(identity_token, voice)
     debate_token = compute_debate_token(identity_token)
     if _recent_reports_count("admin_intervention_requests", debate_token) >= ADMIN_INTERVENTION_RATE_LIMIT:
         raise ValueError("trop de demandes récentes, réessaie dans un moment")
     with db() as conn:
         conn.execute(
-            "INSERT INTO admin_intervention_requests (debate_token, description) VALUES (?, ?)",
-            (debate_token, description),
+            "INSERT INTO admin_intervention_requests (debate_token, description, voice) VALUES (?, ?, ?)",
+            (debate_token, description, voice),
         )
+    if description.upper().startswith(TEST_REPORT_PREFIX):
+        return {"sent": False}
     sent = _send_admin_email("Demande d'intervention admin — jouyvote.fr", description)
     return {"sent": sent}
 
@@ -2397,6 +2456,17 @@ def admin_roles_set(req: AdminRolesSetRequest):
         raise HTTPException(400, str(e))
 
 
+@app.post("/admin/identities/list")
+def admin_identities_list(req: AdminRolesListRequest):
+    """Réservé Admin (voir _require_admin) — liste complète des inscrits pour /admin/roles
+    (tâche #175, spec wiki themes:liste-inscrits) : nom/adresse/rôle/date/parrain/filleuls, tri
+    et vue arborescente calculés côté frontend à partir de cette liste plate. Jamais accessible
+    côté citoyen — page de gestion interne, seul endroit de l'app où le nom réel de TOUS les
+    inscrits est exposé d'un coup (voir list_all_identities)."""
+    _require_admin(req.session_token)
+    return {"identities": list_all_identities()}
+
+
 @app.post("/admin/signalements/list")
 def admin_signalements_list(req: AdminSignalementsListRequest):
     """Réservé Admin (voir _require_admin) — liste fusionnée bug_reports/admin_intervention_
@@ -2581,6 +2651,41 @@ def list_privileged_accounts() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_all_identities() -> list[dict]:
+    """Page "Liste des inscrits" (2026-08-10, tâche #175, spec wiki themes:liste-inscrits) : vue
+    admin complète de la table identities — nom, adresse, rôle, date d'inscription, parrain
+    résolu (via referred_by_token → identities.token), nombre de filleuls. Réservée à l'Admin
+    (voir _require_admin sur l'endpoint) — contrairement au reste de l'app, où le nom réel n'est
+    JAMAIS montré à qui que ce soit, cette page de gestion interne l'expose délibérément, seule
+    exception documentée (même logique que "Mon compte" pour son propre nom, voir memory
+    feedback_no_identifier_in_persistent_ui — ici c'est un accès ADMIN à TOUS les noms, pas juste
+    au sien, d'où la restriction stricte)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT token, nom, adresse, role, created_at, referred_by_token FROM identities "
+            "ORDER BY created_at"
+        ).fetchall()
+    by_token = {r["token"]: r for r in rows}
+    children_count: dict[str, int] = {}
+    for r in rows:
+        if r["referred_by_token"]:
+            children_count[r["referred_by_token"]] = children_count.get(r["referred_by_token"], 0) + 1
+    result = []
+    for r in rows:
+        parrain = by_token.get(r["referred_by_token"]) if r["referred_by_token"] else None
+        result.append({
+            "token": r["token"],
+            "nom": r["nom"],
+            "adresse": r["adresse"],
+            "role": r["role"],
+            "created_at": r["created_at"],
+            "referred_by_token": r["referred_by_token"],
+            "parrain_nom": parrain["nom"] if parrain else None,
+            "filleuls_count": children_count.get(r["token"], 0),
+        })
+    return result
+
+
 def list_mairie_directory() -> list[dict]:
     """Lecture pure : uniquement le NOM des comptes Mairie (JAMAIS l'email ni le téléphone —
     spec wiki themes:admin-mairie : "les comptes Mairie voient la liste des comptes Mairie",
@@ -2753,7 +2858,15 @@ def _element_context_block(
                 f"directement propose_reaction avec opinion_id={context_opinion_id} — n'appelle "
                 f"JAMAIS list_threads/get_thread pour la retrouver, tu as déjà tout ce qu'il faut "
                 f"ci-dessus, y compris l'identifiant exact. Concentre-toi sur CET élément précis, "
-                f"sans élargir au reste du forum sauf si l'utilisateur le demande explicitement."
+                f"sans élargir au reste du forum sauf si l'utilisateur le demande explicitement. "
+                f"RÈGLE SPÉCIFIQUE AUX RÉACTIONS (2026-08-10, demande explicite d'Angelo) : "
+                f"contrairement à la rédaction d'une opinion nouvelle, une réaction est par nature "
+                f"courte et spontanée — si le texte de l'utilisateur est déjà clair, sans faute qui "
+                f"en gêne la compréhension, et sans formulation auto-identifiante (voir plus haut), "
+                f"appelle DIRECTEMENT propose_reaction avec ce texte tel quel et propose la "
+                f"confirmation, SANS suggérer de reformulation ni commenter le style. Ne propose une "
+                f"reformulation que si le texte pose un vrai problème concret (auto-identifiant, "
+                f"incompréhensible, insultant) — jamais par réflexe ou par souci de style."
             )
         if context_remarque_id is not None:
             row = conn.execute(
@@ -2898,8 +3011,8 @@ def chat_v2(req: ChatRequest):
         # — chatbot_actions.py reste sans accès DB/réseau direct, l'écriture + l'envoi d'email
         # réels restent entièrement dans main.py (voir submit_bug_report/submit_admin_intervention_
         # request pour la justification de l'exception "écriture directe par le LLM").
-        "report_bug_fn": lambda description: submit_bug_report(identity_token, description),
-        "request_admin_intervention_fn": lambda description: submit_admin_intervention_request(identity_token, description),
+        "report_bug_fn": lambda description: submit_bug_report(identity_token, description, req.voice),
+        "request_admin_intervention_fn": lambda description: submit_admin_intervention_request(identity_token, description, req.voice),
         # Accès lecture au wiki citoyen (2026-07-26) : index (donnée statique, pas de coût réseau)
         # + callable pour la lecture d'une page précise à la demande (network call, jamais fait
         # d'office pour toutes les pages sur chaque tour — voir fetch_wiki_page_raw).
@@ -3095,13 +3208,23 @@ def reaction_confirm(req: ReactionConfirmRequest):
     d'écriture directe par le modèle. Même logique que /opinion/confirm : création + publication
     en un seul geste, déclenché uniquement par un clic utilisateur explicite. Utilisé quand la
     réaction porte un argumentaire en texte libre (voir /reaction/toggle pour le choix de stance
-    seul, sans passer par le chat, 2026-07-30)."""
+    seul, sans passer par le chat, 2026-07-30).
+
+    reaction_counts/reactions dans la réponse (2026-08-10, bug réel signalé par angelobot avant
+    présentation développeur) : sans ça, le Forum n'affichait pas la réaction fraîchement publiée
+    tant que la page n'était pas rechargée à la main — /reaction/toggle (bouton direct, sans
+    texte) renvoyait déjà ce résumé pour permettre un rafraîchissement local immédiat côté
+    frontend (buildInlineReactWidget/onReactionUpdate), mais ce chemin-ci (avec argumentaire,
+    passé par le chat) ne le faisait pas. Même geste que /reaction/toggle pour rester cohérent."""
     identity_token = _require_identity(req.session_token)
     try:
         reaction = add_reaction(req.opinion_id, identity_token, req.stance, req.argumentaire, req.voice)
-        return publish_reaction(reaction["reaction_id"])
+        result = publish_reaction(reaction["reaction_id"])
     except ValueError as e:
         raise HTTPException(400, str(e))
+    with db() as conn:
+        counts = _get_opinion_reaction_summary(conn, req.opinion_id)
+    return {**result, **counts}
 
 
 @app.post("/reaction/toggle")

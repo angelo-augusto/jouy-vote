@@ -924,6 +924,7 @@ def test_chatbot_actions_registry_excludes_commit_actions():
     assert set(chatbot_actions.ACTIONS.keys()) == {
         "say_user", "get_vote_token", "propose_summary", "list_summaries",
         "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
+        "check_pseudo_availability",
         "list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque",
         "report_bug", "request_admin_intervention", "list_wiki_pages", "get_wiki_page",
         "search_conseil_municipal", "get_conseil_municipal_document", "list_conseil_municipal_seances",
@@ -2461,6 +2462,31 @@ def test_submit_bug_report_rejects_empty_description():
 
     with pytest.raises(ValueError, match="vide"):
         main_module.submit_bug_report("identity-bugreport-2", "   ")
+
+
+def test_submit_bug_report_skips_real_email_for_test_prefix(monkeypatch):
+    """2026-08-10 (tâche #179) : une description commençant par TEST_REPORT_PREFIX ('[TEST') est
+    écrite en base normalement mais ne déclenche JAMAIS l'envoi email réel — évite qu'un test
+    manuel fasse fuiter un vrai email Brevo avant d'avoir eu le temps de nettoyer la ligne DB."""
+    import main as main_module
+
+    sent_calls = []
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: sent_calls.append(1) or True)
+
+    identity_token = "identity-bugreport-test-prefix"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+    try:
+        result = main_module.submit_bug_report(identity_token, "[TEST KHADASBOT] Description de test, jamais un vrai signalement.")
+        assert result["sent"] is False
+        assert len(sent_calls) == 0
+        with main.db() as conn:
+            row = conn.execute("SELECT description FROM bug_reports WHERE debate_token=?", (debate_token,)).fetchone()
+        assert row is not None
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
 
 
 def test_submit_bug_report_rate_limited_after_threshold(monkeypatch):
@@ -5117,6 +5143,77 @@ def test_list_pending_signalements_merges_bug_reports_and_interventions():
             conn.execute("DELETE FROM admin_intervention_requests WHERE debate_token=?", (debate_token,))
 
 
+def test_list_pending_signalements_includes_confirmed_pseudo():
+    """2026-08-10 (demande Angelo relayée par angelobot) : le pseudo (déjà public partout
+    ailleurs, contrairement au debate_token) doit apparaître sur la page signalements — JOIN sur
+    la table pseudos (confirmés), pas pseudo_reservations (réservations temporaires du picker)."""
+    import main as main_module
+
+    identity_token = "identity-signalement-pseudo-test"
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+        conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+    try:
+        main_module.confirm_pseudo(identity_token, "Renard", "bleu")
+        main_module.submit_bug_report(identity_token, "Bug avec pseudo confirmé")
+
+        items = main_module.list_pending_signalements()
+        mine = next(i for i in items if i["debate_token"] == debate_token)
+        assert mine["auteur_word"] == "Renard"
+        assert mine["auteur_color"] == "bleu"
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (debate_token,))
+
+
+def test_list_pending_signalements_pseudo_none_when_unconfirmed():
+    import main as main_module
+
+    debate_token = main_module.compute_debate_token("identity-signalement-nopseudo-test")
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+    try:
+        main_module.submit_bug_report("identity-signalement-nopseudo-test", "Bug sans pseudo")
+        items = main_module.list_pending_signalements()
+        mine = next(i for i in items if i["debate_token"] == debate_token)
+        assert mine["auteur_word"] is None
+        assert mine["auteur_color"] is None
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+
+
+@pytest.mark.anyio
+async def test_submit_bug_report_stores_voice_when_role_matches(admin_user):
+    """2026-08-10 (tâche #178) : la voix active (revalidée via _validate_voice, jamais fait
+    confiance au client seul) doit se retrouver stockée sur la ligne bug_reports elle-même."""
+    import main as main_module
+
+    identity_token = main_module._require_identity(admin_user["session_token"])
+    debate_token = main_module.compute_debate_token(identity_token)
+    with main.db() as conn:
+        conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+    try:
+        main_module.submit_bug_report(identity_token, "Bug signalé en voix Admin", "admin")
+        items = main_module.list_pending_signalements()
+        mine = next(i for i in items if i["debate_token"] == debate_token)
+        assert mine["voice"] == "admin"
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM bug_reports WHERE debate_token=?", (debate_token,))
+
+
+def test_submit_bug_report_rejects_voice_that_does_not_match_real_role():
+    """Un citoyen ne peut pas s'auto-déclarer 'admin' via le paramètre voice — même barrière
+    que _validate_voice pour /opinion/confirm, /reaction/confirm, /remarque/confirm."""
+    import main as main_module
+
+    with pytest.raises(ValueError):
+        main_module.submit_bug_report("identity-signalement-fake-voice-test", "Faux signalement admin", "admin")
+
+
 def test_resolve_signalement_sends_message_and_marks_treated():
     """2026-08-10 (go Angelo) : répondre à un signalement envoie un vrai message admin au
     debate_token DÉJÀ présent sur la ligne (jamais un paramètre arbitraire) et marque
@@ -5665,3 +5762,48 @@ async def test_chat_v2_no_longer_offers_pseudo_rechoice_via_chat(client, logged_
     await client.post("/chat/v2", json={"session_token": logged_in_user["session_token"], "message": "je veux changer de pseudo"})
     assert "propose_custom_pseudo(word, color, appropriate)" not in captured_prompts[0]
     assert "get_or_assign_pseudo()" not in captured_prompts[0]
+
+
+# ---------- Liste des inscrits (2026-08-10, tâche #175, spec wiki themes:liste-inscrits) ----------
+
+def test_list_all_identities_includes_role_parrain_and_filleuls_count():
+    import main as main_module
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM identities WHERE nom LIKE 'TestInscrit%'")
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, role) VALUES (?, ?, ?, ?, ?)",
+            ("tok-parrain-test", "hash-parrain-test", "TestInscritParrain", "1 Rue Test", None),
+        )
+        conn.execute(
+            "INSERT INTO identities (token, identity_hash, nom, adresse, role, referred_by_token) VALUES (?, ?, ?, ?, ?, ?)",
+            ("tok-filleul-test", "hash-filleul-test", "TestInscritFilleul", "2 Rue Test", "admin", "tok-parrain-test"),
+        )
+    try:
+        identities = main_module.list_all_identities()
+        by_nom = {i["nom"]: i for i in identities}
+        assert by_nom["TestInscritParrain"]["filleuls_count"] == 1
+        assert by_nom["TestInscritParrain"]["parrain_nom"] is None
+        assert by_nom["TestInscritFilleul"]["parrain_nom"] == "TestInscritParrain"
+        assert by_nom["TestInscritFilleul"]["role"] == "admin"
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM identities WHERE nom LIKE 'TestInscrit%'")
+
+
+@pytest.mark.anyio
+async def test_admin_identities_list_rejects_citizen(client, logged_in_user):
+    resp = await client.post("/admin/identities/list", json={"session_token": logged_in_user["session_token"]})
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_admin_identities_list_endpoint_returns_identities(client, admin_user):
+    resp = await client.post("/admin/identities/list", json={"session_token": admin_user["session_token"]})
+    assert resp.status_code == 200
+    identities = resp.json()["identities"]
+    assert any(i["nom"] == "TestAdmin" for i in identities)
+    admin_entry = next(i for i in identities if i["nom"] == "TestAdmin")
+    assert admin_entry["role"] == "admin"
+    assert "filleuls_count" in admin_entry
+    assert "created_at" in admin_entry

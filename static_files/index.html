@@ -281,6 +281,19 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   <p class="info">Bugs signalés et demandes d'intervention — répondre envoie un message privé au citoyen concerné et marque le signalement comme traité.</p>
   <div id="signalementsMsg" class="msg"></div>
   <div id="signalementsList"></div>
+  <hr>
+  <!-- Liste des inscrits (2026-08-10, tâche #175, demande Angelo relayée par angelobot, spec
+       wiki themes:liste-inscrits) : tableau triable (nom/adresse/date) + vue arborescente
+       distincte pour la chaîne de parrainage (pas un 4e tri de colonne, un mode d'affichage à
+       part, voir renderIdentitiesTree). -->
+  <h3 style="margin-top:0;">Inscrits</h3>
+  <p class="info">Clique sur un en-tête de colonne pour trier. La vue arborescente affiche les chaînes de parrainage.</p>
+  <div id="identitiesMsg" class="msg"></div>
+  <div style="margin-bottom:.5em;">
+    <button class="btn-link" id="identitiesTreeToggle">Vue arborescente (parrainage)</button>
+  </div>
+  <div id="identitiesTableWrap"></div>
+  <div id="identitiesTreeWrap" class="hidden"></div>
 </div>
 
 <div class="card hidden" id="pagePublier">
@@ -821,7 +834,10 @@ async function sendChatMessage() {
     // au lieu d'un seul data.reply — plusieurs say_user possibles dans un même tour, et une
     // erreur peut arriver avec un HTTP 200 (json_invalide/liste_actions_vide/max_iterations),
     // pas seulement via une exception réseau comme avec /chat v1.
-    const data = await api('/chat/v2', { session_token, message, history: historyBefore });
+    // voice (2026-08-10, tâche #178, demande Angelo relayée par angelobot) : trace sous quelle
+    // voix active (citoyen/admin/mairie) un signalement (report_bug/request_admin_intervention)
+    // a été fait — revalidé côté serveur (_validate_voice), jamais fait confiance au client seul.
+    const data = await api('/chat/v2', { session_token, message, history: historyBefore, voice: currentVoiceParam() });
     if (data.replies && data.replies.length > 0) {
       // Filtre défensif : un say_user réduit à une chaîne vide (ex: placeholder {{résultat}}
       // non résolu puis retiré côté serveur) ne doit jamais créer une bulle de chat vide.
@@ -1696,9 +1712,9 @@ function renderForumOpinion(o, replyCtx) {
       counts.opposer + ' opposition' + (counts.opposer !== 1 ? 's' : '') + ' · ' +
       counts.neutre + ' neutre' + (counts.neutre !== 1 ? 's' : '');
     reactionSummaryEl.appendChild(countsP);
-    (reactions || []).forEach(r => reactionSummaryEl.appendChild(renderMyActivityReaction(r, replyCtx)));
+    (reactions || []).forEach(r => reactionSummaryEl.appendChild(renderMyActivityReaction(r, replyCtx, replyCtx.thread.thread_id)));
   }
-  div.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary, "l'opinion de " + o.auteur));
+  div.appendChild(buildInlineReactWidget({ type: 'opinion', id: o.opinion_id }, renderReactionSummary, "l'opinion de " + o.auteur, replyCtx.thread.thread_id));
   // Liens de réponse (2026-08-01) : remarques qui répondent DIRECTEMENT à cette opinion (voir
   // _buildThreadReplyIndex) — pas celles qui répondent à une réaction ou à une autre remarque,
   // affichées à LEUR niveau à elles (renderMyActivityReaction / renderForumRemarque).
@@ -1734,7 +1750,7 @@ function renderForumRemarque(r, replyCtx) {
     const indicator = buildRepliesIndicator(replyCtx.byRemarque[r.remarque_id]);
     if (indicator) div.appendChild(indicator);
   }
-  div.appendChild(buildInlineReactWidget({ type: 'remarque', id: r.remarque_id }, undefined, 'la remarque de ' + r.auteur));
+  div.appendChild(buildInlineReactWidget({ type: 'remarque', id: r.remarque_id }, undefined, 'la remarque de ' + r.auteur, replyCtx.thread.thread_id));
   return div;
 }
 
@@ -1748,7 +1764,7 @@ function renderForumRemarque(r, replyCtx) {
 function contextRefEquals(a, b) {
   return !!a && !!b && a.type === b.type && a.id === b.id;
 }
-function buildInlineReactWidget(contextRef, onReactionUpdate, targetLabel) {
+function buildInlineReactWidget(contextRef, onReactionUpdate, targetLabel, threadId) {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'margin-top:.4em;';
   const toggleBtn = document.createElement('button');
@@ -1851,9 +1867,82 @@ function buildInlineReactWidget(contextRef, onReactionUpdate, targetLabel) {
     } catch (e) { /* pas bloquant : les boutons restent simplement non surlignés */ }
   }
 
+  // Chemin direct sans IA en voix Admin/Mairie (2026-08-10, demande explicite d'Angelo relayée
+  // par angelobot, avant sa présentation au maire d'Oisème) : même en voix Admin/Mairie, taper du
+  // texte dans le chat inline passait TOUJOURS par propose_reaction/propose_remarque (LLM) avant
+  // /reaction/confirm ou /remarque/confirm — seuls les boutons adhérer/opposer/neutre SANS texte
+  // (stanceButtons ci-dessus, /reaction/toggle) étaient réellement sans IA. Le backend supportait
+  // déjà tout ceci (create_remarque/publish_remarque, voir main.py) : /remarque/confirm accepte
+  // voice + reply_to_opinion_id/reply_to_remarque_id/reply_to_reaction_id et écrit directement,
+  // sans jamais passer par le LLM. threadId absent (widgets réutilisés hors Forum, ex. Mon
+  // activité) => uniquement le chat, comportement inchangé sur ces pages.
+  //
+  // Correction (2026-08-10, même matinée, retour direct d'Angelo via angelobot) : PAS un
+  // remplacement chat/direct au clic sur "Réagir" — les DEUX zones restent affichées ensemble dès
+  // qu'une voix est active (bleu = Assistant IA, vert = Réponse directe sans IA), l'utilisateur
+  // choisit laquelle remplir selon le besoin, aucune bascule à sélectionner avant. Même chose pour
+  // Admin et Mairie (vert fixe, indépendant de VOICE_BADGE_BG qui varie rose/vert selon le rôle —
+  // ici c'est un code couleur "avec IA / sans IA", pas un badge d'identité de voix).
+  const directVoice = threadId ? currentVoiceParam() : null;
   panel.appendChild(messagesEl);
   panel.appendChild(proposalEl);
   panel.appendChild(inputRow);
+  if (directVoice) {
+    const DIRECT_PUBLISH_BG = '#e8f5e9';
+    const chatLabel = document.createElement('p');
+    chatLabel.style.cssText = 'margin:.6em 0 .2em; font-size:.8em; font-weight:600; color:#555;';
+    chatLabel.textContent = 'Assistant IA';
+    messagesEl.parentNode.insertBefore(chatLabel, messagesEl);
+
+    const directWrap = document.createElement('div');
+    directWrap.style.cssText = 'margin-top:.8em; padding-top:.6em; border-top:1px dashed #ccc;';
+    const directLabel = document.createElement('p');
+    directLabel.style.cssText = 'margin:0 0 .2em; font-size:.8em; font-weight:600; color:#2e7d32;';
+    directLabel.textContent = 'Réponse directe';
+    const directNote = document.createElement('p');
+    directNote.style.cssText = 'margin:0 0 .3em; font-size:.8em; color:#666;';
+    directNote.textContent =
+      'Voix ' + VOICE_BADGE_LABEL[directVoice] + ' active : publication directe, texte verbatim, sans passage par l\'assistant.';
+    const directInput = document.createElement('textarea');
+    directInput.rows = 2;
+    directInput.placeholder = 'Réponse directe (publiée telle quelle)…';
+    directInput.style.cssText =
+      'width:100%; box-sizing:border-box; padding:.6em; border:1px solid #ccc; border-radius:4px; ' +
+      'font-size:1em; font-family:inherit; resize:vertical; min-height:2.2em; background:' + DIRECT_PUBLISH_BG + ';';
+    const directBtn = document.createElement('button');
+    directBtn.className = 'btn-primary';
+    directBtn.style.cssText = 'margin-top:.4em;';
+    directBtn.textContent = 'Publier directement';
+    const directMsgEl = document.createElement('p');
+    directMsgEl.style.cssText = 'display:none; font-size:.85em; margin:.3em 0;';
+    directBtn.addEventListener('click', async () => {
+      const body = directInput.value.trim();
+      if (!body) return;
+      directMsgEl.style.display = 'none';
+      const session_token = localStorage.getItem('session_token');
+      const payload = { session_token, thread_id: threadId, body, voice: directVoice };
+      if (contextRef.type === 'opinion') payload.reply_to_opinion_id = contextRef.id;
+      if (contextRef.type === 'remarque') payload.reply_to_remarque_id = contextRef.id;
+      if (contextRef.type === 'reaction') payload.reply_to_reaction_id = contextRef.id;
+      try {
+        await api('/remarque/confirm', payload);
+        directInput.value = '';
+        directMsgEl.style.cssText = 'font-size:.85em; margin:.3em 0; color:#155724;';
+        directMsgEl.textContent = 'Publié directement sur le Forum.';
+        directMsgEl.style.display = '';
+      } catch (e) {
+        directMsgEl.style.cssText = 'font-size:.85em; margin:.3em 0; color:#721c24;';
+        directMsgEl.textContent = e.message;
+        directMsgEl.style.display = '';
+      }
+    });
+    directWrap.appendChild(directLabel);
+    directWrap.appendChild(directNote);
+    directWrap.appendChild(directInput);
+    directWrap.appendChild(directBtn);
+    directWrap.appendChild(directMsgEl);
+    panel.appendChild(directWrap);
+  }
 
   // Robot idle/loading (2026-07-30, ajusté 2026-07-31 même correction que sur /assistant) : rendu
   // comme DERNIÈRE ligne de messagesEl, juste après le dernier message de CE contexte — jamais une
@@ -1896,7 +1985,7 @@ function buildInlineReactWidget(contextRef, onReactionUpdate, targetLabel) {
     renderInlineMessages();
     input.value = '';
     input.style.height = 'auto';
-    const payload = { session_token, message, history: historyBefore };
+    const payload = { session_token, message, history: historyBefore, voice: currentVoiceParam() };
     if (contextRef.type === 'opinion') payload.context_opinion_id = contextRef.id;
     if (contextRef.type === 'remarque') payload.context_remarque_id = contextRef.id;
     if (contextRef.type === 'reaction') payload.context_reaction_id = contextRef.id;
@@ -1923,7 +2012,14 @@ function buildInlineReactWidget(contextRef, onReactionUpdate, targetLabel) {
     const opinion = find('propose_opinion');
     if (opinion) return buildInlineOpinionConfirm(proposalEl, opinion.result, contextRef, renderInlineMessages);
     const reaction = find('propose_reaction');
-    if (reaction) return buildInlineReactionConfirm(proposalEl, reaction.result, contextRef, renderInlineMessages);
+    // onReactionUpdate (2026-08-10, bug réel signalé par angelobot) : la réaction confirmée via
+    // le chat (argumentaire en texte libre) n'apparaissait pas sans recharger la page, contrairement
+    // au bouton direct adhérer/opposer/neutre — même rafraîchissement local que /reaction/toggle,
+    // voir buildInlineReactionConfirm ci-dessous et le commentaire sur /reaction/confirm (main.py).
+    if (reaction) return buildInlineReactionConfirm(proposalEl, reaction.result, contextRef, (data) => {
+      renderInlineMessages();
+      if (onReactionUpdate && data) onReactionUpdate(data.reaction_counts, data.reactions);
+    });
     const remarque = find('propose_remarque');
     if (remarque) return buildInlineRemarqueConfirm(proposalEl, remarque.result, contextRef, renderInlineMessages);
   }
@@ -2005,13 +2101,13 @@ function buildInlineReactionConfirm(box, reaction, contextRef, onPublished) {
     box, desc, 'Confirmer définitivement cette réaction sur le Forum ?',
     async () => {
       const session_token = localStorage.getItem('session_token');
-      await api('/reaction/confirm', {
+      const data = await api('/reaction/confirm', {
         session_token, opinion_id: reaction.opinion_id, stance: reaction.stance,
         argumentaire: reaction.argumentaire || null, voice: currentVoiceParam(),
       });
       box.innerHTML = '';
       chatHistory.push({ role: 'assistant', content: 'Réaction confirmée sur le Forum.', contextRef });
-      onPublished();
+      onPublished(data);
     },
   );
   const cancelBtn = document.createElement('button');
@@ -2222,7 +2318,7 @@ function renderMyActivityOpinion(o) {
   }
   return block;
 }
-function renderMyActivityReaction(r, replyCtx) {
+function renderMyActivityReaction(r, replyCtx, threadId) {
   const div = document.createElement('div');
   if (r.reaction_id) div.id = 'reaction-' + r.reaction_id;
   div.style.cssText = 'margin:.4em 0 .4em .7em; padding:.3em .4em; border-left:3px solid #ddd; font-size:.85em; color:#555;';
@@ -2236,7 +2332,7 @@ function renderMyActivityReaction(r, replyCtx) {
     const indicator = buildRepliesIndicator(replyCtx.byReaction[r.reaction_id]);
     if (indicator) div.appendChild(indicator);
   }
-  if (r.reaction_id) div.appendChild(buildInlineReactWidget({ type: 'reaction', id: r.reaction_id }, undefined, 'la réaction de ' + r.auteur));
+  if (r.reaction_id) div.appendChild(buildInlineReactWidget({ type: 'reaction', id: r.reaction_id }, undefined, 'la réaction de ' + r.auteur, threadId));
   return div;
 }
 
@@ -2522,7 +2618,139 @@ async function loadRolesPage() {
     showMsg('rolesMsg', e.message, 'error');
   }
   loadSignalements();
+  loadIdentities();
 }
+// Liste des inscrits (2026-08-10, tâche #175, spec wiki themes:liste-inscrits) : _identitiesData
+// garde la liste PLATE reçue une seule fois (tri + arbre recalculés côté client dessus, jamais
+// un nouvel appel réseau par tri — même principe que le repli/dépli du Forum).
+let _identitiesData = [];
+let _identitiesSort = { key: 'created_at', dir: 1 };
+const IDENTITIES_ROLE_LABELS = { admin: 'Admin', mairie: 'Mairie' };
+async function loadIdentities() {
+  const session_token = localStorage.getItem('session_token');
+  const wrap = document.getElementById('identitiesTableWrap');
+  wrap.innerHTML = '<p class="info">Chargement…</p>';
+  try {
+    const data = await api('/admin/identities/list', { session_token });
+    _identitiesData = data.identities;
+    renderIdentitiesTable();
+  } catch (e) {
+    wrap.innerHTML = '';
+    showMsg('identitiesMsg', e.message, 'error');
+  }
+}
+function sortedIdentities() {
+  const { key, dir } = _identitiesSort;
+  return [..._identitiesData].sort((a, b) => {
+    const va = (a[key] || '').toString().toLowerCase();
+    const vb = (b[key] || '').toString().toLowerCase();
+    if (va < vb) return -1 * dir;
+    if (va > vb) return 1 * dir;
+    return 0;
+  });
+}
+function renderIdentitiesTable() {
+  const wrap = document.getElementById('identitiesTableWrap');
+  wrap.innerHTML = '';
+  if (_identitiesData.length === 0) {
+    wrap.innerHTML = '<p class="info">Aucun inscrit.</p>';
+    return;
+  }
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%; border-collapse:collapse; font-size:.9em;';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  // Seules Nom/Adresse/Date d'inscription sont triables (spec wiki) — Rôle/Parrain/Filleuls
+  // restent des colonnes d'information pure, sans tri dédié.
+  const COLS = [
+    { key: 'nom', label: 'Nom', sortable: true },
+    { key: 'adresse', label: 'Adresse', sortable: true },
+    { key: 'role', label: 'Rôle', sortable: false },
+    { key: 'created_at', label: "Date d'inscription", sortable: true },
+    { key: 'parrain_nom', label: 'Parrain', sortable: false },
+    { key: 'filleuls_count', label: 'Filleuls', sortable: false },
+  ];
+  COLS.forEach(col => {
+    const th = document.createElement('th');
+    th.style.cssText = 'text-align:left; padding:.4em; border-bottom:1px solid #ccc;' + (col.sortable ? ' cursor:pointer;' : '');
+    th.textContent = col.label + (col.sortable && _identitiesSort.key === col.key ? (_identitiesSort.dir === 1 ? ' ▲' : ' ▼') : '');
+    if (col.sortable) {
+      th.addEventListener('click', () => {
+        _identitiesSort = {
+          key: col.key,
+          dir: _identitiesSort.key === col.key ? -_identitiesSort.dir : 1,
+        };
+        renderIdentitiesTable();
+      });
+    }
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  sortedIdentities().forEach(id => {
+    const tr = document.createElement('tr');
+    const cells = [
+      id.nom, id.adresse, IDENTITIES_ROLE_LABELS[id.role] || 'Citoyen',
+      new Date(id.created_at).toLocaleDateString('fr-FR'),
+      id.parrain_nom || '—', String(id.filleuls_count),
+    ];
+    cells.forEach(text => {
+      const td = document.createElement('td');
+      td.style.cssText = 'padding:.4em; border-bottom:1px solid #eee;';
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+}
+function renderIdentitiesTree() {
+  const wrap = document.getElementById('identitiesTreeWrap');
+  wrap.innerHTML = '';
+  if (_identitiesData.length === 0) {
+    wrap.innerHTML = '<p class="info">Aucun inscrit.</p>';
+    return;
+  }
+  const byParrain = {};
+  _identitiesData.forEach(id => {
+    const key = id.referred_by_token || '';
+    (byParrain[key] = byParrain[key] || []).push(id);
+  });
+  function renderLevel(parentKey, depth) {
+    const ul = document.createElement('ul');
+    ul.style.cssText = 'list-style:none; margin:0; padding-left:' + (depth === 0 ? '0' : '1.4em') + ';';
+    (byParrain[parentKey] || []).forEach(id => {
+      const li = document.createElement('li');
+      li.style.cssText = 'margin:.2em 0;';
+      const span = document.createElement('span');
+      span.textContent = id.nom + (id.filleuls_count ? ' (' + id.filleuls_count + ' filleul' + (id.filleuls_count > 1 ? 's' : '') + ')' : '');
+      li.appendChild(span);
+      const children = renderLevel(id.token, depth + 1);
+      if (children) li.appendChild(children);
+      ul.appendChild(li);
+    });
+    return ul.childElementCount ? ul : null;
+  }
+  const root = renderLevel('', 0);
+  wrap.appendChild(root || Object.assign(document.createElement('p'), { className: 'info', textContent: 'Aucune racine de parrainage.' }));
+}
+document.getElementById('identitiesTreeToggle').addEventListener('click', () => {
+  const tableWrap = document.getElementById('identitiesTableWrap');
+  const treeWrap = document.getElementById('identitiesTreeWrap');
+  const showingTree = !treeWrap.classList.contains('hidden');
+  if (showingTree) {
+    treeWrap.classList.add('hidden');
+    tableWrap.classList.remove('hidden');
+    document.getElementById('identitiesTreeToggle').textContent = 'Vue arborescente (parrainage)';
+  } else {
+    renderIdentitiesTree();
+    treeWrap.classList.remove('hidden');
+    tableWrap.classList.add('hidden');
+    document.getElementById('identitiesTreeToggle').textContent = 'Retour au tableau';
+  }
+});
 // Signalements (2026-08-10, demande Angelo relayée par angelobot) : liste fusionnée bug_reports/
 // admin_intervention_requests (voir main.py list_pending_signalements) — répondre déclenche
 // resolve_signalement (message privé + status='traite' dans le même geste serveur).
@@ -2552,6 +2780,19 @@ function renderSignalement(s) {
   header.style.cssText = 'margin:0 0 .4em; font-weight:600;';
   header.textContent = (SIGNALEMENT_TYPE_LABELS[s.type] || s.type) + ' · ' + new Date(s.created_at).toLocaleString('fr-FR');
   block.appendChild(header);
+  // Pseudo auteur (2026-08-10, demande Angelo relayée par angelobot) : déjà public partout
+  // ailleurs (Forum, etc.), affichable sur cette page réservée Admin sans casser l'anonymat —
+  // contrairement au debate_token (jamais exposé, voir list_pending_signalements côté serveur).
+  const auteur = document.createElement('p');
+  auteur.style.cssText = 'margin:0 0 .3em; font-size:.85em; color:#666;';
+  auteur.textContent = 'Auteur : ' + (s.auteur_word ? s.auteur_word + ' ' + s.auteur_color : 'pseudo non confirmé');
+  // Voix active au moment du signalement (2026-08-10, tâche #178) : uniquement affichée si
+  // Admin/Mairie était actif (citoyen = comportement par défaut, pas de mention pour ne pas
+  // encombrer l'affichage du cas le plus courant).
+  if (s.voice === 'admin' || s.voice === 'mairie') {
+    auteur.textContent += ' · voix ' + VOICE_BADGE_LABEL[s.voice] + ' active';
+  }
+  block.appendChild(auteur);
   const body = document.createElement('p');
   body.textContent = s.description;
   block.appendChild(body);
