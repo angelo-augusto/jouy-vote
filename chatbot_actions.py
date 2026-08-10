@@ -599,6 +599,48 @@ def propose_reaction(params: dict, ctx: dict) -> dict:
     }
 
 
+def propose_admin_contact_message(params: dict, ctx: dict) -> dict:
+    """Canal citoyen→admin IDENTIFIÉ (2026-08-10, tâche #180, décision Angelo relayée par
+    angelobot) : lecture/validation pure, aucun write ici (voir main.submit_admin_contact_message
+    pour le seul point d'écriture, appelé uniquement APRÈS double confirmation côté frontend —
+    jamais un envoi immédiat comme report_bug, vu l'enjeu plus élevé : identité réelle + risque
+    de corrélation pseudo).
+
+    "mentions_pseudo" (booléen OBLIGATOIRE, même principe que "appropriate" pour la modération de
+    pseudo — voir _availability_with_content_gate) : DOIS vérifier activement le brouillon avant
+    CHAQUE appel — toute mention d'un pseudo (le tien ou celui d'un tiers, même en passant : "je
+    suis Renard bleu", "comme l'a dit Chat gris...") met ce champ à true. Ce canal envoie le
+    message sous le VRAI NOM du citoyen — si le texte mentionne aussi un pseudo, l'administration
+    obtient une correspondance nom réel↔pseudo qui désanonymise rétroactivement tout ce que ce
+    pseudo a dit publiquement sur le Forum. Si true → refus structurel (available=false), jamais
+    d'envoi possible, quel que soit le texte de ton say_user — explique pourquoi et invite à
+    reformuler sans mentionner de pseudo.
+
+    Scan déterministe EN PLUS (2026-08-10, décision Angelo+angelobot, backstop qui ne dépend PAS
+    de ton jugement) : ctx["confirmed_pseudo_words"] (tous les mots de pseudo confirmés en base)
+    est aussi vérifié ici — si l'un d'eux apparaît comme sous-chaîne dans le message, available=
+    false MÊME SI tu as mis mentions_pseudo=false par erreur. Le vrai rempart reste côté serveur
+    au moment de l'écriture réelle (revalidé indépendamment), cette vérification ici n'est qu'un
+    retour immédiat à l'utilisateur."""
+    description = (params.get("description") or "").strip()
+    mentions_pseudo = params.get("mentions_pseudo", True)
+    if not description:
+        return {"available": False, "error": "message vide"}
+    if mentions_pseudo:
+        return {
+            "description": description, "available": False,
+            "error": "ce message semble mentionner un pseudonyme, reformule sans le citer",
+        }
+    pseudo_words = ctx.get("confirmed_pseudo_words") or set()
+    description_lower = description.lower()
+    if any(word in description_lower for word in pseudo_words):
+        return {
+            "description": description, "available": False,
+            "error": "ce message semble mentionner un pseudonyme, reformule sans le citer",
+        }
+    return {"description": description, "available": True}
+
+
 def propose_remarque(params: dict, ctx: dict) -> dict:
     """Forum, phase 3 : même mécanique — lecture/validation pure, aucun write. Une remarque est
     la couche informelle du forum (dire bonjour, élaborer sur le sujet sans passer par le
@@ -828,6 +870,7 @@ ACTIONS = {
     "search_conseil_municipal": search_conseil_municipal,
     "get_conseil_municipal_document": get_conseil_municipal_document,
     "list_conseil_municipal_seances": list_conseil_municipal_seances,
+    "propose_admin_contact_message": propose_admin_contact_message,
 }
 
 # Scope "assistance générale" (2026-08-09, décision Angelo) : remplace l'ancien action_scope=None
@@ -840,6 +883,10 @@ ACTIONS = {
 # générique que ONBOARDING_ACTIONS/FORUM_REACTION_ACTIONS ci-dessous, juste un ensemble plus large).
 GENERAL_ACTIONS = set(ACTIONS.keys()) - {
     "get_or_assign_pseudo", "propose_pseudo_candidates", "propose_custom_pseudo",
+    # propose_admin_contact_message (2026-08-10, tâche #180) : réservée à contact_admin_mode
+    # (page dédiée "Contacter l'administration", décision Angelo) — jamais atteignable depuis
+    # l'Assistant général, même logique d'exclusion explicite que les 3 actions pseudo ci-dessus.
+    "propose_admin_contact_message",
 }
 
 # Schéma JSON strict envoyé à OpenRouter via response_format — force la forme de la sortie au
@@ -1039,6 +1086,16 @@ ACTIONS_JSON_SCHEMA = {
                             "source_url": {"type": "string"},
                         },
                         "required": ["action", "source_url"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "propose_admin_contact_message"},
+                            "description": {"type": "string"},
+                            "mentions_pseudo": {"type": "boolean"},
+                        },
+                        "required": ["action", "description", "mentions_pseudo"],
                         "additionalProperties": False,
                     },
                 ]
@@ -1312,6 +1369,16 @@ qu'un brouillon détaillé mais inventé.
   message contient aussi un sujet (dans ce cas, appelle les deux actions dans le même lot si
   besoin : la 1re pour la date, la 2e pour le contenu).
 
+- propose_admin_contact_message(description, mentions_pseudo) : UNIQUEMENT disponible sur la
+  page dédiée "Contacter l'administration" (canal citoyen→admin IDENTIFIÉ, le message part sous
+  le VRAI NOM de l'utilisateur — voir le contexte injecté en tête de conversation). Lecture/
+  validation pure, aucune écriture ici — le vrai envoi se fait uniquement après un clic de
+  confirmation explicite sur le texte exact proposé. "mentions_pseudo" (booléen OBLIGATOIRE) :
+  ton propre jugement, à vérifier à CHAQUE appel — passe à true si le brouillon mentionne un
+  pseudo (le sien ou celui d'un tiers), même en passant. Si true, l'action refuse structurellement
+  (available=false) : explique pourquoi et invite à reformuler sans mentionner de pseudo, ne
+  jamais essayer de contourner ce refus.
+
 IMPORTANT sur ces 2 actions pseudo : même quand "available: true", cela signifie SEULEMENT que la
 proposition est libre et jugée appropriée, PAS qu'elle est attribuée. Rien n'est écrit tant que
 l'utilisateur n'a pas cliqué sur le bouton de confirmation qui apparaît dans l'interface. Ne dis
@@ -1432,6 +1499,28 @@ FORUM_REACTION_ACTIONS = {
     "say_user", "get_thread", "propose_reaction", "propose_remarque",
     "report_bug", "request_admin_intervention",
 }
+# Canal citoyen→admin IDENTIFIÉ (2026-08-10, tâche #180, décision Angelo) : page dédiée
+# "Contacter l'administration", scope volontairement réduit au strict minimum — say_user +
+# propose_admin_contact_message, RIEN d'autre (pas même report_bug/request_admin_intervention,
+# qui restent pseudonymes et disponibles ailleurs — ne jamais mélanger les deux canaux dans le
+# même échange, pour que l'utilisateur n'ait aucune ambiguïté sur ce qui reste anonyme ou non).
+CONTACT_ADMIN_ACTIONS = {"say_user", "propose_admin_contact_message"}
+# Contexte injecté UNIQUEMENT en contact_admin_mode (2026-08-10, tâche #180) : rappelle au modèle
+# le rôle inversé du garde-fou anonymat ici — protéger le PSEUDO d'une fuite dans un canal
+# IDENTIFIÉ, symétrique de la vigilance "chez moi/mon jardin" (2026-08-02) qui protège l'identité
+# réelle dans un canal public.
+CONTACT_ADMIN_CONTEXT_BLOCK = (
+    "CONTEXTE : l'utilisateur est sur la page \"Contacter l'administration\" — ce message part "
+    "sous son VRAI NOM (déjà connu de l'administration, résolu automatiquement depuis son "
+    "compte), contrairement à tout le reste de l'app où seul le pseudo est visible. Vigilance "
+    "INVERSÉE de d'habitude : ici, ton rôle est de protéger le PSEUDO de l'utilisateur (et celui "
+    "de tout tiers qu'il pourrait citer) d'une fuite dans ce canal identifié — si le message "
+    "mentionne un pseudo (\"je suis Renard bleu\", \"comme l'a dit Chat gris...\"), "
+    "l'administration obtiendrait une correspondance nom réel↔pseudo qui désanonymiserait "
+    "rétroactivement tout ce que ce pseudo a dit publiquement sur le Forum. Vérifie CHAQUE "
+    "brouillon avant d'appeler propose_admin_contact_message (voir mentions_pseudo, champ "
+    "obligatoire de cette action) — jamais par réflexe, une vraie relecture à chaque fois."
+)
 
 
 def build_tools_description(action_names: set[str] | None = None) -> str:

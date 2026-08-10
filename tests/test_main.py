@@ -928,6 +928,7 @@ def test_chatbot_actions_registry_excludes_commit_actions():
         "list_threads", "get_thread", "propose_opinion", "propose_reaction", "propose_remarque",
         "report_bug", "request_admin_intervention", "list_wiki_pages", "get_wiki_page",
         "search_conseil_municipal", "get_conseil_municipal_document", "list_conseil_municipal_seances",
+        "propose_admin_contact_message",
     }
     for forbidden in (
         "save_summary", "delete_summary", "confirm_publication", "confirm_pseudo",
@@ -5807,3 +5808,238 @@ async def test_admin_identities_list_endpoint_returns_identities(client, admin_u
     assert admin_entry["role"] == "admin"
     assert "filleuls_count" in admin_entry
     assert "created_at" in admin_entry
+
+
+# ---------- Contacter l'administration (2026-08-10, tâche #180, canal identifié) ----------
+
+def test_contact_admin_actions_excluded_from_general_actions():
+    """propose_admin_contact_message ne doit JAMAIS être atteignable depuis l'Assistant général
+    — réservée à contact_admin_mode (page dédiée), même barrière structurelle que les 3 actions
+    pseudo retirées le 2026-08-09."""
+    import chatbot_actions
+
+    assert "propose_admin_contact_message" in chatbot_actions.ACTIONS
+    assert "propose_admin_contact_message" not in chatbot_actions.GENERAL_ACTIONS
+    assert "propose_admin_contact_message" not in chatbot_actions.ONBOARDING_ACTIONS
+    assert "propose_admin_contact_message" not in chatbot_actions.FORUM_REACTION_ACTIONS
+    assert "propose_admin_contact_message" in chatbot_actions.CONTACT_ADMIN_ACTIONS
+
+
+def test_propose_admin_contact_message_rejects_empty():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_admin_contact_message({"description": "   ", "mentions_pseudo": False}, {})
+    assert result["available"] is False
+
+
+def test_propose_admin_contact_message_blocks_when_llm_flags_mentions_pseudo():
+    import chatbot_actions
+
+    result = chatbot_actions.propose_admin_contact_message(
+        {"description": "Je suis Renard bleu et je voudrais signaler...", "mentions_pseudo": True}, {}
+    )
+    assert result["available"] is False
+
+
+def test_propose_admin_contact_message_blocks_via_deterministic_scan_even_if_llm_says_false():
+    """Le scan déterministe (ctx["confirmed_pseudo_words"]) doit bloquer MÊME SI le LLM a mis
+    mentions_pseudo=false par erreur — backstop qui ne dépend pas de son jugement."""
+    import chatbot_actions
+
+    ctx = {"confirmed_pseudo_words": {"renard", "chat gris"}}
+    result = chatbot_actions.propose_admin_contact_message(
+        {"description": "Comme l'a dit Chat gris sur le forum...", "mentions_pseudo": False}, ctx
+    )
+    assert result["available"] is False
+
+
+def test_propose_admin_contact_message_available_when_clean():
+    import chatbot_actions
+
+    ctx = {"confirmed_pseudo_words": {"renard", "hibou"}}
+    result = chatbot_actions.propose_admin_contact_message(
+        {"description": "Je souhaite être recontacté au sujet du prochain conseil municipal.", "mentions_pseudo": False}, ctx
+    )
+    assert result["available"] is True
+    assert result["description"] == "Je souhaite être recontacté au sujet du prochain conseil municipal."
+
+
+def test_message_mentions_confirmed_pseudo_deterministic_scan():
+    import main as main_module
+
+    words = {"renard", "hibou vert"}
+    assert main_module._message_mentions_confirmed_pseudo("je suis Renard et j'ai un souci", words) is True
+    assert main_module._message_mentions_confirmed_pseudo("comme l'a dit hibou vert...", words) is True
+    assert main_module._message_mentions_confirmed_pseudo("bonjour, voici ma demande officielle", words) is False
+
+
+@pytest.mark.anyio
+async def test_submit_admin_contact_message_writes_row_with_real_identity(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    sent_calls = []
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: sent_calls.append((subject, description)) or True)
+    identity_token = main_module._require_identity(logged_in_user["session_token"])
+
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+    try:
+        result = main_module.submit_admin_contact_message(identity_token, "Je souhaite prendre rendez-vous.")
+        assert result["sent"] is True
+        assert len(sent_calls) == 1
+        assert "alice@test.fr" in sent_calls[0][1]
+        with main.db() as conn:
+            row = conn.execute("SELECT nom, email, body FROM admin_contact_messages WHERE email='alice@test.fr'").fetchone()
+        assert row["nom"] == "Alice"
+        assert row["email"] == "alice@test.fr"
+        assert row["body"] == "Je souhaite prendre rendez-vous."
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+
+
+@pytest.mark.anyio
+async def test_submit_admin_contact_message_blocks_pseudo_mention_deterministic(client, logged_in_user):
+    """Revalidation côté serveur (jamais confiance à la seule proposition antérieure) : même si
+    l'appelant contourne propose_admin_contact_message, submit_admin_contact_message refuse."""
+    import main as main_module
+
+    identity_token = main_module._require_identity(logged_in_user["session_token"])
+    main_module.confirm_pseudo(identity_token, "Renard", "bleu")
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+    try:
+        with pytest.raises(ValueError, match="pseudonyme"):
+            main_module.submit_admin_contact_message(identity_token, "Je suis Renard bleu, voici ma demande.")
+        with main.db() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM admin_contact_messages WHERE email='alice@test.fr'").fetchone()
+        assert row["n"] == 0
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(identity_token),))
+
+
+@pytest.mark.anyio
+async def test_submit_admin_contact_message_rate_limited(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: True)
+    identity_token = main_module._require_identity(logged_in_user["session_token"])
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+    try:
+        for i in range(main_module.ADMIN_CONTACT_RATE_LIMIT):
+            main_module.submit_admin_contact_message(identity_token, f"Message {i}")
+        with pytest.raises(ValueError, match="trop de messages"):
+            main_module.submit_admin_contact_message(identity_token, "Message de trop")
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+
+
+@pytest.mark.anyio
+async def test_submit_admin_contact_message_skips_email_for_test_prefix(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    sent_calls = []
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: sent_calls.append(1) or True)
+    identity_token = main_module._require_identity(logged_in_user["session_token"])
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+    try:
+        result = main_module.submit_admin_contact_message(identity_token, "[TEST KHADASBOT] Vérification, jamais un vrai message.")
+        assert result["sent"] is False
+        assert len(sent_calls) == 0
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+
+
+@pytest.mark.anyio
+async def test_admin_contact_confirm_endpoint_end_to_end(client, logged_in_user, monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: True)
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+    try:
+        resp = await client.post("/admin_contact/confirm", json={
+            "session_token": logged_in_user["session_token"],
+            "description": "[TEST KHADASBOT] Vérification endpoint, jamais un vrai message.",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["sent"] is False
+        with main.db() as conn:
+            row = conn.execute("SELECT nom FROM admin_contact_messages WHERE email='alice@test.fr'").fetchone()
+        assert row["nom"] == "Alice"
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE email='alice@test.fr'")
+
+
+@pytest.mark.anyio
+async def test_admin_contact_confirm_endpoint_rejects_pseudo_mention(client, logged_in_user):
+    import main as main_module
+
+    identity_token = main_module._require_identity(logged_in_user["session_token"])
+    main_module.confirm_pseudo(identity_token, "Hibou", "vert")
+    try:
+        resp = await client.post("/admin_contact/confirm", json={
+            "session_token": logged_in_user["session_token"],
+            "description": "Je suis Hibou vert, voici ma demande.",
+        })
+        assert resp.status_code == 400
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM pseudos WHERE debate_token=?", (main_module.compute_debate_token(identity_token),))
+
+
+@pytest.mark.anyio
+async def test_admin_contact_messages_list_rejects_citizen(client, logged_in_user):
+    resp = await client.post("/admin/contact_messages/list", json={"session_token": logged_in_user["session_token"]})
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_admin_contact_messages_list_returns_for_admin(client, admin_user, monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_send_admin_email", lambda subject, description: True)
+    admin_identity_token = main_module._require_identity(admin_user["session_token"])
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_contact_messages WHERE email='admin@test.fr'")
+    try:
+        main_module.submit_admin_contact_message(admin_identity_token, "Message de test via un compte admin.")
+        resp = await client.post("/admin/contact_messages/list", json={"session_token": admin_user["session_token"]})
+        assert resp.status_code == 200
+        messages = resp.json()["messages"]
+        assert any(m["nom"] == "TestAdmin" for m in messages)
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE email='admin@test.fr'")
+
+
+@pytest.mark.anyio
+async def test_chat_v2_contact_admin_mode_restricts_action_scope(client, logged_in_user, monkeypatch):
+    """contact_admin_mode doit restreindre le system_prompt au strict minimum (say_user +
+    propose_admin_contact_message), même priorité la plus haute par rapport à element_block/
+    onboarding — vérifié en interceptant le system_prompt réellement construit."""
+    import main as main_module
+
+    captured_prompts = []
+
+    def fake_run_turn(system_prompt, conversation_messages, ctx, model=None, max_iterations=5, trace=False, response_format=None):
+        captured_prompts.append(system_prompt)
+        return {"replies": ["ok"], "actions_log": [], "error": None}
+
+    monkeypatch.setattr(main_module, "run_turn", fake_run_turn)
+
+    await client.post("/chat/v2", json={
+        "session_token": logged_in_user["session_token"], "message": "bonjour", "contact_admin_mode": True,
+    })
+    prompt = captured_prompts[0]
+    assert "propose_admin_contact_message(description, mentions_pseudo)" in prompt
+    assert "propose_opinion(" not in prompt
+    assert "report_bug(" not in prompt
+    assert "list_threads()" not in prompt

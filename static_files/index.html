@@ -294,6 +294,15 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   </div>
   <div id="identitiesTableWrap"></div>
   <div id="identitiesTreeWrap" class="hidden"></div>
+  <hr>
+  <!-- Messages identifiés (2026-08-10, tâche #180, canal citoyen→admin IDENTIFIÉ) : liste et
+       rendu VOLONTAIREMENT séparés de la section "Signalements" ci-dessus (canal pseudonyme) —
+       jamais le même code de rendu, pour ne jamais risquer de mélanger les deux garanties
+       d'anonymat différentes. -->
+  <h3 style="margin-top:0;">Messages identifiés</h3>
+  <p class="info">Canal "Contacter l'administration" — messages envoyés sous le vrai nom du citoyen (pas anonymes, contrairement aux signalements ci-dessus).</p>
+  <div id="contactMessagesMsg" class="msg"></div>
+  <div id="contactMessagesList"></div>
 </div>
 
 <div class="card hidden" id="pagePublier">
@@ -336,6 +345,25 @@ details.danger-zone[open] > summary::before { content: "▾ "; }
   </div>
 </div>
 
+<!-- Contacter l'administration (2026-08-10, tâche #180, canal citoyen→admin IDENTIFIÉ, décision
+     Angelo relayée par angelobot, voir wiki themes:contact-admin) : entrée dédiée, séparée du
+     Forum/Assistant existant. Ce message part sous le vrai nom du citoyen (contrairement à tout
+     le reste de l'app) — passe obligatoirement par le chatbot, qui vérifie qu'aucun pseudo n'est
+     mentionné avant de proposer la confirmation (voir contact_admin_mode côté /chat/v2). -->
+<div class="card hidden" id="pageContactAdmin">
+  <h2>Contacter l'administration</h2>
+  <p class="info">Ce message part sous ton vrai nom, contrairement au reste du site où seul ton
+    pseudo est visible — utile pour une démarche officielle ou une prise de contact personnelle.
+    L'assistant vérifie qu'aucun pseudo n'est mentionné avant l'envoi, pour ne jamais révéler à
+    l'administration le lien entre ton nom et un pseudo utilisé ailleurs sur le site.</p>
+  <div id="contactAdminMessages" style="max-height:260px; overflow-y:auto; margin-bottom:.6em;"></div>
+  <div id="contactAdminProposal"></div>
+  <div id="contactAdminMsg" class="msg"></div>
+  <textarea id="contactAdminInput" rows="3" placeholder="Ton message…"
+    style="width:100%; box-sizing:border-box; padding:.6em; border:1px solid #ccc; border-radius:4px; font-family:inherit; font-size:1em; resize:vertical;"></textarea>
+  <button class="btn-primary" id="contactAdminSendBtn">Envoyer</button>
+</div>
+
 <script>
 const API = '';
 
@@ -361,11 +389,12 @@ const ROUTES = {
   '/mon-activite': 'MonActivite',
   '/admin/roles': 'Roles',
   '/publier': 'Publier',
+  '/contact-admin': 'ContactAdmin',
 };
 // "Forum" volontairement ABSENT de cette liste : page publique en lecture (2026-07-26, priorité 1
 // développeur), consultable sans compte — seule "MonActivite" (données propres à l'utilisateur
 // connecté) nécessite une session, comme le reste des pages ci-dessous.
-const AUTH_REQUIRED = ['Vote', 'Assistant', 'Parrainer', 'Compte', 'MonActivite', 'Forum', 'Roles', 'Publier'];
+const AUTH_REQUIRED = ['Vote', 'Assistant', 'Parrainer', 'Compte', 'MonActivite', 'Forum', 'Roles', 'Publier', 'ContactAdmin'];
 
 function isLoggedIn() {
   return !!localStorage.getItem('session_token');
@@ -466,6 +495,10 @@ function renderNav() {
     '<a data-link href="/mon-activite">Mon activité</a>' +
     '<a data-link href="/parrainer">Parrainer</a>' +
     '<a data-link href="/compte">Mon compte</a>' +
+    // Contacter l'administration (2026-08-10, tâche #180, décision Angelo) : entrée dédiée,
+    // séparée du Forum/Assistant — visible pour TOUS les citoyens (pas gated par rôle,
+    // contrairement à "Publier"), canal IDENTIFIÉ distinct du reste de l'app pseudonyme.
+    '<a data-link href="/contact-admin">Contacter l\'administration</a>' +
     rolesLink +
     '<span class="spacer"></span>' +
     '<a id="navLogoutLink">Déconnexion</a>';
@@ -522,6 +555,7 @@ function render() {
   }
   else if (pageName === 'Publier') initPublierPage();
   else if (pageName === 'Roles') loadRolesPage();
+  else if (pageName === 'ContactAdmin') initContactAdminPage();
 }
 
 // ---------- accueil ----------
@@ -2175,6 +2209,98 @@ function buildInlineDoubleCheck(box, descNode, questionText, onConfirm) {
   box.appendChild(no);
 }
 
+// ---------- Contacter l'administration (2026-08-10, tâche #180, canal identifié) ----------
+// chatHistory dédié, séparé de celui de l'Assistant (jamais partagé — ce canal ne doit jamais se
+// mélanger avec le reste des échanges pseudonymes, même dans l'affichage local du navigateur).
+let contactAdminHistory = [];
+let contactAdminPending = false;
+function initContactAdminPage() {
+  renderContactAdminMessages();
+}
+function renderContactAdminMessages() {
+  const el = document.getElementById('contactAdminMessages');
+  let html = contactAdminHistory
+    .map(m =>
+      '<p style="margin:.3em 0; background:' + CHAT_PRIVACY_BG + '; border-radius:4px; padding:.4em .5em;">' +
+      '<strong>' + (m.role === 'user' ? 'Toi' : 'Assistant') + ' :</strong> ' +
+      renderMarkdownSafe(m.content) + '</p>'
+    ).join('');
+  html += '<p style="margin:.3em 0; color:#666;">' +
+    '<img src="' + (contactAdminPending ? '/static_files/robot_loading.gif' : '/static_files/robot_idle.png') + '" ' +
+    'alt="" width="20" height="20" style="width:20px; height:20px; vertical-align:middle; margin-right:.4em;">' +
+    '<span style="vertical-align:middle;">' + (contactAdminPending ? "L'assistant réfléchit…" : '') + '</span></p>';
+  el.innerHTML = html;
+  el.scrollTop = el.scrollHeight;
+}
+async function sendContactAdminMessage() {
+  const input = document.getElementById('contactAdminInput');
+  const message = input.value.trim();
+  if (!message) return;
+  const session_token = localStorage.getItem('session_token');
+  if (!session_token) {
+    go('/login');
+    showMsg('loginMsg', 'Ta session a expiré ou a été fermée ailleurs — reconnecte-toi.', 'error');
+    return;
+  }
+  const historyBefore = contactAdminHistory.slice();
+  contactAdminHistory.push({ role: 'user', content: message });
+  contactAdminPending = true;
+  renderContactAdminMessages();
+  input.value = '';
+  try {
+    const data = await api('/chat/v2', {
+      session_token, message, history: historyBefore, contact_admin_mode: true,
+    });
+    if (data.replies) {
+      for (const reply of data.replies) {
+        if (reply && reply.trim() !== '') contactAdminHistory.push({ role: 'assistant', content: reply });
+      }
+    }
+    renderContactAdminProposal(data.actions_log);
+  } catch (e) {
+    showMsg('contactAdminMsg', e.message, 'error');
+  } finally {
+    contactAdminPending = false;
+    renderContactAdminMessages();
+  }
+}
+function renderContactAdminProposal(actionsLog) {
+  const box = document.getElementById('contactAdminProposal');
+  box.innerHTML = '';
+  if (!actionsLog) return;
+  const proposal = [...actionsLog].reverse().find(
+    a => a.action === 'propose_admin_contact_message' && a.result && a.result.available === true
+  );
+  if (!proposal) return;
+  const desc = document.createElement('p');
+  desc.style.cssText = 'margin:0 0 .4em; font-size:.85em;';
+  desc.appendChild(document.createTextNode('Message : ' + proposal.result.description));
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'btn-primary';
+  confirmBtn.textContent = 'Envoyer ce message';
+  confirmBtn.onclick = () => buildInlineDoubleCheck(
+    box, desc, 'Confirmer l\'envoi de ce message, sous ton vrai nom, à l\'administration ?',
+    async () => {
+      const session_token = localStorage.getItem('session_token');
+      await api('/admin_contact/confirm', { session_token, description: proposal.result.description });
+      box.innerHTML = '';
+      contactAdminHistory.push({ role: 'assistant', content: 'Message envoyé à l\'administration.' });
+      renderContactAdminMessages();
+    },
+  );
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-link';
+  cancelBtn.textContent = 'Annuler';
+  cancelBtn.onclick = () => { box.innerHTML = ''; };
+  box.appendChild(desc);
+  box.appendChild(confirmBtn);
+  box.appendChild(cancelBtn);
+}
+document.getElementById('contactAdminSendBtn').addEventListener('click', sendContactAdminMessage);
+document.getElementById('contactAdminInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendContactAdminMessage(); }
+});
+
 // ---------- mon activité (lecture seule, 2026-07-26) ----------
 async function loadMyActivity() {
   const session_token = localStorage.getItem('session_token');
@@ -2619,6 +2745,39 @@ async function loadRolesPage() {
   }
   loadSignalements();
   loadIdentities();
+  loadContactMessages();
+}
+// Messages identifiés (2026-08-10, tâche #180) : lecture seule, jamais de réponse depuis cette
+// page (contrairement aux signalements pseudonymes) — pas demandé, l'administration répond par
+// les canaux existants (email réel déjà reçu à l'envoi, voir submit_admin_contact_message).
+async function loadContactMessages() {
+  const session_token = localStorage.getItem('session_token');
+  const listEl = document.getElementById('contactMessagesList');
+  listEl.innerHTML = '<p class="info">Chargement…</p>';
+  try {
+    const data = await api('/admin/contact_messages/list', { session_token });
+    if (data.messages.length === 0) {
+      listEl.innerHTML = '<p class="info">Aucun message identifié pour l\'instant.</p>';
+      return;
+    }
+    listEl.innerHTML = '';
+    data.messages.forEach(m => listEl.appendChild(renderContactMessage(m)));
+  } catch (e) {
+    listEl.innerHTML = '';
+    showMsg('contactMessagesMsg', e.message, 'error');
+  }
+}
+function renderContactMessage(m) {
+  const block = document.createElement('div');
+  block.className = 'question-block';
+  const header = document.createElement('p');
+  header.style.cssText = 'margin:0 0 .4em; font-weight:600;';
+  header.textContent = m.nom + ' (' + m.email + ') · ' + new Date(m.created_at).toLocaleString('fr-FR');
+  block.appendChild(header);
+  const body = document.createElement('p');
+  body.textContent = m.body;
+  block.appendChild(body);
+  return block;
 }
 // Liste des inscrits (2026-08-10, tâche #175, spec wiki themes:liste-inscrits) : _identitiesData
 // garde la liste PLATE reçue une seule fois (tri + arbre recalculés côté client dessus, jamais

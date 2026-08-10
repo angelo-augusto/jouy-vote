@@ -27,8 +27,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from chatbot_actions import (
-    ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, FORUM_CATEGORIES, FORUM_REACTION_ACTIONS,
-    GENERAL_ACTIONS, ONBOARDING_ACTIONS, PSEUDO_COLORS, RESERVED_CATEGORIES,
+    ALL_CATEGORIES, CHAT_SYSTEM_PROMPT, CONTACT_ADMIN_ACTIONS, CONTACT_ADMIN_CONTEXT_BLOCK,
+    FORUM_CATEGORIES, FORUM_REACTION_ACTIONS, GENERAL_ACTIONS, ONBOARDING_ACTIONS,
+    PSEUDO_COLORS, RESERVED_CATEGORIES,
     _agree_pseudo_display, build_response_format, compute_debate_token,
 )
 from chatbot_executor import build_system_prompt, run_turn
@@ -384,6 +385,26 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_admin_messages_recipient ON admin_messages(recipient_debate_token)"
         )
+        # Canal citoyen→admin IDENTIFIÉ (2026-08-10, tâche #180, demande Angelo — voir wiki
+        # themes:contact-admin) : table VOLONTAIREMENT séparée de bug_reports/admin_intervention_
+        # requests (pseudonymes, debate_token) — jamais fusionnée avec elles ni avec
+        # list_pending_signalements, pour ne jamais risquer un code partagé entre un canal
+        # pseudonyme et un canal identifié. Stocke nom/email RÉELS directement (pas de
+        # debate_token — rien de pseudonyme à corréler ici, c'est le principe même du canal),
+        # résolus depuis identities au moment de l'écriture (voir submit_admin_contact_message).
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS admin_contact_messages (
+                message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nom TEXT NOT NULL,
+                email TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_admin_contact_messages_email ON admin_contact_messages(email)"
+        )
         # Signalement de bug / demande d'intervention admin (2026-07-25, demande développeur) —
         # 2 tables séparées bien que même mécanique (email direct, pas de confirmation utilisateur,
         # rate-limité) : sémantiquement différentes (bug logiciel général vs demande personnelle
@@ -627,6 +648,11 @@ class ChatRequest(BaseModel):
     # seul. N'affecte AUCUN autre outil du chatbot (list_threads, propose_opinion...), uniquement
     # les 2 actions à écriture directe (voir submit_bug_report/submit_admin_intervention_request).
     voice: str | None = None
+    # contact_admin_mode (2026-08-10, tâche #180) : entrée dédiée "Contacter l'administration",
+    # séparée du Forum/Assistant existant (décision Angelo) — quand actif, /chat/v2 restreint le
+    # scope au SEUL propose_admin_contact_message (+ say_user), priorité la plus haute (avant
+    # même element_block/onboarding), car c'est un contexte explicite et sans ambiguïté possible.
+    contact_admin_mode: bool = False
 
 
 class ChatSummarizeRequest(BaseModel):
@@ -758,6 +784,15 @@ class AdminSignalementReplyRequest(BaseModel):
     kind: str
     report_id: int
     body: str
+
+
+class AdminContactConfirmRequest(BaseModel):
+    session_token: str
+    description: str
+
+
+class AdminContactListRequest(BaseModel):
+    session_token: str
 
 
 class MairieDirectoryRequest(BaseModel):
@@ -2041,6 +2076,96 @@ def submit_admin_intervention_request(identity_token: str, description: str, voi
     return {"sent": sent}
 
 
+# Canal citoyen→admin IDENTIFIÉ (2026-08-10, tâche #180, décision Angelo relayée par angelobot,
+# voir wiki themes:contact-admin) : rate-limit dédié, aligné sur ADMIN_INTERVENTION_RATE_LIMIT
+# (sujet personnel/sérieux, volume attendu faible) plutôt que le seuil plus permissif de
+# report_bug (pensé pour du bruit technique fréquent).
+ADMIN_CONTACT_RATE_LIMIT = ADMIN_INTERVENTION_RATE_LIMIT
+
+
+def _recent_admin_contact_count(email: str, window_minutes: int = 60) -> int:
+    """Même principe que _recent_reports_count, mais clé sur l'email (pas de debate_token dans
+    ce canal — voir admin_contact_messages, table volontairement identifiée)."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM admin_contact_messages WHERE email=? AND created_at >= datetime('now', ?)",
+            (email, f"-{window_minutes} minutes"),
+        ).fetchone()
+    return row["cnt"]
+
+
+def _confirmed_pseudo_words() -> set[str]:
+    """Tous les mots de pseudo CONFIRMÉS (table pseudos, jamais pseudo_reservations qui ne
+    contient que les réservations temporaires du picker), en minuscules — source unique pour le
+    scan déterministe anti-fuite (voir _message_mentions_confirmed_pseudo) ET pour le contexte
+    donné au LLM côté chatbot_actions (ctx["confirmed_pseudo_words"])."""
+    with db() as conn:
+        rows = conn.execute("SELECT DISTINCT word FROM pseudos").fetchall()
+    return {r["word"].lower() for r in rows}
+
+
+def _message_mentions_confirmed_pseudo(body: str, pseudo_words: set[str] | None = None) -> bool:
+    """Contrôle déterministe (2026-08-10, tâche #180, décision Angelo+angelobot) : backstop qui
+    ne dépend PAS du jugement du LLM — recherche de sous-chaîne insensible à la casse de TOUS les
+    pseudos confirmés (le sien ou celui d'un tiers, exigence initiale d'Angelo) dans le corps du
+    message. Faux positifs assumés (un mot courant qui recoupe un pseudo existant) : mieux vaut
+    sur-bloquer qu'sous-protéger, même principe que le reste de la modération de pseudo sur ce
+    projet."""
+    words = pseudo_words if pseudo_words is not None else _confirmed_pseudo_words()
+    body_lower = body.lower()
+    return any(word in body_lower for word in words)
+
+
+def submit_admin_contact_message(identity_token: str, description: str) -> dict:
+    """SEUL point d'écriture + d'envoi réel pour le canal citoyen→admin IDENTIFIÉ (2026-08-10,
+    tâche #180) — appelé UNIQUEMENT depuis /admin_contact/confirm (double confirmation décidée
+    par Angelo, jamais un envoi immédiat comme report_bug vu l'enjeu plus élevé : identité réelle
+    + risque de corrélation pseudo). Revalide le scan déterministe ICI, indépendamment de ce que
+    le chatbot a pu vérifier côté propose_admin_contact_message — jamais confiance à une étape
+    antérieure seule pour une décision de ce niveau.
+
+    Contrairement à submit_bug_report/submit_admin_intervention_request : nom/email RÉELS
+    (résolus depuis identities via identity_token, PAS de debate_token dans ce circuit), et
+    l'email envoyé à l'administration inclut délibérément cette identité — c'est tout l'intérêt
+    de ce canal, pas une exception à corriger."""
+    description = description.strip()
+    if not description:
+        raise ValueError("description vide")
+    if _message_mentions_confirmed_pseudo(description):
+        raise ValueError("ce message semble mentionner un pseudonyme — merci de reformuler sans le citer")
+    with db() as conn:
+        row = conn.execute("SELECT nom, email FROM identities WHERE token=?", (identity_token,)).fetchone()
+    if row is None:
+        raise ValueError("identité introuvable")
+    nom, email = row["nom"], row["email"]
+    if _recent_admin_contact_count(email) >= ADMIN_CONTACT_RATE_LIMIT:
+        raise ValueError("trop de messages récents, réessaie dans un moment")
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO admin_contact_messages (nom, email, body) VALUES (?, ?, ?)",
+            (nom, email, description),
+        )
+    if description.upper().startswith(TEST_REPORT_PREFIX):
+        return {"sent": False}
+    sent = _send_admin_email(
+        "Message identifié — jouyvote.fr",
+        f"De : {nom} ({email})\n\n{description}",
+    )
+    return {"sent": sent}
+
+
+def list_admin_contact_messages() -> list[dict]:
+    """Réservé Admin (voir /admin/contact_messages/list) — liste du canal IDENTIFIÉ, jamais
+    fusionnée avec list_pending_signalements (canal pseudonyme) : deux fonctions, deux endpoints,
+    deux sections d'affichage, par sécurité structurelle (voir admin_contact_messages)."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT message_id, nom, email, body, status, created_at FROM admin_contact_messages "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 try:
     from qdrant_client import QdrantClient
     _QDRANT_AVAILABLE = True
@@ -2487,6 +2612,27 @@ def admin_signalements_reply(req: AdminSignalementReplyRequest):
         return resolve_signalement(req.kind, req.report_id, req.body)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/admin_contact/confirm")
+def admin_contact_confirm(req: AdminContactConfirmRequest):
+    """SEUL point d'écriture pour le canal citoyen→admin IDENTIFIÉ (tâche #180) — double
+    confirmation décidée par Angelo : le citoyen relit le texte exact avant ce clic, jamais un
+    envoi immédiat comme report_bug (voir submit_admin_contact_message pour la revalidation
+    complète, y compris le scan déterministe anti-fuite de pseudo)."""
+    identity_token = _require_identity(req.session_token)
+    try:
+        return submit_admin_contact_message(identity_token, req.description)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/admin/contact_messages/list")
+def admin_contact_messages_list(req: AdminContactListRequest):
+    """Réservé Admin — liste du canal IDENTIFIÉ (tâche #180), jamais fusionnée avec
+    /admin/signalements (canal pseudonyme), voir list_admin_contact_messages."""
+    _require_admin(req.session_token)
+    return {"messages": list_admin_contact_messages()}
 
 
 @app.post("/mairie/directory")
@@ -2975,6 +3121,8 @@ def chat_v2(req: ChatRequest):
     )
     if element_block:
         context_block = f"{context_block}\n\n{element_block}".strip()
+    if req.contact_admin_mode:
+        context_block = f"{context_block}\n\n{CONTACT_ADMIN_CONTEXT_BLOCK}".strip()
     # Scope des outils par contexte (2026-08-04, revue Opus indépendante, voir chatbot_actions.
     # build_tools_description) : 2 situations déduites de l'ÉTAT, pas de l'intention devinée — le
     # widget "Réagir" (élément forum ciblé) prime sur l'onboarding si les deux signaux sont
@@ -2984,7 +3132,12 @@ def chat_v2(req: ChatRequest):
     # chatbot_actions.GENERAL_ACTIONS) : action_scope=None (jeu complet SANS exclusion) n'est plus
     # utilisé nulle part ici, précisément pour garantir que le LLM ne peut plus jamais négocier de
     # pseudo, qu'il en ait déjà un ou non.
-    if element_block:
+    # contact_admin_mode (2026-08-10, tâche #180) : priorité la PLUS HAUTE — page dédiée, aucune
+    # ambiguïté possible avec le Forum/l'onboarding, contrairement à element_block qui peut
+    # coexister avec un pseudo pas encore choisi (cas marginal documenté ci-dessus).
+    if req.contact_admin_mode:
+        action_scope = CONTACT_ADMIN_ACTIONS
+    elif element_block:
         action_scope = FORUM_REACTION_ACTIONS
     elif not existing_pseudo:
         action_scope = ONBOARDING_ACTIONS
@@ -3013,6 +3166,11 @@ def chat_v2(req: ChatRequest):
         # request pour la justification de l'exception "écriture directe par le LLM").
         "report_bug_fn": lambda description: submit_bug_report(identity_token, description, req.voice),
         "request_admin_intervention_fn": lambda description: submit_admin_intervention_request(identity_token, description, req.voice),
+        # contact_admin_mode (2026-08-10, tâche #180) : source unique aussi pour le scan
+        # déterministe côté serveur au moment de l'écriture réelle (submit_admin_contact_message)
+        # — ici juste passé en LECTURE au chatbot pour que propose_admin_contact_message puisse
+        # donner un retour immédiat sans attendre la confirmation finale.
+        "confirmed_pseudo_words": _confirmed_pseudo_words(),
         # Accès lecture au wiki citoyen (2026-07-26) : index (donnée statique, pas de coût réseau)
         # + callable pour la lecture d'une page précise à la demande (network call, jamais fait
         # d'office pour toutes les pages sur chaque tour — voir fetch_wiki_page_raw).
@@ -3539,7 +3697,7 @@ def results(question_id: int):
 # (accessibles seulement via un lien reçu par email) mais ont besoin du même traitement.
 _SPA_ROUTES = [
     "/", "/login", "/vote", "/assistant", "/parrainer", "/compte", "/register", "/reset-password",
-    "/forum", "/mon-activite", "/admin/roles", "/publier",
+    "/forum", "/mon-activite", "/admin/roles", "/publier", "/contact-admin",
 ]
 for _route in _SPA_ROUTES:
     app.add_api_route(
