@@ -17,10 +17,22 @@ toujours chiffrée dès qu'elle sort de `/mnt/stockage/jouyvote/data`.
    décompresse, `PRAGMA integrity_check`, compte les lignes de `identities` — si quoi que ce soit
    échoue, l'archive produite est supprimée (jamais gardée si non restaurable) et une alerte part
    sur le Salon KhadasBot (Matrix).
-5. Rotation : garde 30 jours d'archives, jamais moins d'une même si toutes sont plus vieilles.
+5. **Envoi vers Cloudflare R2** (2026-08-12, décision Angelo — voir section ci-dessous) : bucket
+   `jouy-vote`, identifiants dans `/mnt/stockage/jouyvote/.r2_credentials.env` (permissions 600,
+   jamais dans le repo).
+6. **Test de restauration DEPUIS R2** (même exigence que le test local, pas une confiance
+   aveugle en un "upload sans erreur") : télécharge l'objet qu'on vient d'envoyer, déchiffre,
+   décompresse, `PRAGMA integrity_check`, compare le comptage d'`identities` à l'original. Si ça
+   diverge, alerte immédiate — l'objet reste sur R2 pour inspection plutôt que d'être supprimé en
+   silence (contrairement à l'archive locale, où une restauration ratée entraîne la suppression).
+7. Rotation : garde 30 jours d'archives, jamais moins d'une même si toutes sont plus vieilles —
+   appliquée séparément en local ET sur R2.
 
-Sorties dans `/mnt/stockage/jouyvote/backups/` (permissions 700/600), log dans
-`logs/backup.log`.
+Sorties locales dans `/mnt/stockage/jouyvote/backups/` (permissions 700/600), log dans
+`logs/backup.log`. Dépendance `boto3` (client S3, R2 est compatible) installée dans un venv
+dédié `.venv-backup/` (jamais dans le python système, Ubuntu 24.04 bloque `pip install` hors
+venv sans `--break-system-packages`) — le cron pointe directement vers
+`.venv-backup/bin/python3`.
 
 **Limite de sécurité assumée, à connaître** : la passphrase vit sur la même machine que la base.
 Ce chiffrement protège la donnée une fois SORTIE du Khadas (ex: destination mal configurée,
@@ -40,26 +52,17 @@ machine, donc hors de portée d'une panne disque locale. Le fichier local reste 
 par le script (pas de changement de pipeline), la copie chez Angelo n'est qu'un filet de secours
 pour la restauration en cas de perte totale du Khadas.
 
-## Ce qui manque encore : une vraie destination HORS MACHINE
+## Destination hors machine : Cloudflare R2 (branché le 2026-08-12)
 
-À ce stade, les archives chiffrées restent sur `/mnt/stockage` — **même disque physique que la
-base elle-même** (`/dev/sda5`). Ça protège contre une erreur applicative (mauvaise migration,
-suppression accidentelle) mais PAS contre une panne de ce disque, qui emporterait base ET
-sauvegardes ensemble. Pour la vraie redondance demandée, il faut une 2e destination sur un autre
-support physique.
+Angelo a tranché : Cloudflare R2 (10 Go/mois gratuits, zéro coût de sortie, compte Cloudflare
+déjà existant pour le tunnel jouyvote — pas de nouveau service à gérer), plutôt que rsync vers
+`dell-papa` (hors ligne 22 jours au moment de la décision, pas fiable) ou Backblaze B2.
 
-Vérifié le 2026-08-11 : pas de solution déjà en place à réutiliser sur cette machine (pas de
-`rclone`, pas de compte cloud configuré). Sur le tailnet existant, `dell-papa` (le Dell) est
-hors ligne depuis 22 jours au moment de cette vérification — pas une destination fiable pour un
-push automatisé tant qu'il n'est pas remis en ligne durablement.
+R2 est compatible S3 — branché avec `boto3` (pas de `rclone`/`awscli` système, qui aurait
+nécessité `sudo` sur cette machine en environnement Python "externally-managed"). Identifiants
+R2 (Account ID, endpoint, bucket, Access Key ID, Secret Access Key) reçus d'Angelo via Matrix le
+2026-08-12, stockés dans `/mnt/stockage/jouyvote/.r2_credentials.env` (600, hors repo).
 
-**Décision à prendre par Angelo avant de coder cette 2e étape** (documenté plutôt que tranché
-seul, comme convenu pour les décisions structurantes) :
-- Option A — rsync opportuniste vers `dell-papa` via Tailscale, dès qu'il est en ligne (gratuit,
-  pas de nouveau compte, mais fiabilité dépendante de la disponibilité du Dell).
-- Option B — stockage cloud privé chiffré (ex. Backblaze B2, palier gratuit ~10 Go, largement
-  suffisant pour cette base) — nécessite qu'Angelo crée le compte et partage une clé API (canal
-  Matrix, même pratique que pour le token GitHub du 10/08).
-
-Les deux sont compatibles avec le pipeline déjà en place : il suffirait d'ajouter un envoi de
-l'archive déjà chiffrée (`rsync`/`rclone`) juste après l'étape 4 ci-dessus, rien à reconstruire.
+Testé de bout en bout à plusieurs reprises, y compris en environnement cron minimal (`env -i`) :
+upload réel, téléchargement de vérification, intégrité + comptage confirmés identiques à
+l'original des deux côtés (local et R2).
