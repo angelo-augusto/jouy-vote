@@ -29,6 +29,17 @@ lui-même, qui aurait accès à la passphrase en même temps qu'à la base. Une 
 dans ce cas nécessiterait de chiffrer avec la clé PUBLIQUE d'Angelo (lui seul détient la clé
 privée, ailleurs) — pas fait pour l'instant, à revisiter si souhaité.
 
+**Trou corrigé le 2026-08-12 (repéré par Angelo en relisant ce document, transmis par
+angelobot)** : la passphrase vivait UNIQUEMENT sur `/mnt/stockage/.backup_passphrase` —
+même disque physique que la base elle-même. En cas de panne de ce disque précis (exactement le
+scénario que la sauvegarde hors machine est censée couvrir), les archives chiffrées sur R2
+survivraient physiquement mais deviendraient indéchiffrables pour toujours : la seule clé aurait
+disparu avec le reste. Corrigé en donnant une copie de la passphrase à Angelo (canal Matrix
+direct, 2026-08-12), à conserver dans son gestionnaire de mots de passe personnel — hors de cette
+machine, donc hors de portée d'une panne disque locale. Le fichier local reste la source utilisée
+par le script (pas de changement de pipeline), la copie chez Angelo n'est qu'un filet de secours
+pour la restauration en cas de perte totale du Khadas.
+
 ## Ce qui manque encore : une vraie destination HORS MACHINE
 
 À ce stade, les archives chiffrées restent sur `/mnt/stockage` — **même disque physique que la
