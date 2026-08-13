@@ -795,6 +795,12 @@ class AdminContactListRequest(BaseModel):
     session_token: str
 
 
+class AdminContactMessageReplyRequest(BaseModel):
+    session_token: str
+    message_id: int
+    body: str
+
+
 class MairieDirectoryRequest(BaseModel):
     session_token: str
 
@@ -1927,19 +1933,21 @@ def send_reset_email(to_email: str, reset_token: str) -> bool:
         return False
 
 
-def _send_admin_email(subject: str, description: str) -> bool:
-    """Envoi générique vers ADMIN_BUG_EMAIL (même pattern Brevo que send_reset_email) — utilisé
-    par report_bug ET request_admin_intervention (2026-07-25, demande développeur : même
-    mécanique pour les deux). Le corps ne contient QUE la description — jamais d'email, de
-    session_token ou d'identity_token, même si l'appelant les avait sous la main."""
-    if not BREVO_API_KEY or not ADMIN_BUG_EMAIL:
+def _send_generic_email(to_email: str, subject: str, html_content: str) -> bool:
+    """Envoi Brevo vers un destinataire ARBITRAIRE (2026-08-13, tâche #183, extrait de
+    _send_admin_email pour être réutilisable) — contrairement à _send_admin_email (destinataire
+    TOUJOURS ADMIN_BUG_EMAIL) et send_reset_email (contenu figé), celle-ci sert à répondre au
+    canal identifié (admin_contact_messages), où l'email réel du citoyen est déjà connu et
+    stocké en clair (voir reply_admin_contact_message) — jamais utilisée pour un email dont le
+    destinataire proviendrait d'une entrée utilisateur non validée."""
+    if not BREVO_API_KEY:
         return False
     body = json.dumps(
         {
             "sender": {"email": BREVO_SENDER_EMAIL, "name": "Jouy Vote Citoyen"},
-            "to": [{"email": ADMIN_BUG_EMAIL}],
+            "to": [{"email": to_email}],
             "subject": subject,
-            "htmlContent": f"<p>{description}</p>",
+            "htmlContent": f"<p>{html_content}</p>",
         }
     ).encode()
     req = urllib.request.Request(
@@ -1957,6 +1965,16 @@ def _send_admin_email(subject: str, description: str) -> bool:
             return 200 <= resp.status < 300
     except urllib.error.URLError:
         return False
+
+
+def _send_admin_email(subject: str, description: str) -> bool:
+    """Envoi générique vers ADMIN_BUG_EMAIL — utilisé par report_bug ET request_admin_
+    intervention (2026-07-25, demande développeur : même mécanique pour les deux). Le corps ne
+    contient QUE la description — jamais d'email, de session_token ou d'identity_token, même si
+    l'appelant les avait sous la main."""
+    if not ADMIN_BUG_EMAIL:
+        return False
+    return _send_generic_email(ADMIN_BUG_EMAIL, subject, description)
 
 
 def _recent_reports_count(table: str, debate_token: str, window_minutes: int = 60) -> int:
@@ -2164,6 +2182,31 @@ def list_admin_contact_messages() -> list[dict]:
             "ORDER BY created_at DESC"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def reply_admin_contact_message(message_id: int, reply_body: str) -> dict:
+    """SEUL point de réponse pour le canal identifié (tâche #183, gap signalé par Angelo en
+    conditions réelles le 2026-08-13 : reçu un vrai message via "Contacter l'administration",
+    aucun moyen de répondre depuis l'app). Contrairement à resolve_signalement (canal pseudonyme,
+    répond via admin_messages/debate_token), ce canal n'a JAMAIS stocké de debate_token — la
+    réponse part donc en email RÉEL vers l'adresse déjà connue en clair sur la ligne (c'est le
+    principe même de ce canal identifié, pas une exception). Marque 'traite' dans le même geste,
+    même si l'envoi échoue (l'admin garde une trace qu'il a traité, même en cas de souci Brevo
+    passager — cohérent avec resolve_signalement qui ne fait pas non plus dépendre le marquage
+    du succès d'envoi)."""
+    reply_body = reply_body.strip()
+    if not reply_body:
+        raise ValueError("réponse vide")
+    with db() as conn:
+        row = conn.execute(
+            "SELECT email FROM admin_contact_messages WHERE message_id=?", (message_id,)
+        ).fetchone()
+    if row is None:
+        raise ValueError("message introuvable")
+    sent = _send_generic_email(row["email"], "Réponse de l'administration — jouyvote.fr", reply_body)
+    with db() as conn:
+        conn.execute("UPDATE admin_contact_messages SET status='traite' WHERE message_id=?", (message_id,))
+    return {"sent": sent, "status": "traite"}
 
 
 try:
@@ -2444,7 +2487,8 @@ WIKI_CITIZEN_PAGES = {
     "themes:anonymat": "L'anonymat sur jouyvote.fr — principes et garanties.",
     "themes:chatbot": "Pourquoi un chatbot citoyen, comment il aide à formuler une opinion.",
     "themes:consensus": "Identification des pôles d'opinion et recherche de consensus.",
-    "themes:pseudonyme": "Fonctionnement du pseudonyme (mot+couleur) et pourquoi il est stable.",
+    "themes:pseudonyme": "Fonctionnement du pseudonyme (mot+couleur), changement de pseudo, et "
+                         "messages privés (MP) : qui peut en envoyer/recevoir, admin↔citoyen.",
     "themes:representants": "Les représentants et leur rôle sur la plateforme.",
     "themes:representation": "Système de parrainage et vérification de résidence.",
     "themes:ressources": "Ressources informatives disponibles sur le site.",
@@ -2633,6 +2677,17 @@ def admin_contact_messages_list(req: AdminContactListRequest):
     /admin/signalements (canal pseudonyme), voir list_admin_contact_messages."""
     _require_admin(req.session_token)
     return {"messages": list_admin_contact_messages()}
+
+
+@app.post("/admin/contact_messages/reply")
+def admin_contact_messages_reply(req: AdminContactMessageReplyRequest):
+    """SEUL endpoint qui répond au canal identifié (tâche #183) — réservé Admin, voir
+    reply_admin_contact_message pour la justification de l'envoi en email réel."""
+    _require_admin(req.session_token)
+    try:
+        return reply_admin_contact_message(req.message_id, req.body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/mairie/directory")

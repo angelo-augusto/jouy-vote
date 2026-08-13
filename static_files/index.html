@@ -2756,12 +2756,15 @@ async function loadContactMessages() {
   listEl.innerHTML = '<p class="info">Chargement…</p>';
   try {
     const data = await api('/admin/contact_messages/list', { session_token });
-    if (data.messages.length === 0) {
-      listEl.innerHTML = '<p class="info">Aucun message identifié pour l\'instant.</p>';
+    // Filtre "traite" (2026-08-13, tâche #183) : même principe que loadSignalements — un
+    // message répondu disparaît de la liste, pas la peine de l'afficher indéfiniment.
+    const pending = data.messages.filter(m => m.status !== 'traite');
+    if (pending.length === 0) {
+      listEl.innerHTML = '<p class="info">Aucun message identifié en attente.</p>';
       return;
     }
     listEl.innerHTML = '';
-    data.messages.forEach(m => listEl.appendChild(renderContactMessage(m)));
+    pending.forEach(m => listEl.appendChild(renderContactMessage(m)));
   } catch (e) {
     listEl.innerHTML = '';
     showMsg('contactMessagesMsg', e.message, 'error');
@@ -2777,6 +2780,30 @@ function renderContactMessage(m) {
   const body = document.createElement('p');
   body.textContent = m.body;
   block.appendChild(body);
+  // Répondre (2026-08-13, tâche #183, gap signalé par Angelo en conditions réelles) : envoie un
+  // vrai email au citoyen (adresse déjà connue en clair, propre à ce canal identifié) et marque
+  // le message traité — même geste que renderSignalement, endpoint différent.
+  const textarea = document.createElement('textarea');
+  textarea.rows = 2;
+  textarea.placeholder = 'Réponse au citoyen (email réel)…';
+  textarea.style.cssText = 'width:100%; padding:.5em; border:1px solid #ccc; border-radius:4px; font-family:inherit; font-size:.9em; margin:.4em 0;';
+  block.appendChild(textarea);
+  const btn = document.createElement('button');
+  btn.className = 'btn-primary';
+  btn.textContent = 'Répondre (marque traité)';
+  btn.addEventListener('click', async () => {
+    const body2 = textarea.value.trim();
+    if (!body2) { showMsg('contactMessagesMsg', 'Réponse vide.', 'error'); return; }
+    const session_token = localStorage.getItem('session_token');
+    try {
+      await api('/admin/contact_messages/reply', { session_token, message_id: m.message_id, body: body2 });
+      showMsg('contactMessagesMsg', 'Réponse envoyée par email, message marqué traité.', 'success');
+      loadContactMessages();
+    } catch (e) {
+      showMsg('contactMessagesMsg', e.message, 'error');
+    }
+  });
+  block.appendChild(btn);
   return block;
 }
 // Liste des inscrits (2026-08-10, tâche #175, spec wiki themes:liste-inscrits) : _identitiesData

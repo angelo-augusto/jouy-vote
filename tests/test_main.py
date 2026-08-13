@@ -6020,6 +6020,118 @@ async def test_admin_contact_messages_list_returns_for_admin(client, admin_user,
             conn.execute("DELETE FROM admin_contact_messages WHERE email='admin@test.fr'")
 
 
+def test_reply_admin_contact_message_sends_real_email_and_marks_treated(monkeypatch):
+    """2026-08-13 (tâche #183, gap signalé par Angelo en conditions réelles) : répondre à un
+    message identifié envoie un email RÉEL vers l'adresse déjà connue sur la ligne (contrairement
+    au canal pseudonyme, aucun debate_token n'est disponible ici) et marque 'traite'."""
+    import main as main_module
+
+    sent_calls = []
+    monkeypatch.setattr(
+        main_module, "_send_generic_email",
+        lambda to_email, subject, html: sent_calls.append((to_email, subject, html)) or True,
+    )
+    with main.db() as conn:
+        conn.execute("DELETE FROM admin_contact_messages WHERE email='citoyen-reply-test@example.com'")
+        cur = conn.execute(
+            "INSERT INTO admin_contact_messages (nom, email, body) VALUES (?, ?, ?)",
+            ("Test Citoyen", "citoyen-reply-test@example.com", "Question sur le conseil municipal."),
+        )
+        message_id = cur.lastrowid
+    try:
+        result = main_module.reply_admin_contact_message(message_id, "Voici la réponse à ta question.")
+        assert result == {"sent": True, "status": "traite"}
+        assert len(sent_calls) == 1
+        assert sent_calls[0][0] == "citoyen-reply-test@example.com"
+        assert "Voici la réponse" in sent_calls[0][2]
+        with main.db() as conn:
+            row = conn.execute("SELECT status FROM admin_contact_messages WHERE message_id=?", (message_id,)).fetchone()
+        assert row["status"] == "traite"
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE message_id=?", (message_id,))
+
+
+def test_reply_admin_contact_message_rejects_empty_body():
+    import main as main_module
+
+    with main.db() as conn:
+        cur = conn.execute(
+            "INSERT INTO admin_contact_messages (nom, email, body) VALUES (?, ?, ?)",
+            ("Test Citoyen 2", "citoyen-reply-test2@example.com", "Autre question."),
+        )
+        message_id = cur.lastrowid
+    try:
+        with pytest.raises(ValueError, match="vide"):
+            main_module.reply_admin_contact_message(message_id, "   ")
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE message_id=?", (message_id,))
+
+
+def test_reply_admin_contact_message_rejects_unknown_id():
+    import main as main_module
+
+    with pytest.raises(ValueError, match="introuvable"):
+        main_module.reply_admin_contact_message(999999, "Réponse.")
+
+
+@pytest.mark.anyio
+async def test_admin_contact_messages_reply_endpoint_end_to_end(client, admin_user, monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_send_generic_email", lambda to_email, subject, html: True)
+    with main.db() as conn:
+        cur = conn.execute(
+            "INSERT INTO admin_contact_messages (nom, email, body) VALUES (?, ?, ?)",
+            ("Test Citoyen 3", "citoyen-reply-test3@example.com", "Encore une question."),
+        )
+        message_id = cur.lastrowid
+    try:
+        resp = await client.post("/admin/contact_messages/reply", json={
+            "session_token": admin_user["session_token"], "message_id": message_id, "body": "Réponse envoyée.",
+        })
+        assert resp.status_code == 200
+        assert resp.json() == {"sent": True, "status": "traite"}
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE message_id=?", (message_id,))
+
+
+@pytest.mark.anyio
+async def test_admin_contact_messages_reply_rejects_citizen(client, logged_in_user):
+    resp = await client.post("/admin/contact_messages/reply", json={
+        "session_token": logged_in_user["session_token"], "message_id": 1, "body": "Réponse.",
+    })
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_admin_contact_messages_list_excludes_treated(client, admin_user, monkeypatch):
+    """2026-08-13 (tâche #183) : même filtre que loadSignalements côté frontend, vérifié aussi
+    au niveau donnée — un message répondu (status='traite') doit toujours être présent dans
+    list_admin_contact_messages (historique complet), le filtre d'affichage est une décision
+    frontend, pas une exclusion serveur."""
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "_send_generic_email", lambda to_email, subject, html: True)
+    with main.db() as conn:
+        cur = conn.execute(
+            "INSERT INTO admin_contact_messages (nom, email, body) VALUES (?, ?, ?)",
+            ("Test Citoyen 4", "citoyen-reply-test4@example.com", "Question traitée."),
+        )
+        message_id = cur.lastrowid
+    try:
+        main_module.reply_admin_contact_message(message_id, "Traité.")
+        resp = await client.post("/admin/contact_messages/list", json={"session_token": admin_user["session_token"]})
+        messages = resp.json()["messages"]
+        treated = next(m for m in messages if m["message_id"] == message_id)
+        assert treated["status"] == "traite"
+    finally:
+        with main.db() as conn:
+            conn.execute("DELETE FROM admin_contact_messages WHERE message_id=?", (message_id,))
+
+
 @pytest.mark.anyio
 async def test_chat_v2_contact_admin_mode_restricts_action_scope(client, logged_in_user, monkeypatch):
     """contact_admin_mode doit restreindre le system_prompt au strict minimum (say_user +
